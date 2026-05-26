@@ -6,6 +6,110 @@ itself is versioned separately. See [SPEC.md](./SPEC.md).
 Format roughly follows [Keep a Changelog](https://keepachangelog.com),
 ordered newest-first.
 
+## 2.1.0. Verbatim capture + hosted-mode hardening
+
+The hosted-mode shake-down release. 2.0.0 shipped the multi-tenant
+substrate; this is the polish pass that turned it from "works for me"
+into "works for a stranger who finds it on Hacker News." Trusted-input
+capture, repo-binding safety nets, welcome-wizard fixes, and the
+session-secret hard-error so a misconfigured hosted deploy refuses to
+boot instead of silently leaking session cookies.
+
+- **`verbatim` capture mode**. New
+  `POST /owner/capture/verbatim` writes a user-authored markdown file
+  (with YAML frontmatter) to `wiki/<section>/<slug>.md` byte-for-byte
+  preserved. **Tier from frontmatter is respected** — the one capture
+  path where the LLM-output `tier: private` floor doesn't apply,
+  because the user authored the bytes directly. Conflict-safe by
+  default (existing slug → `-verbatim-<today>.md` suffix); explicit
+  `force_overwrite` for in-place iteration. New `verbatim` tab on
+  `/capture` with live preview of resolved path, tier, and a
+  prominent red warning for `tier: public`. Backend pytest + frontend
+  vitest suites lock down the contract (frontmatter validation,
+  conflict suffixing, tier respect, byte-exact preservation).
+- **`from LLM` structured-JSON capture**. New
+  `POST /owner/capture/structured` commits pre-structured pages
+  produced by an external ChatGPT / Claude / Cursor session. Public
+  spec at `GET /llm-writeback-spec` teaches the LLM the exact JSON
+  shape. Tier force-clamped to `private` (LLM-generated, untrusted).
+  New `from LLM` tab on `/capture` with prompt-template generator and
+  preview-before-commit.
+- **URL scrape reused post-onboarding**.
+  `POST /onboarding/import-url` is now also surfaced as the `url` tab
+  on `/capture` — paste any public URL, drafter produces wiki pages
+  citing the raw scrape.
+- **Direct-LLM drafter fallback**. Hosted mode (where Puppetmaster
+  isn't on PATH) now falls back to a direct Anthropic/OpenAI call
+  (`backend/app/direct_drafter.py`) instead of silently no-op'ing the
+  ingest toggle. Anthropic primary with model fallback chain, OpenAI
+  fallback, then a clear `no_llm_configured` error if neither key is
+  set. Same on-disk page format as the Puppetmaster path so wiki
+  consumers don't see a difference.
+- **Welcome wizard polish**. `/welcome` now auto-detects fresh-signup
+  vs. populated-repo vs. mid-migration and routes appropriately,
+  with a dynamic step badge ("Step 1 of 2 — Connect GitHub", "One-time
+  upgrade", "Step 2 of 2 — Seed your wiki", or no badge for the
+  bouncer view). Post-connect `/auth/me` re-fetch refreshes
+  `pageCount` so the "AlreadyOnboarded" bouncer triggers correctly
+  when the user connects to a repo that's already populated.
+- **Switch Wiki Repo modal**. New owner-console action: type-to-confirm
+  rebinding of an existing tenant to a different GitHub repo. Built
+  to recover the failure mode where a user accidentally bound their
+  tenant to the product's source repo at onboarding (we now also
+  guard against that at intake — see below). Clears stale sync
+  errors after a successful rebind.
+- **Product-source-repo guard**. The onboarding `/onboarding/connect-repo`
+  endpoint now refuses to bind a tenant to a repo whose tree
+  resembles the product's own source code (presence of `backend/`
+  and `frontend/` dirs at the root). Catches the foot-gun where a
+  user clones the product repo to play with it and then sees their
+  hosted instance try to push wiki pages into it.
+- **Force-Reset modal with preview**. The "force pull" action in the
+  GitHub sync panel now requires type-to-confirm (matches the danger-
+  zone delete UX) AND first calls a new
+  `GET /owner/sync/preview-force-reset` endpoint that returns the
+  exact list of local files that would be lost. Modal renders the
+  list inline so users see what they're about to nuke before
+  confirming.
+- **Personal LLM URL flow**. New owner-console panel mints a
+  `private`-tier share token and constructs a single URL the owner
+  pastes into ChatGPT / Claude / Cursor / Gemini. The LLM fetches
+  the URL, gets a tenant-scoped briefing covering everything the
+  owner sees. Companion "Copy full briefing" button inlines the
+  wiki content for LLMs whose browse tool is unreliable (e.g.
+  ChatGPT on freshly-minted URLs).
+- **Capture history page**. New `/owner/captures` frontend route lists
+  every raw capture file with kind / size / preview, plus delete and
+  reingest actions. Backed by `GET /owner/raw`, `DELETE
+  /owner/raw/{path}`, `POST /owner/raw/{path}/reingest`, and
+  `POST /owner/raw/bulk` for multi-select operations.
+- **Hosted-mode safety rails**:
+  - `SESSION_SECRET` is now a hard requirement at startup in
+    hosted mode — the server refuses to boot if it's unset (was
+    previously a soft-default with a warning, which silently
+    weakened session security).
+  - `tenant.json` is now in `.gitignore` AND a startup hook re-
+    ensures it's gitignored on every boot, so a user-supplied wiki
+    repo can't accidentally commit OAuth tokens. Existing git
+    history was scrubbed of any `tenant.json` blobs that landed
+    before the fix via `git filter-repo`.
+  - `render.yaml` now uses `sync: false` on `SINGLE_TENANT_MODE`
+    instead of `value: "1"`. Previously the blueprint default was
+    stomping dashboard overrides on redeploy, silently flipping
+    the hosted multi-tenant service back to single-tenant mode.
+- **Sign-out fix**. `/auth/logout` no longer renders an error toast on
+  the way out; cleanly redirects to the landing page.
+- **CI install fix**. `.github/workflows/ci.yml` now installs
+  `requirements-dev.txt` alongside `requirements.txt`, so backend
+  tests can find pytest without a `ModuleNotFoundError` on first
+  CI run.
+
+Test coverage expanded across all three suites (backend pytest,
+frontend vitest, Playwright E2E) — every shipping behavior above
+landed with regression tests. Single-tenant deploy behavior remains
+byte-for-byte unchanged: existing OSS deploys upgrade in place
+without touching env vars.
+
 ## 2.0.0. Hosted multi-tenant launch
 
 The pivot. Portable LLM Wiki ships as a hosted product at

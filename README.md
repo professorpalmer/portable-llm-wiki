@@ -47,11 +47,37 @@ Cursor, Claude, ChatGPT, Gemini, or a local model can all read the
   the wiki drafts entities, concepts, and cross-references for you,
   with a semantic lint swarm to catch contradictions and missing pages.
 
-**Live demo:** [portablellm.wiki](https://portablellm.wiki). Meet Avery Chen, a fictional founding engineer at a synthetic-biology startup.
+**Live at [portablellm.wiki](https://portablellm.wiki)**: a hosted
+multi-tenant deploy of this same repo. Sign in with GitHub and your
+wiki is live at `portablellm.wiki/<your-github-login>` in under a
+minute. Or browse [`/avery`](https://portablellm.wiki/avery) — Avery
+Chen, a fictional founding engineer at a synthetic-biology startup —
+to see what a populated wiki looks like before signing up.
 
-## Three ways to run your own
+## Three ways to use it
 
-### Cloud (recommended. ~60 seconds)
+### 1. Hosted — sign up (zero deploy, ~30 seconds)
+
+Go to [portablellm.wiki](https://portablellm.wiki) and click **Sign in
+with GitHub**. The hosted backend provisions a tenant on your GitHub
+login, creates (or connects to) a content repo on your GitHub account,
+and walks you through a 2-step welcome wizard:
+
+1. Connect your wiki repo (we recommend a new private repo named
+   `my-portable-llm-wiki`; the wizard offers to create it for you).
+2. Seed it — paste a bio, scrape a portfolio URL, or skip and start
+   blank.
+
+**Your content lives on YOUR GitHub.** The hosted backend pushes every
+edit back to your repo on a debounce, so if you ever want to walk
+away, your wiki is already a markdown corpus you own and can host
+yourself. See [LEAVING.md](LEAVING.md) for the handoff path.
+
+This is the right path if you want a personal LLM context to paste
+into ChatGPT / Claude / Cursor in 30 seconds without thinking about
+Render or Docker.
+
+### 2. Your own cloud deploy (~60 seconds)
 
 Hit the **Deploy to Render** + **Deploy to Vercel** buttons above.
 Render provisions the backend from `render.yaml`; Vercel deploys the
@@ -59,28 +85,14 @@ frontend from `frontend/vercel.json`. Render auto-generates your
 `OWNER_TOKEN` and prompts you for `WIKI_GIT_REMOTE` (your own private
 content repo).
 
+This is the right path if you want your own infrastructure (custom
+domain, audit logs, billing on your card) without managing servers.
+You get the same OSS code that runs at portablellm.wiki, in
+single-tenant mode (`SINGLE_TENANT_MODE=1`).
+
 → Step-by-step in [scripts/deploy.md](scripts/deploy.md).
 
-### Local (npx scaffolder)
-
-```bash
-npx create-portable-llm-wiki my-wiki
-cd my-wiki   # → push to a private GitHub repo, then hit Deploy to Render
-```
-
-Or, to run the dev servers locally first:
-
-```bash
-git clone https://github.com/professorpalmer/portable-llm-wiki
-cd portable-llm-wiki
-./scripts/init.sh             # generates OWNER_TOKEN, prompts for wiki location
-./scripts/dev-backend.sh      # terminal 1
-(cd frontend && npm run dev)  # terminal 2
-```
-
-→ Details in [scripts/deploy.md → Local development](scripts/deploy.md#2-local-development-npx-scaffolder).
-
-### Self-host (Docker)
+### 3. Local / self-host (Docker or `init.sh`)
 
 For full self-hosting (your laptop, a Mac mini, a $5 VPS), the repo
 ships a working `docker-compose.yml` that brings up both the backend
@@ -96,6 +108,23 @@ docker compose up --build
 
 By default the compose stack mounts the bundled `wiki-demo/` so you can
 see what works before you replace it with your own markdown folder.
+
+For dev work (hot-reload, no Docker), use the `init.sh` path instead:
+
+```bash
+git clone https://github.com/professorpalmer/portable-llm-wiki
+cd portable-llm-wiki
+./scripts/init.sh             # generates OWNER_TOKEN, prompts for wiki location
+./scripts/dev-backend.sh      # terminal 1
+(cd frontend && npm run dev)  # terminal 2
+```
+
+Or scaffold a fresh content repo:
+
+```bash
+npx create-portable-llm-wiki my-wiki
+cd my-wiki   # → push to a private GitHub repo, then hit Deploy to Render
+```
 
 For backend-only or custom orchestration:
 
@@ -178,13 +207,30 @@ Detailed walkthrough in [scripts/deploy.md](scripts/deploy.md).
 - **Backend**: FastAPI service that reads markdown, exposes a
   vendor-neutral HTTP API, enforces a 4-tier auth model (public /
   recruiter / friend / private), and optionally pushes every mutation
-  back to a git remote for free-tier persistence. Render-ready
-  Dockerfile, healthchecked, 100+ pytest tests on the
-  security-critical paths.
-- **Frontend**: Next.js + Tailwind app for browsing, querying,
-  in-browser page editing, frictionless capture (paste / screenshot /
-  voice memo), semantic lint, and tier management. Mobile-first nav.
-  Open Graph metadata + dynamic `/og` image baked in.
+  back to a git remote for free-tier persistence. Single-tenant or
+  multi-tenant via the `SINGLE_TENANT_MODE` flag — the same code
+  powers the hosted deploy and OSS self-host. Render-ready
+  Dockerfile, healthchecked, comprehensive pytest coverage on
+  security-critical paths (tier filtering, OAuth flow, share tokens,
+  capture endpoints).
+- **Frontend**: Next.js + Tailwind app. Browse, graph, ask (streaming
+  SSE chat). Owner console (`/owner`) with GitHub sync panel (push /
+  pull / force-reset with type-to-confirm + preview-of-lost-files),
+  share-tokens panel, Personal-LLM-URL panel, persistence settings,
+  switch-wiki-repo modal, danger zone. Capture surface (`/capture`)
+  with six tabs: paste, URL scrape, **verbatim** markdown commit,
+  structured-JSON commit from an LLM session, screenshot OCR,
+  voice-memo transcription. In-browser markdown editor on every page
+  (frontmatter + body, live preview). Welcome wizard for hosted-mode
+  signups. Mobile-first nav. Open Graph metadata + dynamic `/og`
+  image baked in.
+- **Hosted multi-tenant layer**: GitHub OAuth sign-in, per-tenant
+  routing (`/{tenant}/browse`, `/{tenant}/owner`, etc.), tenant
+  bootstrap from your GitHub repo, push-back on every owner edit,
+  product-source-repo guard at onboarding (refuses to bind your
+  tenant to this repo by accident). Opt-in via
+  `SINGLE_TENANT_MODE=0`. Self-host instructions:
+  [HOSTED_DEPLOYMENT.md](./HOSTED_DEPLOYMENT.md).
 - **MCP server**: Published as
   [`portable-llm-wiki-mcp`](https://www.npmjs.com/package/portable-llm-wiki-mcp)
   on npm. Exposes `query_wiki`, `read_page`, `search_wiki`,
@@ -307,17 +353,28 @@ endpoint shapes, status codes, auth/tier semantics, and conformance.
 The implementation serves the spec at `/.well-known/llm-wiki.json`
 and adds the owner-only extensions below.
 
-Owner-only (`Authorization: Bearer <OWNER_TOKEN>`):
+Owner-only (`Authorization: Bearer <OWNER_TOKEN>` in single-tenant
+mode, or a valid hosted-mode session cookie scoped to the tenant):
 
 | Method | Path | Description |
 |---|---|---|
 | POST | `/owner/reload` | rescan the wiki folder |
-| POST | `/owner/lint` | structural lint report |
-| POST | `/owner/ingest` | save a raw source file |
-| POST | `/owner/page` | create/update a wiki page |
+| POST | `/owner/lint` | structural lint report (regex-able checks) |
+| POST | `/owner/ingest` | legacy raw-source save; see Capture section for per-mode replacements |
+| POST | `/owner/page` | create or update a wiki page |
+| PUT | `/owner/page/{slug}` | replace a wiki page (used by the in-browser editor) |
 | PATCH | `/owner/page/{slug}/tier` | change a page's tier |
-| GET | `/owner/raw` | list raw sources |
+| GET | `/owner/raw` | list raw sources (the capture-history backing) |
 | GET | `/owner/raw/{rel_path}` | read a raw source |
+| POST | `/owner/share-tokens` | mint a tier-scoped share token (label + optional expiry) |
+| GET | `/owner/share-tokens` | list active and revoked tokens with hit counts |
+| DELETE | `/owner/share-tokens/{id}` | revoke a share token (soft-delete) |
+
+Capture endpoints have their own table in the [Capture
+section](#frictionless-capture-in-browser-editing-auto-reload) below.
+Hosted-mode-specific endpoints (`/auth/*`, `/onboarding/*`,
+`/owner/sync/*`) live in
+[HOSTED_DEPLOYMENT.md](./HOSTED_DEPLOYMENT.md).
 
 ## Query backend
 
@@ -368,9 +425,18 @@ title matches.
 
 ## Puppetmaster orchestration
 
-`/owner/ingest` runs the full Karpathy ingest pipeline server-side when
-the request body sets `"run_orchestrator": true`. Under the hood this
-shells out to:
+> **Hosted vs. self-host**: the hosted deploy at `portablellm.wiki`
+> doesn't ship the Puppetmaster binary (no Cursor SDK on Render's
+> PATH). It falls back to `direct_drafter` — a direct
+> Anthropic/OpenAI call that produces 1-5 pages with the same Karpathy
+> schema and `tier: private` floor. Self-host with Puppetmaster on
+> PATH gets the full agent-based pipeline below. Both paths converge
+> on the same on-disk page format, so the user-facing wiki is
+> identical either way.
+
+`/owner/ingest` (and the capture endpoints with
+`run_orchestrator: true`) run the full Karpathy ingest pipeline
+server-side. Under the hood this shells out to:
 
 ```bash
 puppetmaster cursor "<ingest goal>" --cwd $WIKI_ROOT --timeout-seconds 600
@@ -498,27 +564,59 @@ existing `/owner/jobs` panel for live log + Puppetmaster summary.
 The lint→draft→ingest loop only compounds if ingest is *frictionless*.
 This closes the human-in-the-loop side of it.
 
-**Frictionless capture** (`/capture`):
+**Frictionless capture** (`/capture`) — six modes, two families:
+
+*Decomposed-by-LLM (drafter writes 1-5 pages, forced `tier: private`):*
+
 - **Paste**: drop a Slack thread, article excerpt, transcript into a
-  textarea. Saved to `raw/<subdir>/YYYY-MM-DD-<slug>.md` immediately.
+  textarea. Saved to `raw/<subdir>/YYYY-MM-DD-<slug>.md` immediately;
+  drafter extracts entities, concepts, decisions, projects, queries.
+- **URL scrape**: paste any public URL (portfolio, blog post, About
+  page, GitHub README, Substack). Server-side fetcher pulls the main
+  content, drafter produces wiki pages citing the raw source.
 - **Screenshot**: drag-and-drop, click to pick, or paste from clipboard
   (`⌘V` anywhere on the page). Sent to Claude/GPT vision for a faithful
   markdown transcription. The binary asset is preserved under
-  `raw/assets/` for provenance.
+  `raw/assets/` for provenance. *Self-host only* — hosted deploy
+  doesn't ship vision keys.
 - **Voice memo**: record in-browser via `MediaRecorder`, or upload an
   existing audio file. Sent to OpenAI Whisper for transcription. The
-  transcript becomes the source-of-truth artifact.
-- All three optionally chain into the existing Puppetmaster ingest
-  pipeline via a single "Run full ingest" checkbox.
+  transcript becomes the source-of-truth artifact. *Self-host only*.
+
+*Verbatim (no LLM in the loop, user's frontmatter wins):*
+
+- **`from LLM`**: paste a structured JSON object produced by an
+  external LLM session against the public
+  [`/llm-writeback-spec`](https://www.portablellm.wiki/llm-writeback-spec).
+  Pages are validated, deduped, and committed. Tier is still
+  force-clamped to `private` (LLM-generated; user reviews + promotes).
+- **`verbatim`**: paste a complete markdown file with YAML
+  frontmatter. Written to `wiki/<section>/<slug>.md` byte-for-byte
+  preserved. **Tier from frontmatter is respected** — this is the one
+  capture mode that trusts the input, because the user authored it
+  directly. Use for hand-drafted pages or LLM output you've already
+  reviewed.
+
+All decomposed modes share an "Generate wiki pages from this capture"
+checkbox (default on); uncheck for raw-only saves (batch review, big
+PDF dumps, archive snapshots).
 
 **Backend endpoints:**
 
 | Method | Path | What it does |
 |---|---|---|
-| POST | `/owner/capture/paste` | save pasted text to `raw/<subdir>/` |
+| POST | `/owner/capture/paste` | save pasted text, optional drafter pass |
+| POST | `/onboarding/import-url` | scrape a URL, optional drafter pass |
+| POST | `/owner/capture/structured` | commit pre-structured JSON from a `from-llm` session |
+| POST | `/owner/capture/verbatim` | commit a full markdown file (frontmatter respected, tier not clamped) |
 | POST | `/owner/capture/image` | vision-transcribe image, save asset + markdown |
 | POST | `/owner/capture/audio` | Whisper-transcribe audio, save markdown |
 | GET  | `/owner/capture/config` | tells the UI which backends are available |
+| GET  | `/llm-writeback-spec` | public spec doc the external LLM fetches |
+| GET  | `/owner/raw` | list raw capture files (backs `/owner/captures` history page) |
+| DELETE | `/owner/raw/{path}` | delete a capture |
+| POST | `/owner/raw/{path}/reingest` | re-run the drafter on a saved capture |
+| POST | `/owner/raw/bulk` | bulk-action on multiple captures (delete / reingest) |
 
 **In-browser editing.** Owner can hit `✎ edit` on any page view to open a
 markdown editor (frontmatter + body, side-by-side with a live preview)
@@ -527,10 +625,11 @@ markdown so drafted pages can be reviewed and tweaked in one place
 without leaving the browser. Tier picker is right next to the edit
 button.
 
-**Auto-reload after Puppetmaster.** The orchestrator calls
-`index.reload()` automatically when a job exits with code 0. Drafted
-pages, ingest output, and lint-spawned content show up in the manifest
-the second the agent finishes. No manual "Reload index" click.
+**Auto-reload after capture.** The capture endpoints (and the
+orchestrator, when running) call `index.reload()` automatically when
+they finish. Drafted pages, ingest output, verbatim commits, and
+lint-spawned content show up in the manifest the moment the request
+returns. No manual "Reload index" click.
 
 ## Audit, share tokens, and on-the-go capture
 
@@ -637,8 +736,11 @@ in `frontend/next.config.mjs`).
 
 ## Tests
 
-100+ tests across backend (pytest), frontend unit (vitest), and E2E
-(Playwright, headless Chromium):
+Comprehensive test coverage across backend (pytest), frontend unit
+(vitest), and end-to-end (Playwright, headless Chromium). New
+features land with tests that lock down the contract; the
+security-critical paths (tier filtering, OAuth, share tokens, capture
+validation, force-reset preview) are covered against regressions.
 
 ```bash
 # backend (pytest)
