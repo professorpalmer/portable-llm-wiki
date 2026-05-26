@@ -173,66 +173,86 @@ export default function WelcomePage() {
   const [phase, setPhase] = useState<WizardPhase>({ kind: "idle" });
   const [submitError, setSubmitError] = useState<string | null>(null);
 
-  // ---- Auth check on mount ------------------------------------------------
+  // ---- Auth + state fetcher ---------------------------------------------
   //
-  // We deliberately DO NOT silently redirect to ``/signup`` on auth failure
-  // here. That used to create an infinite OAuth loop if the session cookie
-  // couldn't make it back to the API host (cross-host cookie issues, third-
-  // party cookie blocking, etc.). Instead, show an explicit error with a
-  // manual retry link so the user can see what's wrong.
+  // Extracted from the mount effect so callers downstream (the connect-repo
+  // step, in particular) can re-run it after a server-side state change.
+  // Without re-running, a successful connect against a populated repo
+  // would leave ``pageCount`` stale at 0 — the value captured at mount
+  // before the clone happened — and the welcome flow would bounce the
+  // user into the import wizard instead of the AlreadyOnboarded panel.
+  // That's how a user with an already-populated wiki repo ended up
+  // looking at "Paste your LinkedIn bio" right after a successful
+  // connect.
+  //
+  // Returns the parsed body so callers can also read the freshly-fetched
+  // values directly (e.g. to decide whether to redirect) without
+  // depending on state propagation in the same render.
+  //
+  // We deliberately DO NOT silently redirect to ``/signup`` on auth
+  // failure. That used to create an infinite OAuth loop if the session
+  // cookie couldn't make it back to the API host (cross-host cookie
+  // issues, third-party cookie blocking, etc.).
+
+  const fetchAuthMe = useCallback(
+    async (opts: { signal?: AbortSignal } = {}): Promise<AuthMeResponse | null> => {
+      const r = await fetch(`${apiBase()}/auth/me`, {
+        credentials: "include",
+        cache: "no-store",
+        signal: opts.signal,
+      });
+      if (!r.ok) {
+        setAuthError(
+          `Could not verify your sign-in (HTTP ${r.status}). Try refreshing, or sign in again.`,
+        );
+        return null;
+      }
+      const data = (await r.json()) as AuthMeResponse;
+      if (!data.authenticated || !data.user) {
+        setAuthError(
+          "We finished signing you in with GitHub, but the session cookie didn't make it back. This usually means third-party cookies are blocked. Try a different browser or unblock cookies for portablellm.wiki.",
+        );
+        return data;
+      }
+      setUser(data.user);
+      setPageCount(data.page_count ?? 0);
+      setDuplicateCount(data.duplicate_imports_count ?? 0);
+      setSyncStatus(
+        data.github_sync ?? {
+          connected: false,
+          repo: "",
+          branch: "main",
+          html_url: "",
+          last_synced_at: 0,
+          last_error: "",
+          pushes_made: 0,
+        },
+      );
+      return data;
+    },
+    [],
+  );
 
   useEffect(() => {
-    let cancelled = false;
+    const ctrl = new AbortController();
     (async () => {
       try {
-        const r = await fetch(`${apiBase()}/auth/me`, {
-          credentials: "include",
-          cache: "no-store",
-        });
-        if (cancelled) return;
-        if (!r.ok) {
-          setAuthError(
-            `Could not verify your sign-in (HTTP ${r.status}). Try refreshing, or sign in again.`,
-          );
-          return;
-        }
-        const data = (await r.json()) as AuthMeResponse;
-        if (cancelled) return;
-        if (!data.authenticated || !data.user) {
-          setAuthError(
-            "We finished signing you in with GitHub, but the session cookie didn't make it back. This usually means third-party cookies are blocked. Try a different browser or unblock cookies for portablellm.wiki.",
-          );
-          return;
-        }
-        setUser(data.user);
-        setPageCount(data.page_count ?? 0);
-        setDuplicateCount(data.duplicate_imports_count ?? 0);
-        setSyncStatus(
-          data.github_sync ?? {
-            connected: false,
-            repo: "",
-            branch: "main",
-            html_url: "",
-            last_synced_at: 0,
-            last_error: "",
-            pushes_made: 0,
-          },
-        );
+        await fetchAuthMe({ signal: ctrl.signal });
       } catch (err) {
-        if (cancelled) return;
+        if (ctrl.signal.aborted) return;
         setAuthError(
           `Network error while checking your sign-in: ${
             err instanceof Error ? err.message : "unknown error"
           }`,
         );
       } finally {
-        if (!cancelled) setLoadingAuth(false);
+        if (!ctrl.signal.aborted) setLoadingAuth(false);
       }
     })();
     return () => {
-      cancelled = true;
+      ctrl.abort();
     };
-  }, []);
+  }, [fetchAuthMe]);
 
   // ---- Submit handlers ----------------------------------------------------
 
@@ -511,6 +531,30 @@ export default function WelcomePage() {
   }
   if (!user) return null;
 
+  // Compute the step badge ONCE in the parent so the outer Header and
+  // the inner card stop disagreeing. Previously Header always rendered
+  // "Step 1 of 1" while ConnectRepoStep rendered its own "Step 1 of 2"
+  // — two badges on the same screen, two different totals. Single
+  // source of truth here based on the actual render branch below.
+  //
+  // Branch              | stepBadge
+  // ------------------- | -----------------------------------------
+  // Not connected, fresh| "Step 1 of 2 — Connect GitHub"
+  // Not connected, mig  | "One-time upgrade"
+  // Connected, no pages | "Step 2 of 2 — Seed your wiki"
+  // Connected, has pages| null (bouncer panel — not a step)
+  const isFreshSignup = (pageCount ?? 0) === 0;
+  let stepBadge: string | null;
+  if (syncStatus !== null && !syncStatus.connected) {
+    stepBadge = isFreshSignup
+      ? "Step 1 of 2 — Connect GitHub"
+      : "One-time upgrade";
+  } else if (pageCount !== null && pageCount > 0 && !forceImport) {
+    stepBadge = null;
+  } else {
+    stepBadge = "Step 2 of 2 — Seed your wiki";
+  }
+
   // Step 0: Connect to GitHub. Without a connected repo the wiki lives
   // only on our ephemeral Render disk and gets wiped on every cold
   // start. We gate the rest of the onboarding behind this step so no
@@ -520,11 +564,29 @@ export default function WelcomePage() {
   if (phase.kind === "idle" && syncStatus !== null && !syncStatus.connected) {
     return (
       <div className="max-w-3xl mx-auto px-5 py-10 sm:py-14">
-        <Header user={user} />
+        <Header user={user} stepBadge={stepBadge} />
         <ConnectRepoStep
           user={user}
           pageCount={pageCount ?? 0}
-          onConnected={(status) => setSyncStatus(status)}
+          // Re-fetch full auth state on a successful connect so the
+          // parent's pageCount + syncStatus reflect what bootstrap_tenant
+          // just put on disk. Without this re-fetch, a connect against
+          // a populated repo (e.g. switching to an existing cary-wiki)
+          // would leave pageCount stale at 0 and bounce the user into
+          // the import wizard instead of the AlreadyOnboarded panel.
+          onConnected={async (status) => {
+            // Optimistic update first so the connect step disappears
+            // immediately — re-fetch lands a moment later with the
+            // authoritative counts.
+            setSyncStatus(status);
+            try {
+              await fetchAuthMe();
+            } catch {
+              // Best-effort. If the re-fetch fails, the user just sees
+              // the form-section default (which is at worst harmless)
+              // and a 30s page refresh recovers the bouncer view.
+            }
+          }}
         />
       </div>
     );
@@ -549,7 +611,7 @@ export default function WelcomePage() {
   ) {
     return (
       <div className="max-w-3xl mx-auto px-5 py-10 sm:py-14">
-        <Header user={user} />
+        <Header user={user} stepBadge={stepBadge} />
         <AlreadyOnboarded
           user={user}
           pageCount={pageCount}
@@ -563,7 +625,7 @@ export default function WelcomePage() {
 
   return (
     <div className="max-w-3xl mx-auto px-5 py-10 sm:py-14">
-      <Header user={user} />
+      <Header user={user} stepBadge={stepBadge} />
 
       {phase.kind === "idle" || phase.kind === "submitting" ? (
         <FormSection
@@ -741,11 +803,15 @@ function ConnectRepoStep({
   const isMigration = pageCount > 0; // existing tenant getting upgraded
 
   return (
-    <div className="border border-paper-soft rounded-2xl bg-white p-6 sm:p-8">
-      <div className="text-[11px] uppercase tracking-[0.22em] text-accent font-semibold">
-        {isMigration ? "One-time upgrade" : "Step 1 of 2 — Connect GitHub"}
-      </div>
-      <h2 className="mt-2 text-2xl sm:text-3xl font-semibold text-ink leading-tight">
+    <div
+      data-testid="connect-repo-step"
+      className="border border-paper-soft rounded-2xl bg-white p-6 sm:p-8"
+    >
+      {/* Step badge lives in the outer ``Header`` now — single source of
+       * truth so a fresh signup's "Step 1 of 2" and a migration's
+       * "One-time upgrade" copy can't disagree with whatever the
+       * outer page header decided. */}
+      <h2 className="text-2xl sm:text-3xl font-semibold text-ink leading-tight">
         {isMigration
           ? "Lock your wiki into your own GitHub."
           : "Pick a GitHub repo to hold your wiki."}
@@ -1135,7 +1201,17 @@ function AlreadyOnboarded({
 
 // ---------- Header --------------------------------------------------------
 
-function Header({ user }: { user: AuthUser }) {
+function Header({
+  user,
+  stepBadge,
+}: {
+  user: AuthUser;
+  /** Step-tracker copy for the current page state, or null when no
+   * step badge belongs above the title (e.g. on the AlreadyOnboarded
+   * bouncer). Source of truth lives in the parent so this badge and
+   * the inner-card titles can't disagree about the total step count. */
+  stepBadge: string | null;
+}) {
   return (
     <div className="flex items-center gap-4 mb-8">
       {user.avatar_url ? (
@@ -1149,9 +1225,14 @@ function Header({ user }: { user: AuthUser }) {
         <div className="w-12 h-12 rounded-full bg-paper-soft border border-paper-soft" />
       )}
       <div className="flex-1 min-w-0">
-        <div className="text-[11px] uppercase tracking-[0.22em] text-accent font-semibold">
-          Step 1 of 1
-        </div>
+        {stepBadge && (
+          <div
+            data-testid="welcome-step-badge"
+            className="text-[11px] uppercase tracking-[0.22em] text-accent font-semibold"
+          >
+            {stepBadge}
+          </div>
+        )}
         <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight text-ink">
           Hi, {user.name || user.login}. Let&apos;s get your wiki seeded.
         </h1>
