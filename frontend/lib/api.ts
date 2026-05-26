@@ -628,6 +628,77 @@ export function llmWritebackSpecUrl(): string {
   return `${base}/llm-writeback-spec`;
 }
 
+// ---- Verbatim capture ----
+//
+// The trusted-input cousin of ownerCaptureStructured. User pastes a
+// fully-formed markdown file (with YAML frontmatter) and the backend
+// writes it to wiki/<section>/<slug>.md with the bytes preserved
+// exactly. Critical differences from the other capture endpoints:
+//
+//   * No LLM in the loop — the user authored the content.
+//   * Tier is RESPECTED (not force-clamped to private). The user gets
+//     editorial control because they wrote the page themselves.
+//   * Section is derived deterministically from `type:` frontmatter.
+//   * Filename comes from explicit slug, frontmatter slug, or title
+//     (in that priority order).
+//
+// Use case: user drafted a page in chat / their editor and wants to
+// save it verbatim. The /capture page exposes this as the "verbatim"
+// tab; ownerCapturePaste remains the right path for raw text dumps.
+
+export type VerbatimWritten = {
+  rel_path: string;
+  title: string;
+  section: "entities" | "concepts" | "decisions" | "projects" | "queries" | "sources";
+  slug: string;
+  tier: "public" | "recruiter" | "friend" | "private";
+  page_type: "entity" | "concept" | "decision" | "project" | "query" | "source";
+};
+
+export type VerbatimConflict = {
+  /** Filename the new page was written under because the canonical
+   *  ``<slug>.md`` was already on disk. e.g. ``my-page-verbatim-2026-05-26.md``. */
+  wrote_as: string;
+};
+
+export type VerbatimCaptureResult = {
+  ok: boolean;
+  written: VerbatimWritten;
+  /** Set when the canonical slug already existed and we wrote a
+   *  suffixed sibling instead of clobbering. Null on the happy path. */
+  conflict: VerbatimConflict | null;
+  /** True iff ``force_overwrite=true`` was set AND there was an
+   *  existing file to overwrite. Lets the UI render a "replaced
+   *  previous version" notice that's distinct from "first write." */
+  overwrote_existing: boolean;
+};
+
+export async function ownerCaptureVerbatim(
+  input: {
+    content: string;
+    /** Optional explicit slug override. Beats both the frontmatter
+     *  ``slug:`` field and the title-derived default. */
+    slug?: string;
+    /** Default false. When true, an existing file at the target path
+     *  is overwritten (no -verbatim-<date> suffix). Use sparingly —
+     *  this destroys history that isn't yet committed. */
+    force_overwrite?: boolean;
+  },
+  tenant?: string
+): Promise<VerbatimCaptureResult> {
+  return asJson<VerbatimCaptureResult>(
+    await apiFetch(`${wikiBase(tenant)}/owner/capture/verbatim`, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({
+        content: input.content,
+        slug: input.slug,
+        force_overwrite: !!input.force_overwrite,
+      }),
+    })
+  );
+}
+
 // Multipart upload — file + form fields. Don't set Content-Type; the
 // browser fills in the multipart boundary automatically. Capture is
 // always owner-mode (preview-as doesn't apply to owner-only writes).

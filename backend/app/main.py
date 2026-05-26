@@ -1775,6 +1775,138 @@ def owner_capture_structured(
     }
 
 
+# ---------------------------------------------------------------------------
+# Verbatim capture — write user-authored markdown to wiki/<section>/<slug>.md
+# without ever running an LLM over it.
+# ---------------------------------------------------------------------------
+#
+# The other capture flows all funnel through either Puppetmaster or
+# ``direct_drafter``, both of which (a) fragment the input into multiple
+# LLM-decided pages and (b) force ``tier: private``. That's right for
+# unstructured pastes (Slack threads, voice memos) but wrong when the
+# user has already authored a complete page with frontmatter — the LLM
+# pass strips their editorial choices and replaces them with the
+# drafter's defaults.
+#
+# Verbatim closes that gap: input is a markdown file with YAML
+# frontmatter, output is exactly one wiki page with the user's bytes
+# preserved. Critically, ``tier`` is RESPECTED — verbatim is the
+# trusted-input path. The drafter/writeback paths still keep their
+# private-tier floor for LLM-shaped inputs.
+#
+# Endpoint contract:
+#   request:  { content: <markdown string>, slug?: <override>, force_overwrite?: bool }
+#   response: { ok: true, written: { rel_path, title, section, slug, tier, page_type },
+#               conflict: null | { wrote_as: "...-verbatim-<date>.md" } }
+#
+# All validation logic lives in ``verbatim_capture`` so it can be unit-
+# tested independently of the FastAPI machinery.
+
+
+@app.post("/owner/capture/verbatim", status_code=status.HTTP_201_CREATED)
+def owner_capture_verbatim(
+    payload: dict,
+    _: Viewer = Depends(require_owner),
+) -> dict:
+    """Write a user-authored markdown file (with YAML frontmatter)
+    directly to ``wiki/<section>/<slug>.md`` with no LLM in the loop.
+
+    Use this when the user has already drafted a complete page (in
+    chat, in their editor, or by editing drafter output) and just
+    wants the wiki to save it as-is. For unstructured inputs use
+    ``/owner/capture/paste`` instead — it routes through the drafter
+    which extracts pages from free-form text.
+
+    Body:
+        {
+          "content": "<full markdown with --- frontmatter --->",
+          "slug": "optional-override",       # else derived from title
+          "force_overwrite": false           # default false
+        }
+
+    Response (201):
+        {
+          "ok": true,
+          "written": {
+            "rel_path": "wiki/sources/2025-performance-review.md",
+            "title": "2025 Performance Review",
+            "section": "sources",
+            "slug": "2025-performance-review",
+            "tier": "private",
+            "page_type": "source"
+          },
+          "conflict": null | { "wrote_as": "...-verbatim-<date>.md" },
+          "overwrote_existing": false
+        }
+
+    Response (400) on any validation failure with the specific reason
+    in ``detail`` (e.g. "missing YAML frontmatter", "invalid type",
+    "title is blank after trimming"). The user can fix the input and
+    resubmit without guessing what went wrong.
+    """
+    from . import persistence as _persistence
+    from . import verbatim_capture as _verbatim
+    from .tenants import current_tenant
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+
+    content = payload.get("content")
+    if not isinstance(content, str):
+        raise HTTPException(
+            status_code=400,
+            detail="'content' is required (markdown string with YAML frontmatter)",
+        )
+
+    raw_slug = payload.get("slug")
+    slug_override: Optional[str]
+    if raw_slug is None or raw_slug == "":
+        slug_override = None
+    elif isinstance(raw_slug, str):
+        slug_override = raw_slug
+    else:
+        raise HTTPException(
+            status_code=400, detail="'slug' must be a string when provided"
+        )
+
+    force_overwrite = bool(payload.get("force_overwrite", False))
+
+    tenant = current_tenant()
+    try:
+        result = _verbatim.write_verbatim(
+            content=content,
+            tenant=tenant,
+            slug_override=slug_override,
+            force_overwrite=force_overwrite,
+        )
+    except _verbatim.VerbatimValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Reload the index so the new page shows up immediately, and trigger
+    # the per-tenant git push so it hits GitHub within the debounce
+    # window. Same pattern as ``owner_capture_structured``.
+    tenant.reload_index()
+    _persistence.flush_async(f"verbatim: {result.rel_path}")
+
+    return {
+        "ok": True,
+        "written": {
+            "rel_path": result.rel_path,
+            "title": result.title,
+            "section": result.section,
+            "slug": result.slug,
+            "tier": result.tier,
+            "page_type": result.page_type,
+        },
+        "conflict": (
+            {"wrote_as": result.conflict_wrote_as}
+            if result.conflict_wrote_as
+            else None
+        ),
+        "overwrote_existing": result.overwrote_existing,
+    }
+
+
 @app.post("/owner/capture/image", status_code=status.HTTP_201_CREATED)
 async def owner_capture_image(
     file: UploadFile = File(...),

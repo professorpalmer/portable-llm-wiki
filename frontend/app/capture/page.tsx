@@ -11,16 +11,18 @@ import {
   ownerCaptureImage,
   ownerCapturePaste,
   ownerCaptureStructured,
+  ownerCaptureVerbatim,
   type CaptureConfig,
   type CaptureResult,
   type OnboardingImportResponse,
+  type VerbatimCaptureResult,
   type WritebackResult,
 } from "@/lib/api";
 import { useTenant } from "@/lib/useTenant";
 import { useIsOwnerOf } from "@/lib/useIsOwner";
 import { OwnerGate } from "@/components/OwnerGate";
 
-type Mode = "paste" | "url" | "from-llm" | "image" | "voice";
+type Mode = "paste" | "url" | "verbatim" | "from-llm" | "image" | "voice";
 type Subdir = "conversations" | "articles" | "meetings" | "assets";
 
 const SUBDIRS: Subdir[] = ["conversations", "articles", "meetings", "assets"];
@@ -49,9 +51,14 @@ function CapturePageInner({ tenant }: { tenant?: string }) {
   // "from-llm" works in both hosted + self-host: it's pure validation +
   // file writes, no server-side LLM call. The LLM the user was chatting
   // with already produced the structured content client-side.
+  // "verbatim" is the trusted-input cousin of "from-llm" — same
+  // no-LLM-pass guarantee, but for a single markdown file with
+  // frontmatter rather than the structured-JSON shape an LLM produces.
+  // Useful for hand-drafted pages and for pasting curated LLM output
+  // you've already reviewed (where the JSON-roundtrip would be lossy).
   const availableModes: readonly Mode[] = hosted
-    ? (["paste", "url", "from-llm"] as const)
-    : (["paste", "url", "from-llm", "image", "voice"] as const);
+    ? (["paste", "url", "verbatim", "from-llm"] as const)
+    : (["paste", "url", "verbatim", "from-llm", "image", "voice"] as const);
   const [mode, setMode] = useState<Mode>("paste");
   const [cfg, setCfg] = useState<CaptureConfig | null>(null);
   const [cfgError, setCfgError] = useState<string | null>(null);
@@ -117,6 +124,7 @@ function CapturePageInner({ tenant }: { tenant?: string }) {
             >
               {m === "paste" && "paste"}
               {m === "url" && "url"}
+              {m === "verbatim" && "verbatim"}
               {m === "from-llm" && "from LLM"}
               {m === "image" && "screenshot"}
               {m === "voice" && "voice memo"}
@@ -127,6 +135,7 @@ function CapturePageInner({ tenant }: { tenant?: string }) {
 
       {mode === "paste" && <PastePanel tenant={tenant} />}
       {mode === "url" && <UrlPanel tenant={tenant} />}
+      {mode === "verbatim" && <VerbatimPanel tenant={tenant} />}
       {mode === "from-llm" && <FromLLMPanel tenant={tenant} />}
       {mode === "image" && !hosted && <ImagePanel cfg={cfg} tenant={tenant} />}
       {mode === "voice" && !hosted && <VoicePanel cfg={cfg} tenant={tenant} />}
@@ -517,6 +526,378 @@ function UrlPanel({ tenant }: { tenant?: string }) {
             <div className="mt-2 text-xs text-amber-700">
               Ingest did not start. Raw scrape is saved; you can re-run
               ingest from the owner console.
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Verbatim panel — paste a complete markdown file (frontmatter + body)
+// and have the wiki save it exactly as-is to wiki/<section>/<slug>.md
+// with no LLM in the loop.
+// ---------------------------------------------------------------------------
+//
+// The trusted-input path. Every other capture mode either:
+//   * runs the input through an LLM (paste/url/image/voice) which
+//     fragments it into 1-5 drafter-decided pages with forced-private
+//     tier, OR
+//   * accepts pre-structured JSON (from-llm) which is fine for chat
+//     output but lossy if you want to preserve exact frontmatter +
+//     body markdown.
+//
+// Verbatim closes the gap: you wrote a page, you want it saved as
+// you wrote it. Frontmatter wins (including tier). Bytes preserved.
+//
+// Light client-side validation extracts ``type`` and ``title`` from
+// the frontmatter so the preview can show "this will land at
+// wiki/<section>/<slug>.md as tier: X". Strict validation happens
+// server-side; client only catches the obvious mistakes (missing
+// frontmatter, unknown type) before bothering the network.
+
+const VERBATIM_TYPES = [
+  "entity",
+  "concept",
+  "decision",
+  "project",
+  "query",
+  "source",
+] as const;
+
+type VerbatimType = (typeof VERBATIM_TYPES)[number];
+
+const TYPE_TO_SECTION: Record<VerbatimType, string> = {
+  entity: "entities",
+  concept: "concepts",
+  decision: "decisions",
+  project: "projects",
+  query: "queries",
+  source: "sources",
+};
+
+type VerbatimPreview = {
+  type: VerbatimType;
+  title: string;
+  tier: "public" | "recruiter" | "friend" | "private";
+  customSlug: string | null;
+  bodyChars: number;
+};
+
+/** Hand-rolled frontmatter peek. Server does the real validation;
+ *  this just gives the user a live preview of what we'll send. We
+ *  parse only the leading ``---`` block, scan for the few fields we
+ *  care about, and bail (return null) on anything ambiguous.
+ *
+ *  We don't pull in js-yaml just for this — frontmatter values come
+ *  in two flavors: scalars (``title: Foo``) and short arrays
+ *  (``tags: [a, b]``). We only need scalars, so a regex per field is
+ *  cheaper than a full YAML parser. */
+function previewFrontmatter(content: string): VerbatimPreview | null {
+  const trimmed = content.replace(/^\uFEFF/, "");
+  if (!trimmed.startsWith("---\n") && !trimmed.startsWith("---\r\n")) {
+    return null;
+  }
+  const closingIdx = trimmed.indexOf("\n---", 4);
+  if (closingIdx === -1) return null;
+  const fmBlock = trimmed.slice(4, closingIdx);
+  const afterClose = closingIdx + "\n---".length;
+  // The body starts after the next newline following the closing
+  // ``---`` marker. We tolerate ``---\n`` (typical) and ``---<EOF>``.
+  const body = trimmed
+    .slice(afterClose)
+    .replace(/^\r?\n/, "")
+    .trim();
+
+  function field(name: string): string | null {
+    // Match ``<name>: value`` at the start of a line. Strip surrounding
+    // quotes if present. Multiline values aren't supported (they'd be
+    // unusual for the fields we care about anyway).
+    const re = new RegExp(`^${name}:\\s*(.+)$`, "mi");
+    const m = fmBlock.match(re);
+    if (!m) return null;
+    let v = m[1].trim();
+    if (
+      (v.startsWith('"') && v.endsWith('"')) ||
+      (v.startsWith("'") && v.endsWith("'"))
+    ) {
+      v = v.slice(1, -1);
+    }
+    return v;
+  }
+
+  const rawType = field("type");
+  const title = field("title");
+  if (!rawType || !title) return null;
+  if (!VERBATIM_TYPES.includes(rawType as VerbatimType)) return null;
+  const rawTier = field("tier");
+  const tier =
+    rawTier === "public" ||
+    rawTier === "recruiter" ||
+    rawTier === "friend" ||
+    rawTier === "private"
+      ? rawTier
+      : "private";
+  return {
+    type: rawType as VerbatimType,
+    title,
+    tier,
+    customSlug: field("slug"),
+    bodyChars: body.length,
+  };
+}
+
+const VERBATIM_PLACEHOLDER = `---
+type: source
+title: 2025 Performance Review
+tier: private
+tags: [foreflight, performance-review, 2025]
+---
+
+# 2025 Performance Review
+
+Body content. Cross-references like [[ForeFlight ML Systems]] survive.
+`;
+
+function VerbatimPanel({ tenant }: { tenant?: string }) {
+  const [content, setContent] = useState("");
+  const [slugOverride, setSlugOverride] = useState("");
+  const [forceOverwrite, setForceOverwrite] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<VerbatimCaptureResult | null>(null);
+
+  const preview = content.trim() ? previewFrontmatter(content) : null;
+  // Effective slug (what the server will likely use). Mirrors the
+  // backend resolution order: explicit override > frontmatter slug >
+  // title-derived. We slugify locally for the preview only — server
+  // is the source of truth.
+  const previewSlug = (() => {
+    const source = slugOverride.trim() || preview?.customSlug || preview?.title;
+    if (!source) return "";
+    return source
+      .toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, "")
+      .replace(/\s+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-+|-+$/g, "");
+  })();
+  const previewPath =
+    preview && previewSlug
+      ? `wiki/${TYPE_TO_SECTION[preview.type]}/${
+          preview.type === "decision" && !/^\d{4}-\d{2}-\d{2}-/.test(previewSlug)
+            ? `<today>-${previewSlug}`
+            : previewSlug
+        }.md`
+      : null;
+
+  async function submit() {
+    setError(null);
+    if (content.trim().length === 0) {
+      setError("Paste a markdown file with YAML frontmatter.");
+      return;
+    }
+    if (!preview) {
+      setError(
+        "Couldn't find a valid frontmatter block. The first line must be '---' and the block must include 'type:' (one of: entity, concept, decision, project, query, source) and 'title:'.",
+      );
+      return;
+    }
+    setSaving(true);
+    setResult(null);
+    try {
+      const res = await ownerCaptureVerbatim(
+        {
+          content,
+          slug: slugOverride.trim() || undefined,
+          force_overwrite: forceOverwrite,
+        },
+        tenant,
+      );
+      setResult(res);
+      setContent("");
+      setSlugOverride("");
+      setForceOverwrite(false);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="space-y-4">
+      <div className="p-3 rounded border border-paper-soft bg-paper-soft/40 text-xs text-ink-muted">
+        <span className="text-ink font-medium">Verbatim mode.</span> Paste a
+        full markdown file (frontmatter + body) and we&apos;ll write it
+        directly to{" "}
+        <span className="font-mono">wiki/&lt;section&gt;/&lt;slug&gt;.md</span>{" "}
+        with the bytes preserved exactly. No LLM pass, no fragmentation.
+        Tier is set by your{" "}
+        <span className="font-mono">tier:</span> frontmatter field — this is
+        the one capture path where{" "}
+        <span className="text-ink">tier is not force-clamped to private</span>,
+        so be deliberate about what you mark{" "}
+        <span className="font-mono">public</span>.
+      </div>
+
+      <div>
+        <label className="block text-xs text-ink-muted mb-1">
+          Markdown content (frontmatter + body)
+        </label>
+        <textarea
+          value={content}
+          onChange={(e) => setContent(e.target.value)}
+          placeholder={VERBATIM_PLACEHOLDER}
+          spellCheck={false}
+          className="w-full min-h-[50vh] border border-paper-soft rounded p-3 text-xs font-mono focus:border-accent focus:outline-none"
+          data-testid="verbatim-content-input"
+        />
+        <div className="mt-1 text-xs text-ink-muted">
+          {content.length.toLocaleString()} chars
+          {preview && (
+            <>
+              {" · "}
+              <span className="text-ink">body</span>{" "}
+              {preview.bodyChars.toLocaleString()} chars
+            </>
+          )}
+        </div>
+      </div>
+
+      <div>
+        <label className="block text-xs text-ink-muted mb-1">
+          Slug override (optional — defaults to slugified title or
+          frontmatter <span className="font-mono">slug:</span> field)
+        </label>
+        <input
+          value={slugOverride}
+          onChange={(e) => setSlugOverride(e.target.value)}
+          placeholder="e.g. 2025-performance-review"
+          className="w-full border border-paper-soft rounded px-3 py-2 text-sm font-mono focus:border-accent focus:outline-none"
+          data-testid="verbatim-slug-input"
+        />
+      </div>
+
+      {preview && previewPath && (
+        <div
+          className="p-3 rounded border border-paper-soft bg-paper text-xs space-y-1"
+          data-testid="verbatim-preview"
+        >
+          <div className="text-ink-muted">Will write to:</div>
+          <div className="font-mono text-ink">{previewPath}</div>
+          <div className="text-ink-muted mt-2">
+            <span className="font-medium text-ink">{preview.title}</span>
+            {" · "}
+            type <span className="font-mono">{preview.type}</span>
+            {" · "}
+            tier{" "}
+            <span
+              className={`font-mono ${
+                preview.tier === "public"
+                  ? "text-rose-700"
+                  : preview.tier === "recruiter"
+                    ? "text-amber-700"
+                    : preview.tier === "friend"
+                      ? "text-emerald-700"
+                      : "text-ink"
+              }`}
+              data-testid="verbatim-preview-tier"
+            >
+              {preview.tier}
+            </span>
+            {preview.tier === "public" && (
+              <span className="ml-2 text-rose-700">
+                — visible to anyone, no auth required
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {content.trim().length > 0 && !preview && (
+        <div
+          className="p-3 rounded border border-amber-200 bg-amber-50 text-xs text-amber-900"
+          data-testid="verbatim-no-preview"
+        >
+          Can&apos;t preview yet — content needs a valid YAML frontmatter
+          block at the top with at least{" "}
+          <span className="font-mono">type:</span> (one of:{" "}
+          {VERBATIM_TYPES.join(", ")}) and{" "}
+          <span className="font-mono">title:</span>.
+        </div>
+      )}
+
+      <label className="flex items-start gap-2 text-xs text-ink-muted cursor-pointer">
+        <input
+          type="checkbox"
+          checked={forceOverwrite}
+          onChange={(e) => setForceOverwrite(e.target.checked)}
+          className="mt-0.5"
+          data-testid="verbatim-force-overwrite"
+        />
+        <span>
+          <span className="text-ink">Overwrite if a page with this slug already exists.</span>{" "}
+          Off by default — conflicts get a{" "}
+          <span className="font-mono">-verbatim-&lt;today&gt;</span> suffix so
+          your existing page is preserved. Flip on for iterating on the same
+          page (typo fixes, re-submissions).
+        </span>
+      </label>
+
+      {error && (
+        <div
+          className="p-3 rounded border border-red-200 bg-red-50 text-sm text-red-700"
+          data-testid="verbatim-error"
+        >
+          {error}
+        </div>
+      )}
+
+      <button
+        onClick={submit}
+        disabled={saving || !preview}
+        className="px-4 py-2 rounded bg-ink text-paper font-medium hover:bg-ink-soft disabled:opacity-50"
+        data-testid="verbatim-submit"
+      >
+        {saving ? "saving…" : "save verbatim"}
+      </button>
+
+      {result && (
+        <div
+          className="mt-2 p-4 rounded border border-emerald-200 bg-emerald-50 text-sm"
+          data-testid="verbatim-result"
+        >
+          <div className="font-medium text-emerald-800">
+            {result.overwrote_existing
+              ? "Replaced existing page"
+              : result.conflict
+                ? "Saved (existing page preserved)"
+                : "Saved"}
+          </div>
+          <div className="mt-1 text-xs text-emerald-700 font-mono">
+            {result.written.rel_path}
+          </div>
+          <div className="mt-1 text-xs text-emerald-700">
+            <Link
+              href={`${tenant ? `/${tenant}` : ""}/page/${encodeURIComponent(
+                result.written.slug,
+              )}`}
+              className="underline hover:text-emerald-900"
+            >
+              {result.written.title}
+            </Link>{" "}
+            · type{" "}
+            <span className="font-mono">{result.written.page_type}</span> ·
+            tier <span className="font-mono">{result.written.tier}</span>
+          </div>
+          {result.conflict && (
+            <div className="mt-2 p-2 rounded bg-amber-100/70 border border-amber-200 text-xs text-amber-900">
+              A page with this slug already existed. We saved your new version
+              as <span className="font-mono">{result.conflict.wrote_as}</span>{" "}
+              instead of overwriting. Re-submit with &ldquo;overwrite&rdquo;
+              checked to replace the existing page.
             </div>
           )}
         </div>
