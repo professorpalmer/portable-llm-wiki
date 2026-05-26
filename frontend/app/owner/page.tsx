@@ -7,6 +7,7 @@ import { ForceResetModal } from "@/components/ForceResetModal";
 import { PersistencePanel } from "@/components/PersistencePanel";
 import { PersonalLlmUrlPanel } from "@/components/PersonalLlmUrlPanel";
 import { ShareTokensPanel } from "@/components/ShareTokensPanel";
+import { SwitchRepoModal } from "@/components/SwitchRepoModal";
 import {
   apiBase,
   authMe,
@@ -1403,6 +1404,11 @@ export function GitHubSyncPanel({ tenantId }: { tenantId?: string }) {
   // can stay open while the force-reset is in flight (its inputs go
   // disabled, but the user still sees the preview block).
   const [forceModalOpen, setForceModalOpen] = useState(false);
+  // Switch-repo modal — lets the user rebind their wiki backing to a
+  // different GitHub repo (e.g. to escape an accidental product-source
+  // binding from before the 2026-05 guard shipped). See
+  // components/SwitchRepoModal.tsx for the why.
+  const [switchModalOpen, setSwitchModalOpen] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -1690,6 +1696,22 @@ export function GitHubSyncPanel({ tenantId }: { tenantId?: string }) {
             <span className="font-mono">Pull from GitHub</span>. You own
             the repo — clone it, fork it, take your wiki anywhere.
           </p>
+
+          <div className="mt-3 flex items-center gap-3 text-xs">
+            <button
+              type="button"
+              onClick={() => setSwitchModalOpen(true)}
+              data-testid="switch-repo-button"
+              className="text-ink-muted underline decoration-dotted hover:text-amber-800"
+              title="Rebind this tenant to a different GitHub repo"
+            >
+              Switch wiki repo →
+            </button>
+            <span className="text-ink-muted/70">
+              Useful if you bound to the wrong repo and need to relocate
+              your wiki backing without deleting the tenant.
+            </span>
+          </div>
         </>
       )}
 
@@ -1698,6 +1720,25 @@ export function GitHubSyncPanel({ tenantId }: { tenantId?: string }) {
         onClose={() => setForceModalOpen(false)}
         onConfirm={onForcePullConfirmed}
         isRunning={pulling}
+      />
+
+      <SwitchRepoModal
+        open={switchModalOpen}
+        onClose={() => setSwitchModalOpen(false)}
+        currentRepo={status?.repo ?? ""}
+        onSwitched={(_resp, freshStatus) => {
+          setStatus(freshStatus);
+          // Clear stale push/pull feedback from the OLD binding so the
+          // panel doesn't keep showing "non-fast-forward" errors that
+          // are no longer relevant after the rebind.
+          setSyncResult(null);
+          setPullResult(null);
+          setSwitchModalOpen(false);
+          // Best-effort refresh — backend just bootstrapped, but a
+          // subsequent status pull picks up any post-bootstrap state
+          // changes (e.g. autopush firing in the background).
+          void refresh();
+        }}
       />
     </section>
   );

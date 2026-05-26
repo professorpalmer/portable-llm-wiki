@@ -2477,6 +2477,111 @@ def test_connect_repo_allows_real_wiki(multi_tenant_app, monkeypatch):
     assert t.gh_repo == "alice/my-wiki"
 
 
+def test_connect_repo_overwrites_previous_binding(
+    multi_tenant_app, monkeypatch
+):
+    """A tenant that's already bound to one repo MUST be able to switch
+    to a different one via the same endpoint. This is the load-bearing
+    path for the owner-console "Switch wiki repo" button: a user who
+    accidentally bound to the wrong repo (e.g. a product-source fork
+    from before the guard shipped) needs a way to relocate without
+    deleting their tenant and starting over.
+
+    Pins three guarantees:
+    * The new ``gh_repo`` overwrites the old one in the tenant record.
+    * The default branch is updated from the new repo's metadata.
+    * The product-source guard still fires on the NEW repo (you can't
+      sidestep the guard by re-binding).
+    """
+    _seed_token_on(multi_tenant_app, "alice")
+    _stub_github_for_connect(monkeypatch, tree_payload=_personal_wiki_tree())
+
+    import app.persistence as persistence_mod
+    import app.tenants as tenants_mod
+
+    # Seed an OLD binding to simulate the user-stuck-on-wrong-repo case.
+    mgr = tenants_mod.manager()
+    t = mgr.require("alice")
+    t.gh_repo = "alice/old-stuck-repo"
+    t.gh_default_branch = "trunk"
+    t.git_last_error = "git push failed: non-fast-forward"
+    mgr.upsert(t)
+
+    # Bootstrap is exercised by other tests; here we only need the
+    # binding-update side-effects to be visible.
+    bootstrap_calls: list[str] = []
+
+    def fake_bootstrap(tenant):
+        bootstrap_calls.append(tenant.gh_repo or "")
+        tenant.gh_default_branch = "main"
+        return {"ok": True, "action": "synced"}
+
+    monkeypatch.setattr(persistence_mod, "bootstrap_tenant", fake_bootstrap)
+    _set_session_user(multi_tenant_app, "alice", login="alice")
+
+    r = multi_tenant_app.post(
+        "/onboarding/connect-repo",
+        json={"create_new": False, "repo": "alice/cary-wiki"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["repo"] == "alice/cary-wiki"
+
+    t_after = mgr.require("alice")
+    assert t_after.gh_repo == "alice/cary-wiki"
+    assert t_after.gh_default_branch == "main"
+    # Confirm bootstrap_tenant ran AFTER the binding was updated, not
+    # before — otherwise the new clone would target the old remote.
+    assert bootstrap_calls == ["alice/cary-wiki"]
+
+
+def test_connect_repo_overwrite_still_blocks_product_source(
+    multi_tenant_app, monkeypatch
+):
+    """Switching repos must NOT bypass the product-source guard.
+    Without this assertion a user could escape the guard by first
+    binding to a wiki repo and then re-binding to a product-source
+    fork (which is the exact attack the guard exists to prevent)."""
+    _seed_token_on(multi_tenant_app, "alice")
+    # The new repo looks like a product source fork — guard must fire.
+    _stub_github_for_connect(
+        monkeypatch,
+        tree_payload={
+            "sha": "abc",
+            "tree": [
+                {"path": "backend", "type": "tree", "mode": "040000", "sha": "1"},
+                {"path": "frontend", "type": "tree", "mode": "040000", "sha": "2"},
+            ],
+        },
+    )
+
+    import app.persistence as persistence_mod
+    import app.tenants as tenants_mod
+
+    mgr = tenants_mod.manager()
+    t = mgr.require("alice")
+    t.gh_repo = "alice/legit-wiki"
+    mgr.upsert(t)
+
+    monkeypatch.setattr(
+        persistence_mod,
+        "bootstrap_tenant",
+        lambda t: {"ok": True, "action": "noop"},
+    )
+    _set_session_user(multi_tenant_app, "alice", login="alice")
+
+    r = multi_tenant_app.post(
+        "/onboarding/connect-repo",
+        json={"create_new": False, "repo": "alice/portable-llm-wiki"},
+    )
+    assert r.status_code == 400, r.text
+    assert "product source" in r.text.lower()
+
+    # Old binding must be intact — refused connect leaves state alone.
+    assert mgr.require("alice").gh_repo == "alice/legit-wiki"
+
+
 def test_connect_repo_guard_fails_open_on_github_5xx(
     multi_tenant_app, monkeypatch
 ):
