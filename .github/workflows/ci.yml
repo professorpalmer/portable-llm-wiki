@@ -26,16 +26,24 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          # Cache pip downloads keyed on requirements.txt — speeds reruns
-          # from ~90s to ~10s when deps haven't changed.
+          # Cache pip downloads keyed on BOTH requirement files — must
+          # match the install step or test-only deps churn the cache.
           cache: "pip"
-          cache-dependency-path: backend/requirements.txt
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
 
       - name: Install dependencies
         working-directory: backend
+        # Install dev deps too — pytest lives there, not in
+        # requirements.txt (which stays runtime-only to keep the
+        # production Docker image small). The previous version of
+        # this workflow only installed requirements.txt, which made
+        # every CI run fail with "No module named pytest" once the
+        # tests step started running.
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements.txt -r requirements-dev.txt
 
       - name: Configure test wiki root
         working-directory: backend
