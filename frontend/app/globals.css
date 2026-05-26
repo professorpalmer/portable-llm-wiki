@@ -1,0 +1,132 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+html,
+body {
+  background: #fafaf7;
+  color: #0e0e10;
+}
+
+/* Markdown prose */
+.prose-wiki h1,
+.prose-wiki h2,
+.prose-wiki h3,
+.prose-wiki h4 {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin-top: 1.5em;
+  margin-bottom: 0.4em;
+  line-height: 1.2;
+}
+.prose-wiki h1 {
+  font-size: 1.9rem;
+  margin-top: 0;
+}
+.prose-wiki h2 {
+  font-size: 1.45rem;
+  border-bottom: 1px solid #e8e8e0;
+  padding-bottom: 0.25em;
+}
+.prose-wiki h3 {
+  font-size: 1.15rem;
+}
+.prose-wiki h4 {
+  font-size: 1rem;
+  color: #4a4a55;
+}
+.prose-wiki p,
+.prose-wiki li {
+  font-size: 1.0rem;
+  line-height: 1.65;
+  margin-top: 0.55em;
+  margin-bottom: 0.55em;
+}
+.prose-wiki strong {
+  font-weight: 600;
+}
+.prose-wiki em {
+  font-style: italic;
+}
+.prose-wiki a {
+  color: #ff6a00;
+  text-decoration: none;
+  border-bottom: 1px solid rgba(255, 106, 0, 0.35);
+}
+.prose-wiki a:hover {
+  border-bottom-color: #ff6a00;
+}
+.prose-wiki ul {
+  list-style-type: disc;
+  padding-left: 1.4em;
+}
+.prose-wiki ol {
+  list-style-type: decimal;
+  padding-left: 1.4em;
+}
+.prose-wiki blockquote {
+  border-left: 3px solid #d3d3c8;
+  padding-left: 0.9em;
+  color: #4a4a55;
+  font-style: italic;
+  margin: 1em 0;
+}
+.prose-wiki code {
+  background: #f0efe7;
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.9em;
+}
+.prose-wiki pre {
+  background: #0e0e10;
+  color: #f3f3ee;
+  padding: 0.9em 1em;
+  border-radius: 8px;
+  overflow-x: auto;
+  font-size: 0.85em;
+  margin: 1em 0;
+}
+.prose-wiki pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+.prose-wiki hr {
+  border: none;
+  border-top: 1px solid #e8e8e0;
+  margin: 1.5em 0;
+}
+.prose-wiki table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1em 0;
+  font-size: 0.95em;
+}
+.prose-wiki th,
+.prose-wiki td {
+  border: 1px solid #e2e2d8;
+  padding: 0.5em 0.7em;
+  text-align: left;
+}
+.prose-wiki th {
+  background: #f3f3ee;
+  font-weight: 600;
+}
+
+/* Subtle scrollbar */
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #d3d3c8;
+  border-radius: 5px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #b8b8a8;
+}

@@ -1,0 +1,40 @@
+{
+  "name": "create-portable-llm-wiki",
+  "version": "0.1.0",
+  "description": "Scaffold a fresh Portable LLM Wiki content repo: markdown starter pages, .gitignore, README, and git init. Ready to push to GitHub and one-click deploy on Render.",
+  "type": "module",
+  "bin": {
+    "create-portable-llm-wiki": "./bin/cli.js"
+  },
+  "files": [
+    "bin",
+    "templates",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "portable-llm-wiki",
+    "scaffolder",
+    "create",
+    "llm",
+    "wiki",
+    "personal-context",
+    "mcp"
+  ],
+  "author": "professorpalmer",
+  "license": "MIT",
+  "homepage": "https://github.com/professorpalmer/portable-llm-wiki#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/professorpalmer/portable-llm-wiki.git",
+    "directory": "create-portable-llm-wiki"
+  },
+  "bugs": {
+    "url": "https://github.com/professorpalmer/portable-llm-wiki/issues"
+  },
+  "scripts": {
+    "test": "node bin/cli.js --help"
+  }
+}

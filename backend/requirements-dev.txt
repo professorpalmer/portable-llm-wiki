@@ -1,0 +1,8 @@
+# Dev/test-only deps. Pip install: `pip install -r requirements.txt -r requirements-dev.txt`
+# Keep this separate from runtime deps so the production Docker image
+# stays small and free of test-only attack surface.
+
+-r requirements.txt
+
+pytest==8.4.2
+fpdf2==2.8.4

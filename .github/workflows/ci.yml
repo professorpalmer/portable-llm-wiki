@@ -1,0 +1,98 @@
+name: CI
+
+# Runs on every PR + every push to main. Tests must be green before
+# anything merges — this is part of how we signal "this OSS project is
+# real, not a weekend prototype."
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs to save minutes on rapid push cycles.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: backend (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          # Cache pip downloads keyed on requirements.txt — speeds reruns
+          # from ~90s to ~10s when deps haven't changed.
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Configure test wiki root
+        working-directory: backend
+        run: |
+          # Tests use wiki-demo/ as the wiki root since it's repo-tracked
+          # and tier-safe (everything is public).
+          echo "WIKI_ROOT=$(pwd)/../wiki-demo" >> "$GITHUB_ENV"
+          echo "OWNER_TOKEN=ci-test-owner-token" >> "$GITHUB_ENV"
+          echo "DEFAULT_TIER=public" >> "$GITHUB_ENV"
+
+      - name: Run pytest
+        working-directory: backend
+        run: python -m pytest tests/ -v
+
+  frontend:
+    name: frontend (vitest + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run vitest
+        working-directory: frontend
+        run: npx vitest run
+
+      - name: Build (production)
+        working-directory: frontend
+        # Catches type errors + Next.js config issues that vitest misses.
+        run: npx next build
+
+  mcp:
+    name: mcp (typecheck + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: mcp/package-lock.json
+
+      - name: Install MCP package deps
+        working-directory: mcp
+        run: npm ci
+
+      - name: Build MCP server
+        working-directory: mcp
+        run: npm run build

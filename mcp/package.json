@@ -1,0 +1,56 @@
+{
+  "name": "portable-llm-wiki-mcp",
+  "version": "0.1.2",
+  "description": "MCP server that exposes a Portable LLM Wiki to Cursor, Claude Desktop, or any MCP-aware LLM client.",
+  "type": "module",
+  "main": "dist/server.js",
+  "bin": {
+    "portable-llm-wiki-mcp": "dist/server.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "examples"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "llm",
+    "wiki",
+    "personal-context",
+    "knowledge-base",
+    "cursor",
+    "claude-desktop",
+    "ai-memory"
+  ],
+  "author": "Cary Palmer",
+  "license": "MIT",
+  "homepage": "https://github.com/professorpalmer/portable-llm-wiki#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/professorpalmer/portable-llm-wiki.git",
+    "directory": "mcp"
+  },
+  "bugs": {
+    "url": "https://github.com/professorpalmer/portable-llm-wiki/issues"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "tsx src/server.ts",
+    "smoke": "node smoke-test.mjs",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.18.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "20.16.10",
+    "tsx": "4.19.1",
+    "typescript": "5.6.2"
+  }
+}

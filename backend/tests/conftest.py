@@ -1,0 +1,205 @@
+"""Shared pytest fixtures.
+
+We isolate every test session in a fresh tmp wiki directory. The crucial
+constraint is that `app.config` loads settings at module-import time, so
+the environment has to be configured BEFORE any `from app.* import …` runs.
+This conftest sets up `WIKI_ROOT` and friends at collection time so all
+tests inherit a clean, isolated wiki.
+
+Test wiki structure:
+    <tmp>/wiki/
+        index.md
+        log.md
+        entities/public-entity.md       (tier: public)
+        entities/private-entity.md      (tier: private)
+        concepts/recruiter-concept.md   (tier: recruiter)
+        concepts/friend-concept.md      (tier: friend)
+    <tmp>/raw/
+        (empty — populated by tests)
+
+This lets us exercise tier filtering across all four tiers.
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import tempfile
+from pathlib import Path
+
+import pytest
+
+OWNER_TOKEN = "test-owner-token-do-not-leak"
+SESSION_TMP: Path = Path(tempfile.mkdtemp(prefix="portable-llm-wiki-test-"))
+
+
+def _seed_wiki(root: Path) -> None:
+    """Write a minimal-but-complete wiki tree under `root`."""
+    wiki = root / "wiki"
+    (wiki / "entities").mkdir(parents=True, exist_ok=True)
+    (wiki / "concepts").mkdir(parents=True, exist_ok=True)
+    (wiki / "sources").mkdir(parents=True, exist_ok=True)
+    (root / "raw" / "conversations").mkdir(parents=True, exist_ok=True)
+
+    (wiki / "index.md").write_text(
+        """---
+type: overview
+title: Index
+tier: public
+created: 2026-05-24
+updated: 2026-05-24
+---
+
+# Index
+
+- [[Public Entity]]
+- [[Recruiter Concept]]
+""",
+        encoding="utf-8",
+    )
+
+    (wiki / "log.md").write_text(
+        """---
+type: overview
+title: Log
+tier: private
+---
+
+# Log
+""",
+        encoding="utf-8",
+    )
+
+    (wiki / "entities" / "public-entity.md").write_text(
+        """---
+type: entity
+title: Public Entity
+tier: public
+created: 2026-05-24
+updated: 2026-05-24
+---
+
+This is a public entity. Anyone can see it.
+References [[Recruiter Concept]].
+""",
+        encoding="utf-8",
+    )
+
+    (wiki / "entities" / "private-entity.md").write_text(
+        """---
+type: entity
+title: Private Entity
+tier: private
+created: 2026-05-24
+updated: 2026-05-24
+---
+
+Secret. Owner-only.
+""",
+        encoding="utf-8",
+    )
+
+    (wiki / "concepts" / "recruiter-concept.md").write_text(
+        """---
+type: concept
+title: Recruiter Concept
+tier: recruiter
+created: 2026-05-24
+updated: 2026-05-24
+---
+
+Visible to recruiters and above.
+""",
+        encoding="utf-8",
+    )
+
+    (wiki / "concepts" / "friend-concept.md").write_text(
+        """---
+type: concept
+title: Friend Concept
+tier: friend
+created: 2026-05-24
+updated: 2026-05-24
+---
+
+Visible to friends and above.
+""",
+        encoding="utf-8",
+    )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Configure the global test environment BEFORE any tests collect.
+
+    pytest_configure runs once per session, before pytest starts importing
+    test modules. By the time `from app.main import …` happens inside a
+    test module, these env vars are already set.
+    """
+    _seed_wiki(SESSION_TMP)
+
+    os.environ["WIKI_ROOT"] = str(SESSION_TMP)
+    os.environ["OWNER_TOKEN"] = OWNER_TOKEN
+    os.environ["DEFAULT_TIER"] = "public"
+    os.environ["CORS_ORIGINS"] = "http://localhost:3000"
+    # Disable rate limiting for shared-app tests. The dedicated rate-limit
+    # suite (test_rate_limit.py) builds its own FastAPI app + flips
+    # RATE_LIMIT_ENABLED per-case, so it's unaffected by this default.
+    os.environ["RATE_LIMIT_ENABLED"] = "0"
+    # Deliberately don't set WIKI_GIT_REMOTE — persistence tests will
+    # configure it per-test in a controlled way.
+    os.environ.pop("WIKI_GIT_REMOTE", None)
+    # No LLM keys — query fallback to keyword mode
+    os.environ.pop("ANTHROPIC_API_KEY", None)
+    os.environ.pop("OPENAI_API_KEY", None)
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    """Clean up the tmp dir after the session."""
+    try:
+        shutil.rmtree(SESSION_TMP, ignore_errors=True)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def wiki_root() -> Path:
+    return SESSION_TMP
+
+
+@pytest.fixture(scope="session")
+def owner_token() -> str:
+    return OWNER_TOKEN
+
+
+@pytest.fixture()
+def client():
+    """Fresh TestClient. Triggers app startup events so persistence hooks
+    fire (they no-op without WIKI_GIT_REMOTE in this environment)."""
+    from fastapi.testclient import TestClient
+
+    from app.main import app, index
+
+    # Re-read the wiki off disk in case a previous test mutated it.
+    index.reload()
+    with TestClient(app) as c:
+        yield c
+
+
+@pytest.fixture()
+def owner_headers(owner_token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {owner_token}"}
+
+
+@pytest.fixture(autouse=True)
+def _reset_share_tokens(wiki_root: Path):
+    """Each test starts with a clean share-token store."""
+    store = wiki_root / ".share-tokens.json"
+    if store.exists():
+        store.unlink()
+    yield
+    if store.exists():
+        store.unlink()

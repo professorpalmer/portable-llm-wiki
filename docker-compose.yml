@@ -1,0 +1,63 @@
+# Portable LLM Wiki — self-host with one command.
+#
+# Usage:
+#   1. Copy backend/.env.example to backend/.env and fill in OWNER_TOKEN
+#      (any random string).
+#   2. Drop your markdown wiki under ./wiki/ — or use the bundled
+#      wiki-demo/ for a first try by changing the volume below.
+#   3. `docker compose up --build`
+#   4. Visit http://localhost:3000
+#
+# This compose file is the third install path (alongside Deploy-to-Render
+# and `npx create-portable-llm-wiki`). It's the right choice if you want
+# everything on your own box — your laptop, a Mac mini under your desk,
+# or a $5 VPS — with zero external dependencies beyond Docker.
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: pllmw-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # Required: any random token. Anyone with this token can edit your
+      # wiki. Generate with: `openssl rand -hex 32`
+      OWNER_TOKEN: ${OWNER_TOKEN:?set OWNER_TOKEN in your environment or .env file}
+      WIKI_ROOT: /app/wiki
+      DEFAULT_TIER: public
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8000}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      # Optional — uncomment + set for LLM-backed answers. Without these
+      # the wiki falls back to keyword search (still works, just less smart).
+      # ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-5}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+    volumes:
+      # Mount your wiki content. Default points at the bundled demo wiki
+      # so `docker compose up` works out-of-the-box. Replace ./wiki-demo
+      # with your own markdown folder when you're ready.
+      - ./wiki-demo:/app/wiki
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        # Compose-internal hostname — Next.js rewrites proxy /api/backend/*
+        # to this URL. Browser traffic still hits localhost:3000.
+        NEXT_PUBLIC_BACKEND_URL: http://backend:8000
+    container_name: pllmw-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      # Runtime URL used by server-side Next.js (e.g. /og image generation).
+      # Build-time NEXT_PUBLIC_BACKEND_URL handles the client-side rewrites.
+      NEXT_PUBLIC_BACKEND_URL: http://backend:8000

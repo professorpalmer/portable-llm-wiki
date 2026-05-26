@@ -1,0 +1,69 @@
+# env / secrets
+.env
+.env.*
+backend/.env
+backend/.env.local
+frontend/.env.local
+# Allow .env.example committed templates only.
+!backend/.env.example
+!.env.example
+
+# Python
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/.pytest_cache/
+*.pyc
+
+# Puppetmaster job state
+backend/.jobs.json
+backend/.job-logs/
+backend/.lint-swarms.json
+
+# Wiki runtime state (when WIKI_ROOT points inside the repo, e.g. wiki-demo/)
+**/.share-tokens.json
+**/.lint/
+
+# Node
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.turbo/
+mcp/node_modules/
+mcp/dist/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# TS build artifacts
+frontend/tsconfig.tsbuildinfo
+
+# Playwright
+frontend/test-results/
+frontend/playwright-report/
+frontend/playwright/.cache/
+
+
+# Per-tenant runtime metadata — contains OAuth tokens.
+# Never commit this file, ever. The hosted persistence layer writes
+# it into <wiki_root>/ but a tenant whose wiki_root *is* this repo
+# would otherwise commingle the secret with product source.
+tenant.json
+
+# Hosted-mode tenant directory tree. Lives at TENANTS_ROOT (defaults
+# to <repo>/tenants when not set in env). Contains per-tenant wiki
+# content, OAuth tokens via tenant.json, search indexes — all
+# user-private state that must never enter version control.
+tenants/
+
+# Misc test + log spillover.
+.pytest_cache/
+**/.pytest_cache/
+*.log
+
+# Editor swap / backup files
+*.swo
+*~

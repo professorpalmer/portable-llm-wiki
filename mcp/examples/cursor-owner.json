@@ -1,0 +1,13 @@
+{
+  "_comment": "Drop the 'portable-llm-wiki' entry into ~/.cursor/mcp.json. Owner tier sees every page.",
+  "mcpServers": {
+    "portable-llm-wiki": {
+      "command": "node",
+      "args": ["/absolute/path/to/portable-llm-wiki/mcp/dist/server.js"],
+      "env": {
+        "WIKI_API_BASE": "http://localhost:8000",
+        "WIKI_OWNER_TOKEN": "<paste OWNER_TOKEN from backend/.env>"
+      }
+    }
+  }
+}
