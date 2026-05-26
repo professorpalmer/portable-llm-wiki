@@ -50,12 +50,31 @@ services:
         generateValue: true  # Render auto-generates a strong value
 
       # --- Single-tenant (OSS) vs multi-tenant (hosted) toggle ---
-      # Default is "1" — the OSS self-host path that has worked since
-      # v0. Flip to "0" on the hosted portablellm.wiki deploy. When 0,
-      # the docker command above seeds the public Avery demo tenant
-      # under <TENANTS_ROOT>/avery/ on every boot (idempotent).
+      # PROMPTED at first deploy because the right value depends on
+      # what you're building:
+      #
+      #   * OSS self-host: enter "1" (or leave blank — the app's
+      #     config.py defaults to "1" when this env var is unset). This
+      #     is the single-tenant path that has worked since v0.
+      #   * Hosted (portablellm.wiki and any clone running OAuth for
+      #     more than one user): enter "0". When 0, the docker command
+      #     above seeds the public Avery demo tenant under
+      #     <TENANTS_ROOT>/avery/ on every boot (idempotent).
+      #
+      # WHY ``sync: false`` instead of ``value: "1"``:
+      # A previous version of this blueprint hard-coded ``value: "1"``
+      # as a friendly default for OSS self-hosters. That worked for
+      # them, but on the hosted production deploy it silently stomped
+      # the dashboard override back to "1" on a Render Blueprint sync
+      # — instantly converting a hosted multi-tenant service into a
+      # single-tenant one mid-flight (every /auth/* + /t/* + /owner/*
+      # route 404'd until the env var was reset by hand). Marking it
+      # ``sync: false`` makes the dashboard value the source of truth
+      # and never overwrites it on a blueprint sync. The app's own
+      # default ("1" when unset) still covers self-hosters who skip
+      # the prompt.
       - key: SINGLE_TENANT_MODE
-        value: "1"
+        sync: false
 
       # --- Multi-tenant root (only used when SINGLE_TENANT_MODE=0) ---
       # Where per-tenant wikis live. Each tenant gets
