@@ -270,11 +270,23 @@ function OwnerPageInner({ tenant }: { tenant?: string }) {
   }
 
   async function loadJobs() {
+    // Background poller: runs on a 4s interval (see effect below) and is
+    // also called fire-and-forget from a few user-initiated handlers
+    // (post-ingest refresh, post-drafter refresh, "refresh" button).
+    //
+    // It MUST NOT call ``setError`` on failure. Doing so used to paint
+    // a red "NetworkError when attempting to fetch resource" banner over
+    // the green "drafter job started" toast every time Firefox aborted
+    // one of the three concurrent pollers (this fn, swarm, activeJob)
+    // racing against a slow Render dyno. The job itself was always fine;
+    // only the visual was lying. console.warn so the failure is
+    // diagnosable in devtools without commandeering the user's
+    // attention.
     try {
       const r = await ownerListJobs(tenant);
       setJobs(r.jobs);
     } catch (e) {
-      setError((e as Error).message);
+      console.warn("[owner/page] loadJobs poll failed:", (e as Error).message);
     }
   }
 
@@ -310,11 +322,19 @@ function OwnerPageInner({ tenant }: { tenant?: string }) {
     }
     let cancelled = false;
     async function load() {
+      // Background poller — see loadJobs() above for why we swallow
+      // errors instead of routing them to setError. tl;dr: three
+      // pollers + one Render dyno = race-aborted fetches that throw
+      // NetworkError on Firefox and paint a red banner over whatever
+      // success state the user is actually looking at.
       try {
         const r = await ownerGetLintSwarm(swarmId!, tenant);
         if (!cancelled) setSwarm(r);
       } catch (e) {
-        if (!cancelled) setError((e as Error).message);
+        console.warn(
+          "[owner/page] swarm poll failed:",
+          (e as Error).message
+        );
       }
     }
     load();
@@ -332,11 +352,15 @@ function OwnerPageInner({ tenant }: { tenant?: string }) {
     }
     let cancelled = false;
     async function load() {
+      // Background poller — see loadJobs() above.
       try {
         const r = await ownerGetJob(activeJob!, tenant);
         if (!cancelled) setActiveJobDetail(r);
       } catch (e) {
-        if (!cancelled) setError((e as Error).message);
+        console.warn(
+          "[owner/page] activeJob poll failed:",
+          (e as Error).message
+        );
       }
     }
     load();
