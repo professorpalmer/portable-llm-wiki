@@ -70,3 +70,6 @@ tenants/
 # Editor swap / backup files
 *.swo
 *~
+
+# Personal branding assets — owner-specific, not part of the OSS distribution.
+assets/branding/professorpalmer/
