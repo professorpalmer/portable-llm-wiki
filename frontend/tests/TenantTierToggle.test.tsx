@@ -183,4 +183,68 @@ describe("TierToggle", () => {
     });
     expect(onChanged).not.toHaveBeenCalled();
   });
+
+  it("surfaces a durability warning when the retier won't sync", async () => {
+    // A retier that only landed on local disk must warn the owner — a
+    // private-tier change that silently reverts on restart is the exact
+    // trap the backend verdict exists to expose.
+    vi.mocked(ownerSetTier).mockResolvedValueOnce({
+      ok: true,
+      slug: "anti-oppression-stance",
+      tier: "private",
+      sync: {
+        will_sync: false,
+        mode: "local_only",
+        remote: null,
+        reason: "no_remote_configured",
+        detail: "Saved to local disk only. Git persistence is OFF.",
+      },
+    });
+    render(
+      <TierToggle
+        slug="anti-oppression-stance"
+        tier="public"
+        tenantId="cary"
+        onTierChanged={() => undefined}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText(/change tier for/i), {
+      target: { value: "private" },
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("sync-warning")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("sync-warning")).toHaveTextContent(
+      /local disk only/i,
+    );
+  });
+
+  it("renders no durability warning when the retier syncs", async () => {
+    vi.mocked(ownerSetTier).mockResolvedValueOnce({
+      ok: true,
+      slug: "anti-oppression-stance",
+      tier: "private",
+      sync: {
+        will_sync: true,
+        mode: "global",
+        remote: "https://github.com/acme/wiki.git",
+        detail: "Saved and auto-pushing to the configured git remote.",
+      },
+    });
+    render(
+      <TierToggle
+        slug="anti-oppression-stance"
+        tier="public"
+        tenantId="cary"
+        onTierChanged={() => undefined}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText(/change tier for/i), {
+      target: { value: "private" },
+    });
+    await waitFor(() => {
+      expect(ownerSetTier).toHaveBeenCalled();
+    });
+    expect(screen.queryByTestId("sync-warning")).toBeNull();
+  });
 });

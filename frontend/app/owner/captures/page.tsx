@@ -14,7 +14,9 @@ import {
   ownerReadRaw,
   ownerReingestRaw,
   type RawFile,
+  type SyncVerdict,
 } from "@/lib/api";
+import { SyncWarning } from "@/components/SyncWarning";
 
 type Status =
   | { kind: "idle" }
@@ -46,6 +48,7 @@ export default function CapturesPage() {
   const [openContent, setOpenContent] = useState<string>("");
   const [openLoading, setOpenLoading] = useState<boolean>(false);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
+  const [sync, setSync] = useState<SyncVerdict | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkRunning, setBulkRunning] = useState(false);
 
@@ -86,9 +89,11 @@ export default function CapturesPage() {
       return;
     }
     setActionMsg(null);
+    setSync(null);
     try {
-      await ownerDeleteRaw(rel);
+      const res = await ownerDeleteRaw(rel);
       setActionMsg(`deleted ${rel}`);
+      setSync(res.sync ?? null);
       if (openRel === rel) {
         setOpenRel(null);
         setOpenContent("");
@@ -156,9 +161,11 @@ export default function CapturesPage() {
     if (!confirm(confirmMsg)) return;
 
     setActionMsg(null);
+    setSync(null);
     setBulkRunning(true);
     try {
       const result = await ownerRawBulk(action, paths);
+      setSync(result.sync ?? null);
       const failureSummary =
         result.error_count > 0
           ? ` · ${result.error_count} failed (${result.results
@@ -253,6 +260,7 @@ export default function CapturesPage() {
           {actionMsg}
         </div>
       )}
+      <SyncWarning sync={sync} />
 
       {/* Bulk action bar — sticky so it stays visible while scrolling a long list */}
       {selected.size > 0 && (

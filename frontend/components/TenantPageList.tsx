@@ -24,7 +24,9 @@ import {
   ownerSetTier,
   type Manifest,
   type PageSummary,
+  type SyncVerdict,
 } from "@/lib/api";
+import { SyncWarning } from "@/components/SyncWarning";
 
 
 // Tailwind classes for tier-coloured pills. Mirrors the per-page detail
@@ -240,14 +242,17 @@ export function TierToggle({
 }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [sync, setSync] = useState<SyncVerdict | null>(null);
 
   async function onSelect(e: React.ChangeEvent<HTMLSelectElement>) {
     const next = e.target.value as PageSummary["tier"];
     if (next === tier) return;
     setErr(null);
+    setSync(null);
     setBusy(true);
     try {
-      await ownerSetTier(slug, next, tenantId);
+      const res = await ownerSetTier(slug, next, tenantId);
+      setSync(res.sync ?? null);
       onTierChanged();
     } catch (ex) {
       setErr((ex as Error).message);
@@ -257,28 +262,31 @@ export function TierToggle({
   }
 
   return (
-    <div className="shrink-0 flex items-center gap-1.5">
-      {err && (
-        <span
-          className="text-[10px] text-red-700 max-w-[160px] truncate"
-          title={err}
+    <div className="shrink-0 flex flex-col items-end gap-1">
+      <div className="flex items-center gap-1.5">
+        {err && (
+          <span
+            className="text-[10px] text-red-700 max-w-[160px] truncate"
+            title={err}
+          >
+            {err}
+          </span>
+        )}
+        <select
+          value={tier}
+          onChange={onSelect}
+          disabled={busy}
+          aria-label={`Change tier for ${slug}`}
+          title="Change this page's tier. The badge colour mirrors the detail page."
+          className={`text-[10px] uppercase tracking-wide font-semibold border rounded px-1.5 py-0.5 cursor-pointer focus:outline-none focus:ring-1 focus:ring-ink ${TIER_PILL[tier] || ""} ${busy ? "opacity-50 cursor-wait" : ""}`}
         >
-          {err}
-        </span>
-      )}
-      <select
-        value={tier}
-        onChange={onSelect}
-        disabled={busy}
-        aria-label={`Change tier for ${slug}`}
-        title="Change this page's tier. The badge colour mirrors the detail page."
-        className={`text-[10px] uppercase tracking-wide font-semibold border rounded px-1.5 py-0.5 cursor-pointer focus:outline-none focus:ring-1 focus:ring-ink ${TIER_PILL[tier] || ""} ${busy ? "opacity-50 cursor-wait" : ""}`}
-      >
-        <option value="public">public</option>
-        <option value="recruiter">recruiter</option>
-        <option value="friend">friend</option>
-        <option value="private">private</option>
-      </select>
+          <option value="public">public</option>
+          <option value="recruiter">recruiter</option>
+          <option value="friend">friend</option>
+          <option value="private">private</option>
+        </select>
+      </div>
+      <SyncWarning sync={sync} />
     </div>
   );
 }

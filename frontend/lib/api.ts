@@ -288,7 +288,7 @@ export async function ownerLint(tenant?: string): Promise<LintReport> {
 }
 
 export async function ownerSetTier(slug: string, tier: PageSummary["tier"], tenant?: string) {
-  return asJson<{ ok: boolean; slug: string; tier: string }>(
+  return asJson<{ ok: boolean; slug: string; tier: string; sync?: SyncVerdict }>(
     await apiFetch(`${wikiBase(tenant)}/owner/page/${encodeURIComponent(slug)}/tier`, {
       method: "PATCH",
       headers: headers(),
@@ -935,6 +935,8 @@ export type BulkRawResult = {
     tracking_id?: string;
     error?: string;
   }[];
+  /** Present only when the batch caused a git-tracked mutation (delete). */
+  sync?: SyncVerdict;
 };
 
 export async function ownerRawBulk(
@@ -979,7 +981,10 @@ export async function ownerReadRaw(relPath: string, tenant?: string): Promise<st
   return data.content;
 }
 
-export async function ownerDeleteRaw(relPath: string, tenant?: string): Promise<void> {
+export async function ownerDeleteRaw(
+  relPath: string,
+  tenant?: string,
+): Promise<{ ok: boolean; rel_path: string; sync?: SyncVerdict }> {
   const stripped = relPath.startsWith("raw/") ? relPath.slice(4) : relPath;
   const r = await apiFetch(
     `${wikiBase(tenant)}/owner/raw/${encodeRawPath(stripped)}`,
@@ -995,6 +1000,7 @@ export async function ownerDeleteRaw(relPath: string, tenant?: string): Promise<
     }
     throw new Error(`delete failed: ${detail}`);
   }
+  return r.json() as Promise<{ ok: boolean; rel_path: string; sync?: SyncVerdict }>;
 }
 
 export async function ownerReingestRaw(relPath: string, tenant?: string): Promise<{
