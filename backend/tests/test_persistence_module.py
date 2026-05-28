@@ -192,3 +192,50 @@ def test_flush_coalesces_messages(tmp_path: Path, monkeypatch):
         text=True,
     )
     assert "write A" in out
+
+
+# ---------------------------------------------------------------------------
+# describe_sync — the caller-facing "will this write actually sync?" verdict
+# that every mutation endpoint embeds so a silent no-op can't look like
+# durable success.
+# ---------------------------------------------------------------------------
+
+
+def test_describe_sync_local_only_without_remote(monkeypatch):
+    """Single-tenant, no remote: writes stay on local disk and the verdict
+    must say so loudly (will_sync False, actionable detail)."""
+    monkeypatch.delenv("WIKI_GIT_REMOTE", raising=False)
+    import importlib
+
+    from app import persistence as _persistence  # noqa: WPS433
+
+    importlib.reload(_persistence)
+    verdict = _persistence.describe_sync()
+    assert verdict["will_sync"] is False
+    assert verdict["mode"] == "local_only"
+    assert verdict["remote"] is None
+    assert verdict["reason"] == "no_remote_configured"
+    assert "WIKI_GIT_REMOTE" in verdict["detail"]
+
+
+def test_describe_sync_global_with_remote_redacts_credentials(tmp_path, monkeypatch):
+    """With a configured remote, the verdict reports will_sync True and the
+    remote URL is credential-redacted (never leak a PAT in a response)."""
+    monkeypatch.setenv(
+        "WIKI_GIT_REMOTE",
+        "https://user:supersecrettoken@github.com/acme/wiki.git",
+    )
+    monkeypatch.setenv("WIKI_GIT_AUTOSYNC", "1")
+    import importlib
+
+    from app import persistence as _persistence  # noqa: WPS433
+
+    importlib.reload(_persistence)
+    verdict = _persistence.describe_sync()
+    assert verdict["will_sync"] is True
+    assert verdict["mode"] == "global"
+    assert "supersecrettoken" not in (verdict["remote"] or "")
+    assert "****" in (verdict["remote"] or "")
+    # Reset module state for subsequent tests in the session.
+    monkeypatch.delenv("WIKI_GIT_REMOTE", raising=False)
+    importlib.reload(_persistence)

@@ -21,6 +21,7 @@ import {
 import { useTenant } from "@/lib/useTenant";
 import { useIsOwnerOf } from "@/lib/useIsOwner";
 import { OwnerGate } from "@/components/OwnerGate";
+import { SyncWarning } from "@/components/SyncWarning";
 
 type Mode = "paste" | "url" | "verbatim" | "from-llm" | "image" | "voice";
 type Subdir = "conversations" | "articles" | "meetings" | "assets";
@@ -900,6 +901,7 @@ function VerbatimPanel({ tenant }: { tenant?: string }) {
               checked to replace the existing page.
             </div>
           )}
+          <SyncWarning sync={result.sync} />
         </div>
       )}
     </section>

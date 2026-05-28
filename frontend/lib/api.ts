@@ -1,6 +1,19 @@
 // Browser-side API client. All requests proxy through Next.js /api/backend/*
 // (configured in next.config.mjs) so we don't fight CORS during local dev.
 
+/**
+ * Durability verdict the backend stamps on every content-create response so
+ * the UI can warn when a write won't actually reach a git remote / hosted
+ * site. See backend `persistence.describe_sync`.
+ */
+export type SyncVerdict = {
+  will_sync: boolean;
+  mode: "global" | "tenant" | "local_only";
+  remote: string | null;
+  reason?: string;
+  detail: string;
+};
+
 export type PageSummary = {
   slug: string;
   title: string;
@@ -293,6 +306,8 @@ export type IngestResult = {
     started_at?: string;
     error?: string;
   } | null;
+  /** Durability verdict — present on all content-create responses. */
+  sync?: SyncVerdict;
 };
 
 export async function ownerIngest(input: {
@@ -671,6 +686,8 @@ export type VerbatimCaptureResult = {
    *  existing file to overwrite. Lets the UI render a "replaced
    *  previous version" notice that's distinct from "first write." */
   overwrote_existing: boolean;
+  /** Durability verdict — present on all content-create responses. */
+  sync?: SyncVerdict;
 };
 
 export async function ownerCaptureVerbatim(

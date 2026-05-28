@@ -383,6 +383,73 @@ def get_status() -> dict:
         }
 
 
+def describe_sync() -> dict:
+    """Caller-facing verdict on whether the CURRENT write context will sync.
+
+    This is the antidote to the silent no-op trap: every mutation endpoint
+    (ingest, capture, import, page write) embeds this in its response so a
+    write that will never leave the box can never look like a durable
+    success. The shape is intentionally small and human-readable — the MCP
+    relays it verbatim, the owner console renders ``detail`` as a banner.
+
+    Resolution order mirrors :func:`flush_async`:
+
+      1. Global remote (OSS / single-tenant ``WIKI_GIT_REMOTE``) -> syncs.
+      2. Bound tenant with a connected repo (hosted) -> syncs.
+      3. Bound tenant without a repo -> does NOT sync (connect a repo).
+      4. Single-tenant, no remote -> does NOT sync (set WIKI_GIT_REMOTE).
+    """
+    if AUTOSYNC_ENABLED and GIT_REMOTE:
+        return {
+            "will_sync": True,
+            "mode": "global",
+            "remote": _redact_remote(GIT_REMOTE),
+            "branch": GIT_BRANCH,
+            "detail": "Saved and auto-pushing to the configured git remote.",
+        }
+
+    try:
+        from .tenants import current_tenant_or_none
+
+        tenant = current_tenant_or_none()
+    except Exception:  # noqa: BLE001
+        tenant = None
+
+    if tenant is not None:
+        if tenant.gh_repo and tenant.gh_token:
+            return {
+                "will_sync": True,
+                "mode": "tenant",
+                "remote": tenant.gh_repo,
+                "branch": GIT_BRANCH,
+                "detail": "Saved and auto-pushing to your connected GitHub repo.",
+            }
+        return {
+            "will_sync": False,
+            "mode": "tenant",
+            "remote": None,
+            "reason": "no_repo_connected",
+            "detail": (
+                "Saved on the server, but this wiki isn't connected to a "
+                "GitHub repo yet — changes are NOT durable and will be lost "
+                "on restart. Connect a repo in the owner console to make "
+                "your wiki portable."
+            ),
+        }
+
+    return {
+        "will_sync": False,
+        "mode": "local_only",
+        "remote": None,
+        "reason": "no_remote_configured",
+        "detail": (
+            "Saved to local disk only. Git persistence is OFF "
+            "(WIKI_GIT_REMOTE is unset), so this will NOT reach a remote or "
+            "any hosted site. Set WIKI_GIT_REMOTE to enable autopush."
+        ),
+    }
+
+
 # ===========================================================================
 # Per-tenant persistence — hosted multi-tenant mode
 # ===========================================================================

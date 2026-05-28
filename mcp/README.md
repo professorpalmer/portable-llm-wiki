@@ -101,6 +101,15 @@ Without `WIKI_OWNER_TOKEN`, the server only surfaces public-tier pages and
 the owner-only tools return errors. This is the safe default for sharing
 your wiki with someone else's MCP client.
 
+### Durability disclosure on `ingest_source`
+
+`ingest_source` reports whether the write will actually persist. When the
+backend has git sync configured, the result ends with a `Sync:`
+confirmation. When it does not (self-host with no `WIKI_GIT_REMOTE`, or a
+hosted tenant with no connected repo), the result ends with a loud
+`WARNING — NOT SYNCED:` line plus the fix — so an agent never reports a
+durable save for a write that only landed on local disk.
+
 ## Tier model
 
 Every page in the wiki has a `tier:` frontmatter field (`public`,

@@ -45,6 +45,27 @@ def test_ingest_writes_raw_file(client, owner_headers, wiki_root: Path):
     assert "This is smoke-ingest content." in raw_file.read_text()
 
 
+def test_ingest_response_discloses_sync_state(client, owner_headers):
+    """Every ingest must tell the truth about durability. In the test env
+    there's no WIKI_GIT_REMOTE, so the response must flag will_sync=False
+    rather than letting a local-only write look like a durable success."""
+    r = client.post(
+        "/owner/ingest",
+        headers=owner_headers,
+        json={
+            "slug": "sync-disclosure",
+            "content": "Does this sync?",
+            "subdir": "conversations",
+            "run_orchestrator": False,
+        },
+    )
+    assert r.status_code == 201
+    sync = r.json()["sync"]
+    assert sync["will_sync"] is False
+    assert sync["mode"] in ("local_only", "tenant")
+    assert sync["detail"]  # human-readable, non-empty guidance
+
+
 def test_ingest_duplicate_slug_is_409(client, owner_headers):
     body = {
         "slug": "dup-test",

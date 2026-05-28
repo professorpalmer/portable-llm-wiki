@@ -4,6 +4,9 @@
 backend/.env
 backend/.env.local
 frontend/.env.local
+
+# Local CodeGraph index (semantic code intelligence build artifact).
+.codegraph/
 # Allow .env.example committed templates only.
 !backend/.env.example
 !.env.example

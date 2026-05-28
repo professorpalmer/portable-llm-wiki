@@ -1128,6 +1128,19 @@ def _safe_slug(slug: str) -> str:
     return s
 
 
+def _with_sync(payload: dict) -> dict:
+    """Stamp a content-create/mutate response with the sync verdict.
+
+    Centralizes the "will this write actually reach a remote?" disclosure
+    so every create surface (ingest, import, capture, page write) tells the
+    same truth and a silent no-op can never look like a durable success.
+    """
+    from . import persistence as _persistence
+
+    payload["sync"] = _persistence.describe_sync()
+    return payload
+
+
 def _validate_tier(tier: str) -> str:
     t = tier.strip().lower()
     if t not in VALID_TIERS:
@@ -1194,7 +1207,7 @@ def owner_ingest(req: IngestRequest, _: Viewer = Depends(require_owner)) -> dict
 
     from . import persistence as _persistence
     _persistence.flush_async(f"ingest {rel_path}")
-    return response
+    return _with_sync(response)
 
 
 class ImportRequest(BaseModel):
@@ -1357,14 +1370,14 @@ async def owner_import(req: ImportRequest, _: Viewer = Depends(require_owner)) -
 
     from . import persistence as _persistence
     _persistence.flush_async(f"import {req.kind} -> {rel_path}")
-    return {
+    return _with_sync({
         "ok": True,
         "rel_path": rel_path,
         "size": file_path.stat().st_size,
         "pages_before": sorted(pages_before),
         "orchestrator": orchestrator,
         "drafted": drafted,
-    }
+    })
 
 
 class CaptureIngestRequest(BaseModel):
@@ -1466,7 +1479,7 @@ async def owner_capture_paste(
 
     from . import persistence as _persistence
     _persistence.flush_async(f"capture/paste {result.rel_path}")
-    return {
+    return _with_sync({
         "ok": True,
         "rel_path": result.rel_path,
         "size": result.size,
@@ -1474,7 +1487,7 @@ async def owner_capture_paste(
         "text_preview": result.text[:600],
         "orchestrator": orchestrator_info,
         "drafted": drafted,
-    }
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -1765,14 +1778,14 @@ def owner_capture_structured(
         f"writeback: {len(written)} pages from {session_label}"
     )
 
-    return {
+    return _with_sync({
         "ok": True,
         "written": written,
         "conflicts": conflicts,
         "errors": warnings,
         "session_label": session_label,
         "page_count": len(written),
-    }
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -1888,7 +1901,7 @@ def owner_capture_verbatim(
     tenant.reload_index()
     _persistence.flush_async(f"verbatim: {result.rel_path}")
 
-    return {
+    return _with_sync({
         "ok": True,
         "written": {
             "rel_path": result.rel_path,
@@ -1904,7 +1917,7 @@ def owner_capture_verbatim(
             else None
         ),
         "overwrote_existing": result.overwrote_existing,
-    }
+    })
 
 
 @app.post("/owner/capture/image", status_code=status.HTTP_201_CREATED)
@@ -1940,7 +1953,7 @@ async def owner_capture_image(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     from . import persistence as _persistence
     _persistence.flush_async(f"capture/image {result.rel_path}")
-    return {
+    return _with_sync({
         "ok": True,
         "rel_path": result.rel_path,
         "asset_rel_path": result.asset_rel_path,
@@ -1948,7 +1961,7 @@ async def owner_capture_image(
         "transcribed_by": result.transcribed_by,
         "text_preview": result.text[:1200],
         "orchestrator": _maybe_kick_orchestrator(result.rel_path, label, run=run_orchestrator),
-    }
+    })
 
 
 @app.post("/owner/capture/audio", status_code=status.HTTP_201_CREATED)
@@ -1984,14 +1997,14 @@ async def owner_capture_audio(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     from . import persistence as _persistence
     _persistence.flush_async(f"capture/audio {result.rel_path}")
-    return {
+    return _with_sync({
         "ok": True,
         "rel_path": result.rel_path,
         "size": result.size,
         "transcribed_by": result.transcribed_by,
         "text_preview": result.text[:1200],
         "orchestrator": _maybe_kick_orchestrator(result.rel_path, label, run=run_orchestrator),
-    }
+    })
 
 
 class MintShareTokenRequest(BaseModel):
@@ -2146,11 +2159,11 @@ def owner_write_page(req: PageWriteRequest, _: Viewer = Depends(require_owner)) 
     rel_path = str(file_path.relative_to(settings.wiki_root)).replace("\\", "/")
     from . import persistence as _persistence
     _persistence.flush_async(f"new page {rel_path}")
-    return {
+    return _with_sync({
         "ok": True,
         "slug": slug,
         "rel_path": rel_path,
-    }
+    })
 
 
 @app.get("/owner/page/{slug}/raw")
@@ -2201,14 +2214,14 @@ def owner_replace_page(
     refreshed = index.get(slug)
     from . import persistence as _persistence
     _persistence.flush_async(f"edit page {page.rel_path}")
-    return {
+    return _with_sync({
         "ok": True,
         "slug": slug,
         "rel_path": page.rel_path,
         "tier": refreshed.tier if refreshed else page.tier,
         "title": refreshed.title if refreshed else page.title,
         "size": len(new_text),
-    }
+    })
 
 
 @app.patch("/owner/page/{slug}/tier")

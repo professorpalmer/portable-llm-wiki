@@ -144,11 +144,26 @@ route logs the tenant id it resolved and any error from GitHub.
   (Sonnet for query, Haiku for orchestrator drafts), expect ~$0.01 per
   ten-page wiki seed. Set a monthly cap on the API console.
 
+## GitHub sync (shipped)
+
+Every content mutation (ingest, capture, import, page edit) is committed
+and pushed to the user's own GitHub repo using their stored OAuth token —
+debounced so a burst of writes coalesces into one commit. The round-trip
+is implemented in `backend/app/persistence.py` (`flush_async` /
+`flush_tenant_async`, plus the pull path `pull_tenant_now`) and surfaced
+through `POST /owner/sync/now`, `POST /owner/sync/pull`, and
+`GET /owner/sync/status`. On owner login the backend does a best-effort
+pull so edits made on github.com (or another device) show up.
+
+Durability is observable, never silent: every create/mutate response
+carries a `sync` verdict (`persistence.describe_sync`) reporting whether
+the write will actually reach a remote. When it won't — self-host with no
+`WIKI_GIT_REMOTE`, or a hosted tenant that hasn't connected a repo — the
+MCP and the web UI surface a loud, actionable warning instead of a green
+"saved" that implies durability it doesn't have.
+
 ## What's intentionally NOT included in v1.0
 
-* **Continuous GitHub sync**: the user's wiki lives on our Render disk
-  in v1.0. v1.1 adds a worker that pushes every mutation to their
-  `<login>/portable-llm-wiki` repo using their stored OAuth token.
 * **BYO LLM keys**: users share our keys with a per-account monthly cap.
   v1.1 adds a settings UI for pasting their own key + opt-out of the
   shared key.

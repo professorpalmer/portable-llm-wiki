@@ -6,6 +6,41 @@ itself is versioned separately. See [SPEC.md](./SPEC.md).
 Format roughly follows [Keep a Changelog](https://keepachangelog.com),
 ordered newest-first.
 
+## 2.2.0. Durability you can see — no more silent no-op
+
+The "I created a note and it never showed up" trap, closed. Git-backed
+sync has shipped for a while (`flush_async` / per-tenant push + login
+pull), but a write that *couldn't* sync — self-host with no
+`WIKI_GIT_REMOTE`, or a hosted tenant that never connected a repo —
+still returned a cheerful `ok: true`. The write landed on disk and
+quietly never went anywhere. This release makes durability observable
+end to end.
+
+- **`sync` verdict on every create/mutate response.** New
+  `persistence.describe_sync()` returns a small, human-readable verdict
+  (`will_sync`, `mode` = `global` / `tenant` / `local_only`, redacted
+  `remote`, and an actionable `detail`). It's stamped onto every
+  content surface — ingest, import, paste/verbatim/image/audio capture,
+  structured writeback, and page create/edit — via a single `_with_sync`
+  helper so the disclosure can never drift between endpoints.
+- **MCP relays it (server v0.1.3).** `ingest_source` appends the verdict
+  to its result: a one-line `Sync:` confirmation on the happy path, and
+  a loud `WARNING — NOT SYNCED:` with the fix when a write is
+  local-only. Agents now tell users the truth about durability instead
+  of reporting a false success.
+- **Web UI warns on the create surface.** New `SyncWarning` component
+  renders nothing on the durable path and an amber, actionable banner
+  (with a "connect a repo" link for hosted tenants) when a write won't
+  sync. Wired into the capture flow.
+- **Credentials never leak in a verdict** — the `remote` field is
+  always credential-redacted (PAT/token stripped).
+- **Docs**: corrected the stale "continuous GitHub sync — not included
+  in v1.0" note in `HOSTED_DEPLOYMENT.md` (it shipped), and documented
+  the local-only warning in `backend/.env.example`.
+- Tests: backend `describe_sync` unit coverage + HTTP-level ingest
+  disclosure; frontend `SyncWarning` suite. Full suites green
+  (backend 313, frontend 154).
+
 ## 2.1.0. Verbatim capture + hosted-mode hardening
 
 The hosted-mode shake-down release. 2.0.0 shipped the multi-tenant

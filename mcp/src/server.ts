@@ -77,10 +77,33 @@ function asError(err: unknown): { content: { type: "text"; text: string }[]; isE
   return { content: [{ type: "text", text: `Error: ${message}` }], isError: true };
 }
 
+/**
+ * The backend stamps every content-mutating response with a `sync` verdict
+ * describing whether the write will actually reach a git remote (and the
+ * hosted site). We surface it verbatim so an agent never reports a durable
+ * success for a write that only landed on local disk.
+ */
+interface SyncVerdict {
+  will_sync: boolean;
+  mode: "global" | "tenant" | "local_only";
+  remote: string | null;
+  reason?: string;
+  detail: string;
+}
+
+function syncNote(sync?: SyncVerdict): string {
+  if (!sync) return "";
+  if (sync.will_sync) {
+    return `\nSync: ${sync.detail}`;
+  }
+  // Loud, actionable warning — this is the trap we never want users to hit.
+  return `\n\nWARNING — NOT SYNCED: ${sync.detail}`;
+}
+
 const server = new McpServer(
   {
     name: "portable-llm-wiki",
-    version: "0.1.2",
+    version: "0.1.3",
   },
   {
     instructions: `You are connected to a Portable LLM Wiki — a structured personal-context wiki for ${
@@ -344,13 +367,14 @@ server.registerTool(
         rel_path: string;
         size: number;
         orchestrator: { tracking_id?: string; status?: string; error?: string } | null;
+        sync?: SyncVerdict;
       };
       const orch = r.orchestrator?.tracking_id
         ? `\nPuppetmaster ingest job started: tracking_id=${r.orchestrator.tracking_id}.`
         : r.orchestrator?.error
         ? `\nOrchestrator skipped: ${r.orchestrator.error}`
         : "";
-      return asText(`Saved ${r.rel_path} (${r.size} bytes).${orch}`);
+      return asText(`Saved ${r.rel_path} (${r.size} bytes).${orch}${syncNote(r.sync)}`);
     } catch (err) {
       return asError(err);
     }
