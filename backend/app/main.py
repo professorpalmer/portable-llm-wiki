@@ -2052,7 +2052,7 @@ def owner_mint_share_token(
     # writes, so minting 3 tokens in 8s still produces one commit.
     from . import persistence as _persistence
     _persistence.flush_async(f"mint share token ({req.tier})")
-    return minted
+    return _with_sync(minted)
 
 
 @app.delete("/owner/share-tokens/{token_id}")
@@ -2070,7 +2070,7 @@ def owner_revoke_share_token(
     # owner who thought they killed a leaked URL still has it active.
     from . import persistence as _persistence
     _persistence.flush_async(f"revoke share token {token_id}")
-    return {"ok": True, "id": token_id}
+    return _with_sync({"ok": True, "id": token_id})
 
 
 @app.get("/owner/capture/config")
@@ -2237,7 +2237,7 @@ def owner_patch_tier(slug: str, req: TierPatchRequest, _: Viewer = Depends(requi
     index.reload()
     from . import persistence as _persistence
     _persistence.flush_async(f"retier {slug} -> {new_tier}")
-    return {"ok": True, "slug": slug, "tier": new_tier}
+    return _with_sync({"ok": True, "slug": slug, "tier": new_tier})
 
 
 def _set_tier_in_frontmatter(text: str, new_tier: str) -> str:
@@ -2504,7 +2504,7 @@ def owner_delete_raw(
     from . import persistence as _persistence
 
     _persistence.flush_async(f"delete raw {full_rel}")
-    return {"ok": True, "rel_path": full_rel}
+    return _with_sync({"ok": True, "rel_path": full_rel})
 
 
 class BulkRawRequest(BaseModel):
@@ -2598,13 +2598,17 @@ def owner_raw_bulk(
         )
 
     ok_count = sum(1 for r in results if r.get("ok"))
-    return {
+    response = {
         "action": req.action,
         "total": len(results),
         "ok_count": ok_count,
         "error_count": len(results) - ok_count,
         "results": results,
     }
+    # Only disclose a sync verdict when a git-mutating flush actually fired.
+    if successes_for_persistence:
+        response = _with_sync(response)
+    return response
 
 
 @app.post("/owner/raw/{rel_path:path}/reingest")

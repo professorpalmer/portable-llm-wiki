@@ -417,6 +417,37 @@ def describe_sync() -> dict:
 
     if tenant is not None:
         if tenant.gh_repo and tenant.gh_token:
+            # Mirror flush_tenant_async, which no-ops when autosync is off or
+            # the tenant repo hasn't been cloned/bootstrapped yet — either way
+            # the write won't actually reach the remote.
+            if not AUTOSYNC_ENABLED:
+                return {
+                    "will_sync": False,
+                    "mode": "tenant",
+                    "remote": tenant.gh_repo,
+                    "branch": GIT_BRANCH,
+                    "reason": "autosync_disabled",
+                    "detail": (
+                        "Saved on the server. A GitHub repo is connected, but "
+                        "autopush is OFF (WIKI_GIT_AUTOSYNC is disabled), so "
+                        "this change will NOT reach the remote until autosync "
+                        "is re-enabled or you trigger a manual sync."
+                    ),
+                }
+            if not _is_git_repo(tenant.wiki_root):
+                return {
+                    "will_sync": False,
+                    "mode": "tenant",
+                    "remote": tenant.gh_repo,
+                    "branch": GIT_BRANCH,
+                    "reason": "not_bootstrapped",
+                    "detail": (
+                        "Saved on the server, but your connected repo isn't "
+                        "initialized yet (clone/bootstrap is still pending), so "
+                        "this change isn't durable yet. It will sync once the "
+                        "repo finishes setting up."
+                    ),
+                }
             return {
                 "will_sync": True,
                 "mode": "tenant",
@@ -437,6 +468,22 @@ def describe_sync() -> dict:
             ),
         }
 
+    # No tenant bound (single-tenant / OSS) and the global branch above didn't
+    # take. Distinguish "no remote at all" from "remote set but autopush off",
+    # since the remediation differs.
+    if GIT_REMOTE and not AUTOSYNC_ENABLED:
+        return {
+            "will_sync": False,
+            "mode": "local_only",
+            "remote": None,
+            "reason": "autosync_disabled",
+            "detail": (
+                "Saved to local disk only. A git remote is configured but "
+                "autopush is OFF (WIKI_GIT_AUTOSYNC is disabled), so this will "
+                "NOT reach the remote or any hosted site. Re-enable "
+                "WIKI_GIT_AUTOSYNC to autopush."
+            ),
+        }
     return {
         "will_sync": False,
         "mode": "local_only",

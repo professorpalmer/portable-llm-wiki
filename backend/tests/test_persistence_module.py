@@ -272,3 +272,89 @@ def test_describe_sync_global_with_remote_redacts_credentials(tmp_path, monkeypa
     # Reset module state for subsequent tests in the session.
     monkeypatch.delenv("WIKI_GIT_REMOTE", raising=False)
     importlib.reload(_persistence)
+
+
+def test_describe_sync_local_only_remote_set_but_autosync_off(monkeypatch):
+    """A remote IS configured but autopush is disabled: the verdict must not
+    tell the owner to 'set WIKI_GIT_REMOTE' (it's already set) — it must point
+    at WIKI_GIT_AUTOSYNC instead."""
+    from app import persistence as _persistence  # noqa: WPS433
+
+    monkeypatch.setattr(_persistence, "GIT_REMOTE", "https://github.com/acme/wiki.git")
+    monkeypatch.setattr(_persistence, "AUTOSYNC_ENABLED", False)
+    verdict = _persistence.describe_sync()
+    assert verdict["will_sync"] is False
+    assert verdict["mode"] == "local_only"
+    assert verdict["reason"] == "autosync_disabled"
+    assert "WIKI_GIT_AUTOSYNC" in verdict["detail"]
+    assert "WIKI_GIT_REMOTE is unset" not in verdict["detail"]
+
+
+def _bound_tenant(tmp_path, *, gh_repo="acme/wiki", gh_token="tok", git=True):
+    """Build a Tenant whose wiki_root is (optionally) a real git repo."""
+    from app.tenants import Tenant
+
+    root = tmp_path
+    if git:
+        (root / ".git").mkdir(parents=True, exist_ok=True)
+    return Tenant(id="t1", wiki_root=root, gh_repo=gh_repo, gh_token=gh_token)
+
+
+def test_describe_sync_tenant_connected_syncs(tmp_path, monkeypatch):
+    """Connected tenant + autosync on + bootstrapped repo -> durable."""
+    from app import persistence as _persistence  # noqa: WPS433
+    from app.tenants import set_current_tenant
+
+    monkeypatch.setattr(_persistence, "GIT_REMOTE", "")
+    monkeypatch.setattr(_persistence, "AUTOSYNC_ENABLED", True)
+    with set_current_tenant(_bound_tenant(tmp_path)):
+        verdict = _persistence.describe_sync()
+    assert verdict["will_sync"] is True
+    assert verdict["mode"] == "tenant"
+    assert verdict["remote"] == "acme/wiki"
+
+
+def test_describe_sync_tenant_autosync_disabled_does_not_lie(tmp_path, monkeypatch):
+    """Connected tenant but WIKI_GIT_AUTOSYNC off: flush_tenant_async no-ops,
+    so the verdict must report will_sync False (not a durable success)."""
+    from app import persistence as _persistence  # noqa: WPS433
+    from app.tenants import set_current_tenant
+
+    monkeypatch.setattr(_persistence, "GIT_REMOTE", "")
+    monkeypatch.setattr(_persistence, "AUTOSYNC_ENABLED", False)
+    with set_current_tenant(_bound_tenant(tmp_path)):
+        verdict = _persistence.describe_sync()
+    assert verdict["will_sync"] is False
+    assert verdict["mode"] == "tenant"
+    assert verdict["reason"] == "autosync_disabled"
+    assert "WIKI_GIT_AUTOSYNC" in verdict["detail"]
+
+
+def test_describe_sync_tenant_not_bootstrapped_does_not_lie(tmp_path, monkeypatch):
+    """Connected tenant whose repo isn't cloned yet: _do_tenant_flush skips
+    with 'not a git repo', so the verdict must not promise durability."""
+    from app import persistence as _persistence  # noqa: WPS433
+    from app.tenants import set_current_tenant
+
+    monkeypatch.setattr(_persistence, "GIT_REMOTE", "")
+    monkeypatch.setattr(_persistence, "AUTOSYNC_ENABLED", True)
+    with set_current_tenant(_bound_tenant(tmp_path, git=False)):
+        verdict = _persistence.describe_sync()
+    assert verdict["will_sync"] is False
+    assert verdict["mode"] == "tenant"
+    assert verdict["reason"] == "not_bootstrapped"
+
+
+def test_describe_sync_tenant_no_repo_connected(tmp_path, monkeypatch):
+    """Bound tenant with no GitHub repo: not yet portable -> will_sync False."""
+    from app import persistence as _persistence  # noqa: WPS433
+    from app.tenants import set_current_tenant
+
+    monkeypatch.setattr(_persistence, "GIT_REMOTE", "")
+    monkeypatch.setattr(_persistence, "AUTOSYNC_ENABLED", True)
+    tenant = _bound_tenant(tmp_path, gh_repo="", gh_token="", git=False)
+    with set_current_tenant(tenant):
+        verdict = _persistence.describe_sync()
+    assert verdict["will_sync"] is False
+    assert verdict["mode"] == "tenant"
+    assert verdict["reason"] == "no_repo_connected"

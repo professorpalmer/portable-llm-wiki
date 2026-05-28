@@ -66,6 +66,32 @@ def test_ingest_response_discloses_sync_state(client, owner_headers):
     assert sync["detail"]  # human-readable, non-empty guidance
 
 
+def test_raw_delete_response_discloses_sync_state(client, owner_headers):
+    """Deletes mutate git-tracked content too — a delete that won't sync
+    silently resurrects on restart. The response must carry the sync verdict
+    just like ingest, so the disclosure can't drift between endpoints."""
+    ingest = client.post(
+        "/owner/ingest",
+        headers=owner_headers,
+        json={
+            "slug": "delete-sync-disclosure",
+            "content": "Delete me.",
+            "subdir": "conversations",
+            "run_orchestrator": False,
+        },
+    )
+    assert ingest.status_code == 201
+    rel_path = ingest.json()["rel_path"]  # e.g. "raw/conversations/<date>-slug.md"
+
+    r = client.delete(f"/owner/{rel_path}", headers=owner_headers)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is True
+    assert "sync" in data
+    assert data["sync"]["will_sync"] is False
+    assert data["sync"]["detail"]
+
+
 def test_ingest_duplicate_slug_is_409(client, owner_headers):
     body = {
         "slug": "dup-test",

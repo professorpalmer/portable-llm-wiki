@@ -10,6 +10,7 @@ export type SyncVerdict = {
   will_sync: boolean;
   mode: "global" | "tenant" | "local_only";
   remote: string | null;
+  branch?: string;
   reason?: string;
   detail: string;
 };
