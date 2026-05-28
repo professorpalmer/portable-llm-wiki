@@ -144,12 +144,34 @@ def pytest_configure(config: pytest.Config) -> None:
     # suite (test_rate_limit.py) builds its own FastAPI app + flips
     # RATE_LIMIT_ENABLED per-case, so it's unaffected by this default.
     os.environ["RATE_LIMIT_ENABLED"] = "0"
-    # Deliberately don't set WIKI_GIT_REMOTE — persistence tests will
-    # configure it per-test in a controlled way.
-    os.environ.pop("WIKI_GIT_REMOTE", None)
-    # No LLM keys — query fallback to keyword mode
-    os.environ.pop("ANTHROPIC_API_KEY", None)
-    os.environ.pop("OPENAI_API_KEY", None)
+
+    # Hermetic env: `app.config` calls `load_dotenv()` at import, which would
+    # otherwise inject the developer's real `backend/.env` into the test
+    # process (e.g. a real WIKI_GIT_REMOTE or API key) and silently break the
+    # "no remote / keyword fallback" assumptions these tests rely on.
+    # `load_dotenv(override=False)` skips keys already present, so we pin the
+    # sensitive ones to empty *values* (not pop — pop just lets dotenv re-add
+    # them). Persistence tests still override WIKI_GIT_REMOTE per-case via
+    # monkeypatch.setenv, which takes precedence and auto-reverts.
+    for _leaky in (
+        "WIKI_GIT_REMOTE",
+        "WIKI_GIT_BRANCH",
+        "WIKI_GIT_AUTOSYNC",
+        "WIKI_GIT_USER_NAME",
+        "WIKI_GIT_USER_EMAIL",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+    ):
+        os.environ[_leaky] = ""
+
+    # Force `app.config` to import now, so its module-level ``load_dotenv()``
+    # runs exactly once while the hermetic env above is in place. Otherwise a
+    # test that ``monkeypatch.delenv("WIKI_GIT_REMOTE")`` *before* the first
+    # config import would open a gap for ``load_dotenv`` to re-inject the
+    # developer's real backend/.env value (a real remote/key), which made
+    # the persistence tests pass only in the full-suite ordering. Importing
+    # here pins it deterministically for any subset/single-file run.
+    import app.config  # noqa: F401
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:

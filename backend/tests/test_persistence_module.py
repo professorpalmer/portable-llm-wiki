@@ -7,12 +7,45 @@ blocks in isolation.
 """
 from __future__ import annotations
 
+import importlib
 import os
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _restore_canonical_global_state(wiki_root: Path, owner_token: str):
+    """Keep this module order-independent.
+
+    Most tests here ``importlib.reload(app.config / app.persistence)`` with a
+    throwaway ``WIKI_ROOT`` + bare-repo remote. Those are *process-global*
+    module attributes, so without cleanup the stale values leak into later
+    test modules — an empty wiki (``page_count == 0``) and a dangling remote
+    that can make a subsequent startup rename the canonical wiki aside.
+
+    Restoring the canonical session wiki after every test makes the suite
+    pass regardless of which subset (or single file) is selected, not just
+    in the one full-suite ordering that happened to mask the leak. We take
+    the canonical paths from the ``wiki_root`` / ``owner_token`` fixtures
+    rather than importing conftest globals (which is import-resolution
+    fragile).
+    """
+    yield
+    os.environ["WIKI_ROOT"] = str(wiki_root)
+    os.environ["OWNER_TOKEN"] = owner_token
+    # Pin to empty (not pop): app.config.load_dotenv() would otherwise
+    # re-inject the developer's real backend/.env on the reload below.
+    os.environ["WIKI_GIT_REMOTE"] = ""
+    os.environ["WIKI_GIT_AUTOSYNC"] = ""
+    from app import config as _config
+
+    importlib.reload(_config)
+    from app import persistence as _persistence
+
+    importlib.reload(_persistence)
 
 
 def _init_bare_repo(path: Path) -> None:
