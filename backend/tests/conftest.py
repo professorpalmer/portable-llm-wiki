@@ -136,6 +136,16 @@ def pytest_configure(config: pytest.Config) -> None:
     """
     _seed_wiki(SESSION_TMP)
 
+    # Isolate git's global/system config so persistence code that runs
+    # `git config --global ...` (user.name/email, safe.directory) during tests
+    # writes to a throwaway file instead of polluting the developer's real
+    # ~/.gitconfig. Without this, the persistence suite rewrites the global git
+    # identity (e.g. to "Test Bot") and appends a safe.directory entry per run.
+    # GIT_CONFIG_GLOBAL points at a file inside SESSION_TMP, cleaned up in
+    # pytest_unconfigure; GIT_CONFIG_SYSTEM=/dev/null blocks system-config writes.
+    os.environ["GIT_CONFIG_GLOBAL"] = str(SESSION_TMP / "gitconfig")
+    os.environ["GIT_CONFIG_SYSTEM"] = os.devnull
+
     os.environ["WIKI_ROOT"] = str(SESSION_TMP)
     os.environ["OWNER_TOKEN"] = OWNER_TOKEN
     os.environ["DEFAULT_TIER"] = "public"
