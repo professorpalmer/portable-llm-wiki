@@ -783,6 +783,332 @@ def test_draft_from_raw_with_fallback_503s_when_no_llm_key(
     )
 
 
+# ---------------------------------------------------------------------------
+# /onboarding/assemble — guided first-signup bundle
+# ---------------------------------------------------------------------------
+#
+# Pins the contract the welcome page depends on:
+#   * requires a session (401 anonymous)
+#   * rejects empty bundles (422)
+#   * scrapes each URL once and reports per-URL status
+#   * concatenates answers + pastes + scrapes into ONE raw import
+#   * calls draft_starter_pages ONCE on the bundled body
+#   * partial URL failures don't bail the whole call
+
+
+def _stub_scrape(monkeypatch, results: dict):
+    """Patch url_scrape.scrape so tests don't hit the network.
+
+    ``results`` maps URL → dict of ScrapedPage kwargs. Unknown URLs land
+    on the empty-with-errors default so we exercise the "failed" branch.
+    """
+
+    from app import hosted_routes as _hr
+    from app import url_scrape as _url_scrape
+
+    async def fake_scrape(url: str):
+        spec = results.get(url)
+        if spec is None:
+            page = _url_scrape.ScrapedPage(url=url)
+            page.errors.append("stubbed: unknown URL")
+            return page
+        page = _url_scrape.ScrapedPage(url=url)
+        page.final_url = spec.get("final_url", url)
+        page.title = spec.get("title", "")
+        page.content = spec.get("content", "")
+        page.description = spec.get("description", "")
+        page.word_count = spec.get("word_count", len(page.content.split()))
+        if spec.get("errors"):
+            page.errors.extend(spec["errors"])
+        return page
+
+    # The endpoint imports url_scrape at module top — patch the rebound
+    # reference too so the substitution is actually picked up.
+    monkeypatch.setattr(_url_scrape, "scrape", fake_scrape)
+    monkeypatch.setattr(_hr.url_scrape, "scrape", fake_scrape)
+
+
+def _stub_assemble_drafter(monkeypatch, pages: list[dict] | None = None):
+    """Patch the direct-LLM drafter so /onboarding/assemble tests don't
+    hit Anthropic/OpenAI and don't try to start Puppetmaster.
+
+    Also captures the source_content the drafter was invoked with so
+    tests can assert the bundled dossier really did contain answers +
+    pastes + scrapes.
+    """
+    import json
+
+    from app import direct_drafter as _dd
+    from app import orchestrator as _orch
+
+    # Make the Puppetmaster path fail fast so /onboarding/assemble
+    # exercises the direct-drafter fallback. The fake binary path means
+    # the orchestrator subprocess invocation errors out cleanly.
+    monkeypatch.setattr(_orch, "PUPPETMASTER_BIN", "/no/such/binary-pllmw")
+
+    canned_pages = pages if pages is not None else [
+        {
+            "slug": "the-user",
+            "title": "The User",
+            "section": "entities",
+            "tier": "private",
+            "tags": ["self"],
+            "body": "## Who\n\nFrom the assembled bundle.",
+        },
+        {
+            "slug": "current-projects",
+            "title": "Current Projects",
+            "section": "projects",
+            "tier": "private",
+            "tags": ["work"],
+            "body": "## Active work\n\n[[The User]] is shipping things.",
+        },
+    ]
+    canned = json.dumps({"pages": canned_pages})
+
+    captured: dict = {}
+
+    async def fake_anthropic(_model: str, prompt: str, *, system_prompt: str = "") -> str:
+        captured["prompt"] = prompt
+        captured["system_prompt"] = system_prompt
+        return canned
+
+    monkeypatch.setattr(_dd, "_call_anthropic_json", fake_anthropic)
+    monkeypatch.setattr(_dd.settings, "anthropic_api_key", "test-key")
+    return captured
+
+
+def test_assemble_requires_session(multi_tenant_app):
+    """Anonymous POST to /onboarding/assemble must 401 — same gate as
+    every other onboarding endpoint."""
+    r = multi_tenant_app.post(
+        "/onboarding/assemble",
+        json={"answers": [{"question": "who", "answer": "me"}]},
+    )
+    assert r.status_code == 401
+
+
+def test_assemble_rejects_empty_bundle(multi_tenant_app):
+    """An empty bundle (no answers, no pastes, no URLs) must 422 with a
+    clear hint — never silently call the LLM on an empty corpus."""
+    _set_session_user(multi_tenant_app, "alice", login="alice")
+    r = multi_tenant_app.post("/onboarding/assemble", json={})
+    assert r.status_code == 422, r.text
+    assert "at least one" in r.json()["detail"].lower()
+
+
+def test_assemble_ignores_whitespace_only_inputs(multi_tenant_app):
+    """All-blank answers / pastes / URLs are not a meaningful bundle.
+    Whitespace-only values should be filtered like missing ones (422),
+    so we can't bypass the empty-bundle guard by submitting `"   "`."""
+    _set_session_user(multi_tenant_app, "alice", login="alice")
+    r = multi_tenant_app.post(
+        "/onboarding/assemble",
+        json={
+            "answers": [{"question": "who", "answer": "   "}],
+            "text_sources": [{"kind": "resume", "content": "\n\n"}],
+            "urls": [{"url": "   "}],
+        },
+    )
+    assert r.status_code == 422, r.text
+
+
+def test_assemble_drafts_from_answers_alone(multi_tenant_app, monkeypatch):
+    """Answers-only bundle should produce a starter wiki — questions are
+    the lowest-friction path so we must support it explicitly. The
+    backend should pass the literal question text to the drafter so
+    the LLM sees the prompt + answer pair.
+    """
+    captured = _stub_assemble_drafter(monkeypatch)
+    _set_session_user(multi_tenant_app, "alice", login="alice")
+    r = multi_tenant_app.post(
+        "/onboarding/assemble",
+        json={
+            "answers": [
+                {
+                    "question": "Who are you?",
+                    "answer": "Staff engineer at Strand Bio. Python + TS.",
+                },
+                {
+                    "question": "What are you working on?",
+                    "answer": "Genomic data pipelines.",
+                },
+            ],
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["answers_count"] == 2
+    assert body["text_count"] == 0
+    assert body["urls"] == []
+    assert body["usable_url_count"] == 0
+    assert body["pages_created"] == 2
+    # Bundled dossier contains both questions + answers so the LLM had
+    # full context — guard against a future regression that drops one.
+    assert "Who are you?" in captured["prompt"]
+    assert "Strand Bio" in captured["prompt"]
+    assert "Genomic data pipelines" in captured["prompt"]
+
+
+def test_assemble_concatenates_answers_pastes_and_urls(
+    multi_tenant_app, monkeypatch
+):
+    """Bundle path: answers + resume paste + 1 URL scrape land in ONE
+    raw import and ONE drafter call. The captured prompt must contain
+    fragments from all three inputs.
+    """
+    _stub_scrape(
+        monkeypatch,
+        {
+            "https://example.com/about": {
+                "title": "About Alice",
+                "content": "Alice runs a homelab and writes Python.",
+                "word_count": 8,
+            },
+        },
+    )
+    captured = _stub_assemble_drafter(monkeypatch)
+    _set_session_user(multi_tenant_app, "alice", login="alice")
+
+    r = multi_tenant_app.post(
+        "/onboarding/assemble",
+        json={
+            "answers": [
+                {"question": "Who are you?", "answer": "I am Alice."}
+            ],
+            "text_sources": [
+                {
+                    "kind": "resume",
+                    "label": "Resume",
+                    "content": "Resume body — Staff Eng @ Acme since 2024.",
+                }
+            ],
+            "urls": [
+                {"url": "https://example.com/about", "label": "Portfolio"}
+            ],
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["answers_count"] == 1
+    assert body["text_count"] == 1
+    assert len(body["urls"]) == 1
+    assert body["urls"][0]["status"] == "ok"
+    assert body["usable_url_count"] == 1
+    # ONE call into the drafter — content carries all three sources.
+    prompt = captured["prompt"]
+    assert "I am Alice." in prompt
+    assert "Staff Eng @ Acme since 2024" in prompt
+    assert "Alice runs a homelab" in prompt
+
+
+def test_assemble_partial_url_failure_reported_but_continues(
+    multi_tenant_app, monkeypatch
+):
+    """If ONE URL fails to scrape but the bundle still has a paste,
+    the call MUST succeed and surface the failure in ``urls[]`` so the
+    UI can show "we couldn't read X but did read Y".
+
+    This is the partial-failure-doesn't-bail-the-whole-bundle invariant
+    the welcome wizard relies on.
+    """
+    _stub_scrape(
+        monkeypatch,
+        {
+            "https://example.com/good": {
+                "title": "Good Page",
+                "content": "Some content.",
+                "word_count": 2,
+            },
+            "https://example.com/bad": {
+                "errors": ["http 404: not found"],
+            },
+        },
+    )
+    _stub_assemble_drafter(monkeypatch)
+    _set_session_user(multi_tenant_app, "alice", login="alice")
+
+    r = multi_tenant_app.post(
+        "/onboarding/assemble",
+        json={
+            "text_sources": [
+                {"kind": "freeform", "content": "Some notes."},
+            ],
+            "urls": [
+                {"url": "https://example.com/good"},
+                {"url": "https://example.com/bad"},
+            ],
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    statuses = {entry["url"]: entry["status"] for entry in body["urls"]}
+    assert statuses == {
+        "https://example.com/good": "ok",
+        "https://example.com/bad": "failed",
+    }
+    # usable_url_count counts non-failed URLs.
+    assert body["usable_url_count"] == 1
+
+
+def test_assemble_all_urls_failed_with_no_other_content_returns_422(
+    multi_tenant_app, monkeypatch
+):
+    """If the user only submitted URLs and ALL of them failed to scrape,
+    we have nothing to feed the drafter. Surface a 422 telling them to
+    add a paste or answer instead of bottoming out in the LLM with an
+    empty body.
+    """
+    _stub_scrape(
+        monkeypatch,
+        {
+            "https://example.com/x": {"errors": ["http 500"]},
+        },
+    )
+    _stub_assemble_drafter(monkeypatch)
+    _set_session_user(multi_tenant_app, "alice", login="alice")
+
+    r = multi_tenant_app.post(
+        "/onboarding/assemble",
+        json={"urls": [{"url": "https://example.com/x"}]},
+    )
+    assert r.status_code == 422, r.text
+    assert "couldn't read" in r.json()["detail"].lower()
+
+
+def test_assemble_writes_raw_import_and_returns_path(multi_tenant_app, monkeypatch):
+    """The dossier MUST land under ``raw/imports/`` on the tenant's disk
+    so the GitHub-sync layer commits it alongside the drafted pages.
+
+    Mirrors the existing /onboarding/import-text + /onboarding/import-url
+    promise: nothing the user submits is thrown away even if the LLM
+    later flakes.
+    """
+    import app.tenants as _tenants
+
+    _stub_assemble_drafter(monkeypatch)
+    _set_session_user(multi_tenant_app, "alice", login="alice")
+    r = multi_tenant_app.post(
+        "/onboarding/assemble",
+        json={
+            "answers": [
+                {"question": "Who?", "answer": "Alice."}
+            ]
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    raw_rel = body["raw_path"]
+    assert raw_rel.startswith("raw/imports/")
+    tenant = _tenants.manager().require("alice")
+    raw_file = tenant.wiki_root / raw_rel
+    assert raw_file.exists()
+    body_text = raw_file.read_text(encoding="utf-8")
+    assert "Alice." in body_text
+
+
 def test_direct_drafter_decision_pages_get_date_prefix():
     """Decision pages follow YYYY-MM-DD-<slug>.md. If the LLM forgets
     the date prefix, the validator must backfill today's date."""

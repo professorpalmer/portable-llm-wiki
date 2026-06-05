@@ -1405,6 +1405,20 @@ export type OnboardingImportResponse = {
     word_count?: number;
     [k: string]: unknown;
   };
+  // Direct-LLM drafter outputs. Populated on the hosted path (no
+  // Puppetmaster binary) where `_draft_from_raw_with_fallback` drafts
+  // pages synchronously instead of kicking off an orchestrator job.
+  // The UI MUST read these: a successful direct draft sets
+  // `orchestrator_started: false` AND `pages_created > 0`, so treating
+  // "orchestrator didn't start" as failure wrongly reports "unavailable"
+  // when N pages were in fact created.
+  pages_created?: number;
+  pages?: Array<{ slug: string; title: string; section: string }>;
+  draft_backend?: string;
+  draft_model?: string;
+  draft_warnings?: string[];
+  draft_error?: string;
+  orchestrator_error?: string;
 };
 
 export async function onboardingImportText(body: {
@@ -1431,6 +1445,105 @@ export async function onboardingImportUrl(body: {
   run_orchestrator?: boolean;
 }): Promise<OnboardingImportResponse> {
   return backendFetch<OnboardingImportResponse>("/onboarding/import-url", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Guided onboarding assembly
+// ---------------------------------------------------------------------------
+//
+// First-signup primary path. The /welcome wizard collects interview answers
+// + pasted text + URLs, and posts the whole bundle to /onboarding/assemble.
+// The backend scrapes the URLs, concatenates everything into one labeled
+// dossier under raw/imports/, then runs the starter drafter ONCE — so the
+// resulting 6–12 pages reflect the full picture instead of N redundant
+// per-source drafts.
+
+export type AssembleAnswerInput = {
+  /** The literal prompt text from the wizard. Posted with the answer so
+   * the backend doesn't need to know the question catalog. */
+  question: string;
+  answer: string;
+};
+
+export type AssembleTextSourceInput = {
+  /** bio | resume | linkedin | about | github-readme | notes | freeform —
+   * a label the LLM drafter uses when attributing pages back to the
+   * source. Matches /onboarding/import-text's `kind` field. */
+  kind?: string;
+  label?: string;
+  content: string;
+};
+
+export type AssembleUrlSourceInput = {
+  url: string;
+  label?: string;
+};
+
+export type AssembleUrlStatus = "ok" | "partial" | "failed";
+
+/** Per-URL outcome from the assembly call. Surfaces partial failures so
+ * the UI can show "we couldn't read your blog but did read your portfolio". */
+export type AssembleUrlResult = {
+  url: string;
+  label: string;
+  status: AssembleUrlStatus;
+  scraped: {
+    url: string;
+    final_url?: string;
+    title?: string;
+    word_count?: number;
+    errors?: string[];
+    [k: string]: unknown;
+  };
+};
+
+export type OnboardingAssembleResponse = {
+  ok: boolean;
+  tenant_id: string;
+  /** Echoed counts so the UI can display "we received N answers / M
+   * pastes / K URLs" without re-tracking its own form state. */
+  answers_count: number;
+  text_count: number;
+  /** Per-URL scrape outcomes. Always present (may be empty). */
+  urls: AssembleUrlResult[];
+  /** URLs whose scrape produced *any* usable content (status != failed).
+   * Drives the "we read X of Y URLs" copy. */
+  usable_url_count: number;
+  /** Echoed from `_draft_from_raw_with_fallback`. */
+  raw_path: string;
+  orchestrator_started?: boolean;
+  orchestrator_error?: string;
+  tracking_id?: string | null;
+  pages_created?: number;
+  pages?: Array<{ slug: string; title: string; section: string }>;
+  draft_backend?: string;
+  draft_model?: string;
+  draft_warnings?: string[];
+  draft_error?: string;
+};
+
+/**
+ * Submit the guided-onboarding bundle.
+ *
+ * Validation is server-side: at least one non-empty answer / text source
+ * / URL must be present, otherwise the backend 422s and the wizard keeps
+ * its "add a source" prompt up. Individual URL failures are reported in
+ * `urls[]` rather than failing the whole call, so the user gets a draft
+ * even if one of their links was offline.
+ */
+export async function onboardingAssemble(body: {
+  answers?: AssembleAnswerInput[];
+  text_sources?: AssembleTextSourceInput[];
+  urls?: AssembleUrlSourceInput[];
+  /** Mirrors the existing import-text / import-url flag. Defaults to
+   * true server-side; only pass false if the caller deliberately wants
+   * to stash the raw dossier without drafting pages. */
+  run_orchestrator?: boolean;
+}): Promise<OnboardingAssembleResponse> {
+  return backendFetch<OnboardingAssembleResponse>("/onboarding/assemble", {
     method: "POST",
     body: JSON.stringify(body),
   });

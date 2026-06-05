@@ -1116,6 +1116,237 @@ async def onboarding_import_url(
 
 
 # ---------------------------------------------------------------------------
+# Onboarding: guided assembly — answer some questions + paste a few things
+# ---------------------------------------------------------------------------
+#
+# The first-signup path. Instead of asking the user to pick ONE source and
+# generate a starter wiki from it, /onboarding/assemble collects a small
+# bundle:
+#
+#   * Interview answers — 4–6 lightweight questions the welcome wizard
+#     poses ("who are you", "what are you working on", "what should LLMs
+#     know about how you work", "links worth remembering"). All optional.
+#   * Text sources — pasted resume, LinkedIn About, freeform notes,
+#     copied GitHub profile READMEs. All optional.
+#   * URL sources — personal site, blog, GitHub profile, portfolio.
+#     Scraped server-side with the existing url_scrape helper. All
+#     optional, and individual URL failures don't fail the whole bundle.
+#
+# Why one endpoint and not N calls to /onboarding/import-text or
+# /onboarding/import-url: calling those repeatedly produces N independent
+# starter-wiki drafts, each padded to 6–12 pages off a thin source —
+# which yields duplicate "About <user>" pages, contradictory facts, and
+# a graph that doesn't connect. Bundling means the drafter sees the
+# whole picture in one prompt and picks 6–12 pages once.
+
+
+class AssembleAnswer(BaseModel):
+    """A single question/answer pair from the onboarding interview.
+
+    The frontend posts the literal prompt text alongside the answer so the
+    backend doesn't need to know the question catalog. That keeps the
+    prompt list editable in the UI without a backend deploy.
+    """
+
+    question: str = Field(..., min_length=1, max_length=300)
+    answer: str = Field(..., min_length=1, max_length=20_000)
+
+
+class AssembleTextSource(BaseModel):
+    """A pasted text source: resume, LinkedIn About, GitHub README, notes."""
+
+    # Free-form label used by the drafter to attribute the section.
+    # Mirrors ImportTextRequest.kind so the same prompt families are
+    # reachable via the assembly flow.
+    kind: str = Field(
+        default="freeform",
+        max_length=40,
+        description=(
+            "bio | resume | linkedin | about | github-readme | notes | "
+            "freeform — labels the source for the LLM"
+        ),
+    )
+    label: str = Field(default="", max_length=200)
+    content: str = Field(..., min_length=1, max_length=200_000)
+
+
+class AssembleUrlSource(BaseModel):
+    """A URL we'll scrape into markdown server-side."""
+
+    url: str = Field(..., min_length=8, max_length=2000)
+    label: str = Field(default="", max_length=200)
+
+
+class AssembleRequest(BaseModel):
+    """Full onboarding assembly payload — everything we collected from the
+    guided wizard.
+
+    Every list is optional; we require at least one meaningful entry
+    somewhere before drafting.
+    """
+
+    answers: list[AssembleAnswer] = Field(default_factory=list)
+    text_sources: list[AssembleTextSource] = Field(default_factory=list)
+    urls: list[AssembleUrlSource] = Field(default_factory=list)
+    # Same toggle the existing text/URL onboarding endpoints expose. Self-
+    # hosters with Puppetmaster get the agentic path; the hosted product
+    # falls through to the direct-LLM drafter inside the same helper.
+    run_orchestrator: bool = True
+
+
+@router.post("/onboarding/assemble")
+async def onboarding_assemble(
+    request: Request, req: AssembleRequest = Body(...)
+) -> dict:
+    """Assemble interview answers + pasted sources + scraped URLs into one
+    starter wiki draft.
+
+    Flow:
+
+      1. Validate at least one non-empty input is present.
+      2. Scrape any URLs in parallel-ish (await each in order — the
+         existing scrape helper is async but we keep ordering stable so
+         the markdown dossier is deterministic). Individual failures
+         don't bail the whole bundle.
+      3. Concatenate everything into a single labeled markdown body.
+      4. Write the body to ``raw/imports/<timestamp>-starter-bundle.md``
+         so the dossier lives on disk (and gets pushed to the user's
+         GitHub repo by the persistence layer).
+      5. Hand off to ``_draft_from_raw_with_fallback`` which tries the
+         Puppetmaster orchestrator first and falls back to the direct
+         LLM drafter — same path the existing /onboarding/import-text
+         flow uses.
+
+    The response is a superset of the existing import-text response, so
+    the welcome page can reuse its current progress/done UI; new fields
+    (``answers_count``, ``text_count``, ``urls[]``) are additive.
+    """
+    _require_hosted_mode()
+    user = _require_session_user(request)
+    tenant = tenants.manager().require(user["tenant_id"])
+
+    answers = [a for a in req.answers if a.answer.strip()]
+    text_sources = [s for s in req.text_sources if s.content.strip()]
+    url_sources = [u for u in req.urls if u.url.strip()]
+
+    if not answers and not text_sources and not url_sources:
+        # Fail fast so the UI keeps the "add a source" prompt up instead
+        # of bottoming out in the LLM with a blank corpus.
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Add at least one answer, pasted source, or URL before "
+                "assembling your starter wiki."
+            ),
+        )
+
+    # ---- 1. Scrape URL sources (best-effort, partial failures OK) ----
+    scraped_entries: list[dict] = []
+    for url_src in url_sources:
+        url = url_src.url.strip()
+        scraped = await url_scrape.scrape(url)
+        if not scraped.title and not scraped.content and scraped.errors:
+            status = "failed"
+        elif scraped.errors:
+            status = "partial"
+        else:
+            status = "ok"
+        scraped_entries.append(
+            {
+                "input": url_src,
+                "scraped": scraped,
+                "status": status,
+            }
+        )
+
+    # ---- 2. Build the labeled markdown dossier ----
+    parts: list[str] = []
+
+    if answers:
+        parts.append("# Onboarding questions")
+        parts.append("")
+        for a in answers:
+            q = a.question.strip() or "Question"
+            parts.append(f"## {q}")
+            parts.append("")
+            parts.append(a.answer.strip())
+            parts.append("")
+
+    for text_src in text_sources:
+        label = text_src.label.strip() or text_src.kind or "Pasted source"
+        kind = (text_src.kind or "freeform").strip() or "freeform"
+        parts.append(f"# {label} ({kind})")
+        parts.append("")
+        parts.append(text_src.content.strip())
+        parts.append("")
+
+    usable_url_count = 0
+    for entry in scraped_entries:
+        if entry["status"] == "failed":
+            # Note the attempt in the dossier so the LLM doesn't try to
+            # synthesize content for a URL that we couldn't read, but
+            # don't pipe an empty body through.
+            continue
+        scraped = entry["scraped"]
+        input_label = entry["input"].label.strip()
+        src_label = input_label or scraped.title or scraped.url
+        parts.append(f"# {src_label} (url)")
+        parts.append("")
+        parts.append(scraped.to_markdown())
+        parts.append("")
+        usable_url_count += 1
+
+    combined = "\n".join(parts).strip()
+
+    if not combined:
+        # Edge case: only failed URL scrapes, nothing else. Surface a
+        # clean 422 so the UI can prompt the user to add a paste.
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "We couldn't read any of the URLs you provided and there "
+                "was no other content to assemble. Add a paste or answer "
+                "and try again."
+            ),
+        )
+
+    # ---- 3. Persist the dossier + 4. draft pages ----
+    with tenants.set_current_tenant(tenant):
+        raw_rel = _write_raw_import(
+            tenant,
+            kind="starter-bundle",
+            label="onboarding assembly",
+            body=combined,
+        )
+        draft_info = await _draft_from_raw_with_fallback(
+            tenant=tenant,
+            raw_rel=raw_rel,
+            kind="starter-bundle",
+            source_label="onboarding assembly",
+            source_content=combined,
+            run_orchestrator=req.run_orchestrator,
+        )
+
+    return {
+        "ok": True,
+        "tenant_id": tenant.id,
+        "answers_count": len(answers),
+        "text_count": len(text_sources),
+        "urls": [
+            {
+                "url": entry["input"].url,
+                "label": entry["input"].label,
+                "status": entry["status"],
+                "scraped": entry["scraped"].to_dict(),
+            }
+            for entry in scraped_entries
+        ],
+        "usable_url_count": usable_url_count,
+        **draft_info,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Repo discovery — list the signed-in user's GitHub repos for the picker
 # ---------------------------------------------------------------------------
 

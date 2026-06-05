@@ -23,15 +23,21 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   apiBase,
+  onboardingAssemble,
   onboardingCleanupImports,
   onboardingConnectRepo,
   onboardingImportWiki,
   onboardingListMyRepos,
+  type AssembleAnswerInput,
+  type AssembleTextSourceInput,
+  type AssembleUrlResult,
+  type AssembleUrlSourceInput,
   type ConnectRepoResponse,
   type GitHubRepoSummary,
   type GitHubSyncStatus,
   type ImportWikiResponse,
   type MyReposResponse,
+  type OnboardingAssembleResponse,
 } from "@/lib/api";
 
 // ---------- API shapes ----------------------------------------------------
@@ -73,6 +79,12 @@ type ImportResponse = {
   tracking_id?: string;
   tenant_id: string;
   orchestrator_error?: string;
+  // Direct-LLM drafter result (hosted path, no Puppetmaster). When the
+  // orchestrator didn't start but pages_created > 0, the draft actually
+  // succeeded synchronously — the UI must treat that as success, not as
+  // "orchestrator unavailable".
+  pages_created?: number;
+  draft_error?: string;
   scraped?: {
     url: string;
     title?: string;
@@ -93,9 +105,115 @@ type JobStatus = {
   log_tail?: string;
 };
 
-type ImportKind = "bio" | "resume" | "about" | "freeform";
+// The primary onboarding path is "assemble" — a guided checklist that
+// collects a few interview answers, pasted high-signal documents (resume,
+// LinkedIn About), and optional URLs, then submits the bundle as one
+// starter-wiki draft. "wiki" remains as the secondary "I already have a
+// markdown wiki to import" path. The old standalone paste / scrape tabs
+// are folded into the assemble flow so users aren't asked to pick ONE
+// source — a single source produces a thin, padded starter wiki.
+type Tab = "assemble" | "wiki";
 
-type Tab = "text" | "url" | "wiki";
+// ---- Interview prompts -----------------------------------------------
+//
+// 4 prompts, all optional. The frontend posts the literal `prompt` text
+// alongside the answer so the catalog stays editable here without a
+// backend deploy. Keep these focused on signal the LLM drafter can
+// actually attribute claims to — "what are you working on" beats "what
+// inspires you" because the former produces named project pages.
+type InterviewPrompt = {
+  id: string;
+  prompt: string;
+  placeholder: string;
+  hint: string;
+};
+
+const INTERVIEW_PROMPTS: InterviewPrompt[] = [
+  {
+    id: "identity",
+    prompt: "Who are you? (role, what you do, where)",
+    placeholder:
+      "e.g. Staff engineer at a small biotech. Mostly Python + TypeScript. Based in Toronto.",
+    hint: "One or two sentences is fine. The wiki uses this to build the page about you.",
+  },
+  {
+    id: "current",
+    prompt: "What are you working on right now?",
+    placeholder:
+      "e.g. Building portablellm.wiki (a portable personal LLM wiki). Also helping ship a clinical trial dashboard at $DAY_JOB.",
+    hint: "Named projects beat vague themes — the drafter spins these into project pages.",
+  },
+  {
+    id: "preferences",
+    prompt: "What should LLMs know about how you think and work?",
+    placeholder:
+      "e.g. Prefer concise, verbatim answers. Skeptical of magic abstractions. Big on testing before refactoring.",
+    hint: "Operating principles, strong opinions, working style — anything that would change how an LLM should respond to you.",
+  },
+  {
+    id: "links",
+    prompt: "Anything else you want me to know about you?",
+    placeholder:
+      "e.g. Background in synthetic biology. Read Karpathy's nanoGPT essays a lot. Talked at PyCon 2024 about ergonomics in scientific Python.",
+    hint: "Loose context — past work, interests, formative things. Skip if nothing comes to mind.",
+  },
+];
+
+// ---- Paste source presets --------------------------------------------
+//
+// Three named text-source slots + one freeform. Each maps to an
+// `AssembleTextSourceInput` with `kind` set so the backend drafter can
+// attribute pages back to the right source ("from the resume…",
+// "from the LinkedIn About…").
+type TextSlotId = "resume" | "linkedin" | "github_readme" | "freeform";
+
+type TextSlotConfig = {
+  id: TextSlotId;
+  // Backend `kind` value sent in the assembly payload.
+  kind: string;
+  title: string;
+  hint: string;
+  placeholder: string;
+};
+
+const TEXT_SLOTS: TextSlotConfig[] = [
+  {
+    id: "resume",
+    kind: "resume",
+    title: "Resume or CV",
+    hint: "Paste the text of your most up-to-date resume.",
+    placeholder:
+      "Paste your resume here — work history, education, skills. Plain text is fine.",
+  },
+  {
+    id: "linkedin",
+    kind: "linkedin",
+    title: "LinkedIn About / bio",
+    hint: "Open your LinkedIn profile and copy the About section.",
+    placeholder:
+      "Paste your LinkedIn About section, Twitter bio, or any short profile blurb.",
+  },
+  {
+    id: "github_readme",
+    kind: "github-readme",
+    title: "GitHub profile README",
+    hint: "github.com/<your-username> — copy the markdown.",
+    placeholder:
+      "Paste your GitHub profile README markdown — or any project README that represents your work.",
+  },
+  {
+    id: "freeform",
+    kind: "freeform",
+    title: "Anything else",
+    hint: "A brain dump works. Notes, decisions, current goals.",
+    placeholder:
+      "Anything else you want LLMs to know — current goals, things you decided recently, context that doesn't fit above.",
+  },
+];
+
+const POLL_INTERVAL_MS = 3000;
+
+// ---- Wizard state machine --------------------------------------------
 
 type WizardPhase =
   | { kind: "idle" }
@@ -106,8 +224,17 @@ type WizardPhase =
       rawPath: string;
       orchestratorStarted: boolean;
       orchestratorError?: string;
+      // Pages the direct-LLM drafter produced synchronously (hosted
+      // path). When set > 0 with no orchestrator job, the "running"
+      // phase is a momentary pass-through to a successful "done".
+      pagesCreated?: number;
+      draftError?: string;
       startedAt: number;
       lastStatus?: JobStatus;
+      // Populated when the running phase was reached via the guided
+      // assembly path — drives the "we read N of M URLs" pill on the
+      // progress panel.
+      assembleSummary?: AssembleSummary;
     }
   | {
       kind: "done";
@@ -115,6 +242,12 @@ type WizardPhase =
       rawPath: string;
       summary: string | null;
       orchestratorStarted: boolean;
+      // Pages drafted synchronously by the direct-LLM fallback (hosted
+      // path). Drives the done-view footer so we say "Drafted N pages"
+      // instead of the misleading "Orchestrator was unavailable" when
+      // the draft actually succeeded without an orchestrator job.
+      pagesCreated?: number;
+      draftError?: string;
       // When the user completes via the "Import wiki" tab the seeding
       // is synchronous (no orchestrator job) and we land here straight
       // away with the counts populated.
@@ -124,6 +257,8 @@ type WizardPhase =
         skipped: string[];
         sourceUrl: string;
       };
+      // When the user completes via the guided-assembly path.
+      assembleSummary?: AssembleSummary;
     }
   | {
       kind: "error";
@@ -132,7 +267,24 @@ type WizardPhase =
       orchestratorStarted?: boolean;
     };
 
-const POLL_INTERVAL_MS = 3000;
+// Snapshot of how the assembled bundle was received server-side. Carried
+// through the "running" and "done" phases so the progress / share UIs
+// can show partial-URL failures and the "we received N answers / M
+// pastes" pill.
+type AssembleSummary = {
+  answersCount: number;
+  textCount: number;
+  urls: AssembleUrlResult[];
+  usableUrlCount: number;
+  pagesCreated?: number;
+};
+
+// Stable-ish unique id for dynamic URL rows. We don't need crypto here —
+// the id just needs to be unique within a single mount so React keys
+// don't collide when the user adds/removes rows quickly.
+function makeId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
 
 // ---------- Page ----------------------------------------------------------
 
@@ -157,10 +309,25 @@ export default function WelcomePage() {
   // true and render the import wizard with force_overwrite enabled.
   const [forceImport, setForceImport] = useState(false);
 
-  const [tab, setTab] = useState<Tab>("text");
-  const [pasteContent, setPasteContent] = useState("");
-  const [pasteKind, setPasteKind] = useState<ImportKind>("bio");
-  const [urlValue, setUrlValue] = useState("");
+  const [tab, setTab] = useState<Tab>("assemble");
+  // Interview answers, keyed by INTERVIEW_PROMPTS[].id.
+  const [assembleAnswers, setAssembleAnswers] = useState<Record<string, string>>(
+    {},
+  );
+  // Pasted text sources, keyed by TEXT_SLOTS[].id. Values are the raw
+  // content — empty string means "skip this slot".
+  const [assembleText, setAssembleText] = useState<Record<TextSlotId, string>>({
+    resume: "",
+    linkedin: "",
+    github_readme: "",
+    freeform: "",
+  });
+  // Dynamic URL list. Starts with one empty row so the form looks
+  // populated and the user can paste a URL without clicking "Add".
+  const [assembleUrls, setAssembleUrls] = useState<
+    Array<{ id: string; url: string; label: string }>
+  >(() => [{ id: makeId(), url: "", label: "" }]);
+
   const [wikiUrlValue, setWikiUrlValue] = useState("");
   // "verbatim" expects a portable-llm-wiki layout (top-level wiki/);
   // "standardize" walks any markdown and runs it through the LLM
@@ -260,94 +427,117 @@ export default function WelcomePage() {
     router.replace("/signup");
   }, [router]);
 
-  const beginJob = useCallback((resp: ImportResponse) => {
-    setPhase({
-      kind: "running",
-      trackingId: resp.tracking_id ?? null,
-      rawPath: resp.raw_path,
-      orchestratorStarted: resp.orchestrator_started,
-      orchestratorError: resp.orchestrator_error,
-      startedAt: Date.now(),
-    });
-  }, []);
+  const beginJob = useCallback(
+    (resp: ImportResponse, assembleSummary?: AssembleSummary) => {
+      setPhase({
+        kind: "running",
+        trackingId: resp.tracking_id ?? null,
+        rawPath: resp.raw_path,
+        orchestratorStarted: resp.orchestrator_started,
+        orchestratorError: resp.orchestrator_error,
+        // Carry the direct-drafter outcome so the "no orchestrator job"
+        // pass-through to "done" can report real success/failure rather
+        // than defaulting to "Orchestrator was unavailable".
+        pagesCreated: resp.pages_created ?? assembleSummary?.pagesCreated,
+        draftError: resp.draft_error,
+        startedAt: Date.now(),
+        assembleSummary,
+      });
+    },
+    [],
+  );
 
-  const submitText = useCallback(async () => {
-    if (pasteContent.trim().length < 50) return;
+  // ---- Guided assembly: bundle answers + pastes + URLs into one draft ----
+  //
+  // Builds the payload from the assembly state, sends it to
+  // /onboarding/assemble, and either jumps straight to the "done" phase
+  // (synchronous direct-LLM drafter path) or hands off to the job
+  // polling loop (Puppetmaster orchestrator path). Mirrors the
+  // text/URL import flows so the existing ProgressSection works for
+  // assembly too — the only difference is we also stash an
+  // AssembleSummary so DoneView / RunningView can show partial-URL
+  // outcomes.
+  const submitAssemble = useCallback(async () => {
+    // Mirror the backend's "must have at least one non-empty input"
+    // guard so we never even fire the request on an empty bundle.
+    const answers: AssembleAnswerInput[] = INTERVIEW_PROMPTS
+      .map((p) => ({ question: p.prompt, answer: (assembleAnswers[p.id] ?? "").trim() }))
+      .filter((a) => a.answer.length > 0);
+    const textSources: AssembleTextSourceInput[] = TEXT_SLOTS
+      .map((slot) => ({
+        kind: slot.kind,
+        label: slot.title,
+        content: (assembleText[slot.id] ?? "").trim(),
+      }))
+      .filter((s) => s.content.length > 0);
+    const urls: AssembleUrlSourceInput[] = assembleUrls
+      .map((row) => ({ url: row.url.trim(), label: row.label.trim() }))
+      .filter((u) => u.url.length > 0);
+
+    if (answers.length === 0 && textSources.length === 0 && urls.length === 0) {
+      setSubmitError(
+        "Answer at least one question, paste something, or add a URL before drafting.",
+      );
+      return;
+    }
+
     setSubmitError(null);
     setPhase({ kind: "submitting" });
     try {
-      const r = await fetch(`${apiBase()}/onboarding/import-text`, {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          kind: pasteKind,
-          content: pasteContent,
-          label: "",
+      let data: OnboardingAssembleResponse;
+      try {
+        data = await onboardingAssemble({
+          answers,
+          text_sources: textSources,
+          urls,
           run_orchestrator: true,
-        }),
-      });
-      if (r.status === 401) {
-        handleAuthError();
-        return;
-      }
-      if (!r.ok) {
-        let detail = `HTTP ${r.status}`;
-        try {
-          const j = (await r.json()) as { detail?: string };
-          if (j?.detail) detail = j.detail;
-        } catch {
-          /* ignore */
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "Unknown error";
+        // backendFetch surfaces "<status> <body>" — surface 401s as
+        // the session-recovery flow so a stale cookie doesn't trap
+        // the user on /welcome.
+        if (msg.startsWith("401 ")) {
+          handleAuthError();
+          return;
         }
-        throw new Error(detail);
+        throw new Error(msg);
       }
-      const data = (await r.json()) as ImportResponse;
-      beginJob(data);
+
+      const assembleSummary: AssembleSummary = {
+        answersCount: data.answers_count,
+        textCount: data.text_count,
+        urls: data.urls,
+        usableUrlCount: data.usable_url_count,
+        pagesCreated: data.pages_created,
+      };
+
+      // The assemble response is a superset of the ImportResponse, so
+      // beginJob (which handles orchestrator-running vs synchronous
+      // draft) does the right thing in both adapter modes.
+      const importShape: ImportResponse = {
+        ok: data.ok,
+        raw_path: data.raw_path,
+        orchestrator_started: data.orchestrator_started ?? false,
+        tracking_id: data.tracking_id ?? undefined,
+        tenant_id: data.tenant_id,
+        orchestrator_error: data.orchestrator_error,
+        pages_created: data.pages_created,
+        draft_error: data.draft_error,
+      };
+      beginJob(importShape, assembleSummary);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Unknown error";
       setSubmitError(msg);
       setPhase({ kind: "idle" });
     }
-  }, [pasteContent, pasteKind, beginJob, handleAuthError]);
-
-  const submitUrl = useCallback(async () => {
-    const trimmed = urlValue.trim();
-    if (!trimmed) return;
-    setSubmitError(null);
-    setPhase({ kind: "submitting" });
-    try {
-      const r = await fetch(`${apiBase()}/onboarding/import-url`, {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          url: trimmed,
-          label: "",
-          run_orchestrator: true,
-        }),
-      });
-      if (r.status === 401) {
-        handleAuthError();
-        return;
-      }
-      if (!r.ok) {
-        let detail = `HTTP ${r.status}`;
-        try {
-          const j = (await r.json()) as { detail?: string };
-          if (j?.detail) detail = j.detail;
-        } catch {
-          /* ignore */
-        }
-        throw new Error(detail);
-      }
-      const data = (await r.json()) as ImportResponse;
-      beginJob(data);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "Unknown error";
-      setSubmitError(msg);
-      setPhase({ kind: "idle" });
-    }
-  }, [urlValue, beginJob, handleAuthError]);
+  }, [
+    assembleAnswers,
+    assembleText,
+    assembleUrls,
+    beginJob,
+    handleAuthError,
+  ]);
 
   // ---- Bring-your-own-wiki: clone a GitHub portable-llm-wiki repo ---------
   //
@@ -426,6 +616,17 @@ export default function WelcomePage() {
         rawPath: phase.rawPath,
         summary: null,
         orchestratorStarted: false,
+        // Carry the direct-drafter result forward so the done view
+        // reports "Drafted N pages" instead of "Orchestrator was
+        // unavailable" when the synchronous LLM path actually produced
+        // pages (the common hosted case).
+        pagesCreated: phase.pagesCreated,
+        draftError: phase.draftError,
+        // Preserve the assembly summary so the done view can still
+        // show "received N answers / M pastes / read X of Y URLs"
+        // when the synchronous direct-LLM path short-circuited the
+        // orchestrator job.
+        assembleSummary: phase.assembleSummary,
       });
       return;
     }
@@ -465,6 +666,10 @@ export default function WelcomePage() {
                   rawPath: p.rawPath,
                   summary: job.summary ?? null,
                   orchestratorStarted: p.orchestratorStarted,
+                  // Carry the assembly recap into the done view so
+                  // partial-URL failures don't silently vanish once
+                  // the orchestrator finishes.
+                  assembleSummary: p.assembleSummary,
                 }
               : p,
           );
@@ -631,18 +836,17 @@ export default function WelcomePage() {
         <FormSection
           tab={tab}
           setTab={setTab}
-          pasteContent={pasteContent}
-          setPasteContent={setPasteContent}
-          pasteKind={pasteKind}
-          setPasteKind={setPasteKind}
-          urlValue={urlValue}
-          setUrlValue={setUrlValue}
+          assembleAnswers={assembleAnswers}
+          setAssembleAnswers={setAssembleAnswers}
+          assembleText={assembleText}
+          setAssembleText={setAssembleText}
+          assembleUrls={assembleUrls}
+          setAssembleUrls={setAssembleUrls}
           wikiUrlValue={wikiUrlValue}
           setWikiUrlValue={setWikiUrlValue}
           wikiMode={wikiMode}
           setWikiMode={setWikiMode}
-          submitText={submitText}
-          submitUrl={submitUrl}
+          submitAssemble={submitAssemble}
           submitWiki={submitWiki}
           submitting={phase.kind === "submitting"}
           submitError={submitError}
@@ -1249,18 +1453,25 @@ function Header({
 function FormSection(props: {
   tab: Tab;
   setTab: (t: Tab) => void;
-  pasteContent: string;
-  setPasteContent: (v: string) => void;
-  pasteKind: ImportKind;
-  setPasteKind: (k: ImportKind) => void;
-  urlValue: string;
-  setUrlValue: (v: string) => void;
+  assembleAnswers: Record<string, string>;
+  setAssembleAnswers: (
+    update: (prev: Record<string, string>) => Record<string, string>,
+  ) => void;
+  assembleText: Record<TextSlotId, string>;
+  setAssembleText: (
+    update: (prev: Record<TextSlotId, string>) => Record<TextSlotId, string>,
+  ) => void;
+  assembleUrls: Array<{ id: string; url: string; label: string }>;
+  setAssembleUrls: (
+    update: (
+      prev: Array<{ id: string; url: string; label: string }>,
+    ) => Array<{ id: string; url: string; label: string }>,
+  ) => void;
   wikiUrlValue: string;
   setWikiUrlValue: (v: string) => void;
   wikiMode: "verbatim" | "standardize";
   setWikiMode: (m: "verbatim" | "standardize") => void;
-  submitText: () => void;
-  submitUrl: () => void;
+  submitAssemble: () => void;
   submitWiki: () => void;
   submitting: boolean;
   submitError: string | null;
@@ -1273,18 +1484,17 @@ function FormSection(props: {
   const {
     tab,
     setTab,
-    pasteContent,
-    setPasteContent,
-    pasteKind,
-    setPasteKind,
-    urlValue,
-    setUrlValue,
+    assembleAnswers,
+    setAssembleAnswers,
+    assembleText,
+    setAssembleText,
+    assembleUrls,
+    setAssembleUrls,
     wikiUrlValue,
     setWikiUrlValue,
     wikiMode,
     setWikiMode,
-    submitText,
-    submitUrl,
+    submitAssemble,
     submitWiki,
     submitting,
     submitError,
@@ -1302,21 +1512,15 @@ function FormSection(props: {
       <Segmented tab={tab} setTab={setTab} />
 
       <div className="mt-6">
-        {tab === "text" && (
-          <PasteForm
-            content={pasteContent}
-            setContent={setPasteContent}
-            kind={pasteKind}
-            setKind={setPasteKind}
-            onSubmit={submitText}
-            submitting={submitting}
-          />
-        )}
-        {tab === "url" && (
-          <UrlForm
-            url={urlValue}
-            setUrl={setUrlValue}
-            onSubmit={submitUrl}
+        {tab === "assemble" && (
+          <AssembleForm
+            answers={assembleAnswers}
+            setAnswers={setAssembleAnswers}
+            text={assembleText}
+            setText={setAssembleText}
+            urls={assembleUrls}
+            setUrls={setAssembleUrls}
+            onSubmit={submitAssemble}
             submitting={submitting}
           />
         )}
@@ -1342,26 +1546,32 @@ function FormSection(props: {
 }
 
 function Segmented({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
-  const tabs: { id: Tab; label: string; disabled?: boolean; badge?: string }[] = [
-    { id: "text", label: "Paste bio" },
-    { id: "url", label: "Scrape URL" },
+  // Two tabs only. Assemble is the primary, opinionated path; "Import
+  // existing wiki" is the escape hatch for users who already have a
+  // markdown corpus they want to bring (a fundamentally different mental
+  // model — bring an existing wiki, vs. assemble a first one).
+  const tabs: { id: Tab; label: string; badge?: string }[] = [
+    { id: "assemble", label: "Assemble starter wiki" },
     { id: "wiki", label: "Import existing wiki" },
   ];
   return (
-    <div className="inline-flex rounded-xl border border-paper-soft bg-paper-soft/60 p-1 gap-1 flex-wrap">
+    <div
+      role="tablist"
+      aria-label="Onboarding seeding method"
+      className="inline-flex rounded-xl border border-paper-soft bg-paper-soft/60 p-1 gap-1 flex-wrap"
+    >
       {tabs.map((t) => {
         const active = t.id === tab;
         return (
           <button
             key={t.id}
-            disabled={t.disabled}
-            onClick={() => !t.disabled && setTab(t.id)}
+            role="tab"
+            aria-selected={active}
+            onClick={() => setTab(t.id)}
             className={`px-3 py-1.5 rounded-lg text-sm font-medium inline-flex items-center gap-2 ${
               active
                 ? "bg-ink text-paper"
-                : t.disabled
-                  ? "text-ink-muted/60 cursor-not-allowed"
-                  : "text-ink-muted hover:text-ink"
+                : "text-ink-muted hover:text-ink"
             }`}
           >
             <span>{t.label}</span>
@@ -1377,120 +1587,330 @@ function Segmented({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
   );
 }
 
-function PasteForm({
-  content,
-  setContent,
-  kind,
-  setKind,
+// ---------- AssembleForm — the guided first-signup wizard -------------
+//
+// Three optional sections, all feeding one POST /onboarding/assemble:
+//
+//   1. Interview prompts — 4 lightweight questions (who/working on/how
+//      you work/anything else). Each blank prompt is still posted as
+//      part of the bundle but filtered out client- and server-side.
+//   2. Pasted material — three named slots (resume, LinkedIn About,
+//      GitHub README) plus one freeform brain-dump. Maps to the
+//      backend's `text_sources[]` with a stable `kind` per slot.
+//   3. URL list — dynamic, with add/remove. Each gets scraped server-
+//      side; partial failures are reported on the response and don't
+//      block the rest of the bundle.
+//
+// "At least one non-empty input" is enforced both here (disabled submit)
+// and server-side (422). The disabled state copy makes it explicit so
+// the user knows what unblocks the button.
+
+function AssembleForm({
+  answers,
+  setAnswers,
+  text,
+  setText,
+  urls,
+  setUrls,
   onSubmit,
   submitting,
 }: {
-  content: string;
-  setContent: (v: string) => void;
-  kind: ImportKind;
-  setKind: (k: ImportKind) => void;
+  answers: Record<string, string>;
+  setAnswers: (
+    update: (prev: Record<string, string>) => Record<string, string>,
+  ) => void;
+  text: Record<TextSlotId, string>;
+  setText: (
+    update: (prev: Record<TextSlotId, string>) => Record<TextSlotId, string>,
+  ) => void;
+  urls: Array<{ id: string; url: string; label: string }>;
+  setUrls: (
+    update: (
+      prev: Array<{ id: string; url: string; label: string }>,
+    ) => Array<{ id: string; url: string; label: string }>,
+  ) => void;
   onSubmit: () => void;
   submitting: boolean;
 }) {
-  const ref = useRef<HTMLTextAreaElement | null>(null);
-  // Autoresize the textarea by sizing it to its scrollHeight on each edit.
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 480)}px`;
-  }, [content]);
-
-  const tooShort = content.trim().length < 50;
-  const chars = content.length;
+  const answeredCount = INTERVIEW_PROMPTS.filter(
+    (p) => (answers[p.id] ?? "").trim().length > 0,
+  ).length;
+  const pasteCount = TEXT_SLOTS.filter(
+    (slot) => (text[slot.id] ?? "").trim().length > 0,
+  ).length;
+  const urlCount = urls.filter((row) => row.url.trim().length > 0).length;
+  const hasAnything = answeredCount + pasteCount + urlCount > 0;
+  const totalChars =
+    Object.values(answers).reduce((sum, v) => sum + (v?.length ?? 0), 0) +
+    Object.values(text).reduce((sum, v) => sum + (v?.length ?? 0), 0);
 
   return (
-    <div>
-      <label className="block text-[11px] uppercase tracking-[0.18em] text-ink-muted font-semibold mb-2">
-        What is this?
-      </label>
-      <div className="flex flex-wrap items-center gap-2 mb-3">
-        <select
-          value={kind}
-          onChange={(e) => setKind(e.target.value as ImportKind)}
-          className="text-sm border border-paper-soft rounded-lg px-2.5 py-1.5 bg-white"
+    <div className="space-y-8" data-testid="assemble-form">
+      <div className="rounded-xl border border-paper-soft bg-paper-soft/30 px-4 py-3 text-xs text-ink-muted leading-relaxed">
+        Everything is optional. Add what you have on hand and we&apos;ll draft
+        6–12 starter pages from the whole bundle in one pass. All pages
+        start as <span className="font-mono">private</span> — you decide what
+        to share later.
+      </div>
+
+      <SectionHeader
+        step="1"
+        title="Tell us a bit about yourself"
+        subtitle="Answer whichever questions feel useful. One- or two-sentence answers are plenty."
+      />
+      <div className="space-y-4">
+        {INTERVIEW_PROMPTS.map((p) => (
+          <QuestionField
+            key={p.id}
+            prompt={p}
+            value={answers[p.id] ?? ""}
+            onChange={(v) =>
+              setAnswers((prev) => ({ ...prev, [p.id]: v }))
+            }
+            disabled={submitting}
+          />
+        ))}
+      </div>
+
+      <SectionHeader
+        step="2"
+        title="Paste material you already have"
+        subtitle="Imperfect is fine — the drafter handles dense text. Skip the slots you don't have."
+      />
+      <div className="grid sm:grid-cols-2 gap-4">
+        {TEXT_SLOTS.map((slot) => (
+          <TextSlotField
+            key={slot.id}
+            slot={slot}
+            value={text[slot.id] ?? ""}
+            onChange={(v) =>
+              setText((prev) => ({ ...prev, [slot.id]: v }))
+            }
+            disabled={submitting}
+          />
+        ))}
+      </div>
+
+      <SectionHeader
+        step="3"
+        title="Add links worth reading"
+        subtitle="Your portfolio, blog, GitHub profile — anything public. We'll fetch the content server-side."
+      />
+      <div className="space-y-3">
+        {urls.map((row, i) => (
+          <UrlRowField
+            key={row.id}
+            row={row}
+            index={i}
+            onChange={(patch) =>
+              setUrls((prev) =>
+                prev.map((r) => (r.id === row.id ? { ...r, ...patch } : r)),
+              )
+            }
+            onRemove={() =>
+              setUrls((prev) =>
+                prev.length > 1
+                  ? prev.filter((r) => r.id !== row.id)
+                  // Last row stays — clear instead of remove so the
+                  // form never collapses into an unaddable state.
+                  : prev.map((r) =>
+                      r.id === row.id ? { ...r, url: "", label: "" } : r,
+                    ),
+              )
+            }
+            disabled={submitting}
+            canRemove={urls.length > 1 || row.url.trim() !== "" || row.label.trim() !== ""}
+          />
+        ))}
+        <button
+          type="button"
+          onClick={() =>
+            setUrls((prev) => [...prev, { id: makeId(), url: "", label: "" }])
+          }
+          disabled={submitting}
+          className="text-xs text-accent hover:underline font-medium disabled:opacity-50"
         >
-          <option value="bio">bio</option>
-          <option value="resume">resume</option>
-          <option value="about">about</option>
-          <option value="freeform">freeform</option>
-        </select>
-        <span className="text-xs text-ink-muted">
-          {kind === "bio" && "LinkedIn About, Twitter bio, GitHub README."}
-          {kind === "resume" && "CV / resume text — work history, education."}
-          {kind === "about" && "Personal site / about page copy."}
-          {kind === "freeform" && "Anything else — a brain dump works."}
+          + Add another link
+        </button>
+      </div>
+
+      <div className="pt-4 border-t border-paper-soft flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          data-testid="assemble-submit"
+          onClick={onSubmit}
+          disabled={!hasAnything || submitting}
+          className="px-4 py-2.5 rounded-lg bg-ink text-paper text-sm font-medium hover:bg-ink-soft disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
+        >
+          {submitting ? (
+            <>Drafting…</>
+          ) : (
+            <>
+              Draft my starter wiki <span aria-hidden>→</span>
+            </>
+          )}
+        </button>
+        <span className="text-xs text-ink-muted" data-testid="assemble-meter">
+          {hasAnything ? (
+            <>
+              {answeredCount} answer{answeredCount === 1 ? "" : "s"} ·{" "}
+              {pasteCount} paste{pasteCount === 1 ? "" : "s"} · {urlCount}{" "}
+              link{urlCount === 1 ? "" : "s"} · {totalChars.toLocaleString()}{" "}
+              characters
+            </>
+          ) : (
+            <>Answer a question, paste something, or add a link to enable.</>
+          )}
         </span>
       </div>
-
-      <textarea
-        ref={ref}
-        value={content}
-        onChange={(e) => setContent(e.target.value)}
-        rows={8}
-        placeholder="Paste your LinkedIn About text, resume, GitHub README, or a freeform 'about me' blurb. Anything goes — the wiki figures out what to extract."
-        className="w-full resize-none border border-paper-soft rounded-xl px-3.5 py-3 text-sm leading-relaxed bg-paper-soft/30 focus:outline-none focus:border-ink/40 font-mono"
-      />
-
-      <div className="mt-2 flex items-center justify-between text-xs text-ink-muted">
-        <span>{chars.toLocaleString()} characters</span>
-        <span>{tooShort ? "Need at least 50 characters." : "Looks good."}</span>
-      </div>
-
-      <button
-        onClick={onSubmit}
-        disabled={tooShort || submitting}
-        className="mt-4 px-4 py-2.5 rounded-lg bg-ink text-paper text-sm font-medium hover:bg-ink-soft disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
-      >
-        {submitting ? <>Submitting…</> : <>Seed my wiki <span aria-hidden>→</span></>}
-      </button>
     </div>
   );
 }
 
-function UrlForm({
-  url,
-  setUrl,
-  onSubmit,
-  submitting,
+function SectionHeader({
+  step,
+  title,
+  subtitle,
 }: {
-  url: string;
-  setUrl: (v: string) => void;
-  onSubmit: () => void;
-  submitting: boolean;
+  step: string;
+  title: string;
+  subtitle: string;
 }) {
   return (
     <div>
-      <label className="block text-[11px] uppercase tracking-[0.18em] text-ink-muted font-semibold mb-2">
-        URL
-      </label>
+      <div className="flex items-baseline gap-2">
+        <span className="text-[10px] uppercase tracking-[0.22em] text-accent font-semibold">
+          Step {step}
+        </span>
+        <h3 className="text-base font-semibold text-ink">{title}</h3>
+      </div>
+      <p className="mt-1 text-xs text-ink-muted leading-relaxed">{subtitle}</p>
+    </div>
+  );
+}
+
+function QuestionField({
+  prompt,
+  value,
+  onChange,
+  disabled,
+}: {
+  prompt: InterviewPrompt;
+  value: string;
+  onChange: (v: string) => void;
+  disabled: boolean;
+}) {
+  const ref = useRef<HTMLTextAreaElement | null>(null);
+  // Autoresize so a long answer doesn't get hidden behind a scrollbar.
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 320)}px`;
+  }, [value]);
+
+  return (
+    <label className="block">
+      <div className="text-sm font-medium text-ink">{prompt.prompt}</div>
+      <p className="mt-0.5 text-[11px] text-ink-muted leading-relaxed">
+        {prompt.hint}
+      </p>
+      <textarea
+        ref={ref}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={prompt.placeholder}
+        rows={2}
+        disabled={disabled}
+        data-testid={`assemble-question-${prompt.id}`}
+        className="mt-2 w-full resize-none border border-paper-soft rounded-lg px-3 py-2 text-sm leading-relaxed bg-paper-soft/20 focus:outline-none focus:border-ink/40"
+      />
+    </label>
+  );
+}
+
+function TextSlotField({
+  slot,
+  value,
+  onChange,
+  disabled,
+}: {
+  slot: TextSlotConfig;
+  value: string;
+  onChange: (v: string) => void;
+  disabled: boolean;
+}) {
+  const ref = useRef<HTMLTextAreaElement | null>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 360)}px`;
+  }, [value]);
+
+  return (
+    <label className="block">
+      <div className="text-sm font-medium text-ink">{slot.title}</div>
+      <p className="mt-0.5 text-[11px] text-ink-muted leading-relaxed">
+        {slot.hint}
+      </p>
+      <textarea
+        ref={ref}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={slot.placeholder}
+        rows={3}
+        disabled={disabled}
+        data-testid={`assemble-text-${slot.id}`}
+        className="mt-2 w-full resize-none border border-paper-soft rounded-lg px-3 py-2 text-sm leading-relaxed bg-paper-soft/20 font-mono focus:outline-none focus:border-ink/40"
+      />
+    </label>
+  );
+}
+
+function UrlRowField({
+  row,
+  index,
+  onChange,
+  onRemove,
+  disabled,
+  canRemove,
+}: {
+  row: { id: string; url: string; label: string };
+  index: number;
+  onChange: (patch: Partial<{ url: string; label: string }>) => void;
+  onRemove: () => void;
+  disabled: boolean;
+  canRemove: boolean;
+}) {
+  return (
+    <div
+      className="grid grid-cols-[1fr_180px_auto] gap-2 items-center"
+      data-testid={`assemble-url-row-${index}`}
+    >
       <input
         type="url"
-        value={url}
-        onChange={(e) => setUrl(e.target.value)}
-        placeholder="https://your-personal-site.com or your LinkedIn profile URL"
-        className="w-full border border-paper-soft rounded-xl px-3.5 py-3 text-sm bg-paper-soft/30 focus:outline-none focus:border-ink/40 font-mono"
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && url.trim() && !submitting) onSubmit();
-        }}
+        value={row.url}
+        onChange={(e) => onChange({ url: e.target.value })}
+        placeholder="https://your-portfolio.com"
+        disabled={disabled}
+        className="border border-paper-soft rounded-lg px-3 py-2 text-sm font-mono bg-paper-soft/20 focus:outline-none focus:border-ink/40"
       />
-      <p className="mt-2 text-xs text-ink-muted leading-relaxed">
-        We&apos;ll fetch the page and extract what&apos;s there. LinkedIn pages
-        are partial (no API access) but we&apos;ll still grab the bio and meta
-        description.
-      </p>
-
+      <input
+        value={row.label}
+        onChange={(e) => onChange({ label: e.target.value })}
+        placeholder="Label (optional)"
+        disabled={disabled}
+        className="border border-paper-soft rounded-lg px-3 py-2 text-sm bg-paper-soft/20 focus:outline-none focus:border-ink/40"
+      />
       <button
-        onClick={onSubmit}
-        disabled={!url.trim() || submitting}
-        className="mt-4 px-4 py-2.5 rounded-lg bg-ink text-paper text-sm font-medium hover:bg-ink-soft disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
+        type="button"
+        onClick={onRemove}
+        disabled={disabled || !canRemove}
+        className="text-xs text-ink-muted hover:text-red-600 disabled:opacity-30 px-2"
+        aria-label="Remove link"
       >
-        {submitting ? <>Submitting…</> : <>Seed my wiki <span aria-hidden>→</span></>}
+        ×
       </button>
     </div>
   );
@@ -1802,6 +2222,57 @@ function elapsed(startedAt: number): string {
   return `${m}m ${s.toString().padStart(2, "0")}s`;
 }
 
+/** Compact recap of the assembly bundle (questions answered, pastes
+ * provided, URL outcomes). Reused on both the running and done panels so
+ * partial-URL failures (e.g. one of the user's links was offline) are
+ * always visible — they should never disappear silently. */
+function AssembleSummaryBlock({
+  summary,
+  muted,
+}: {
+  summary: AssembleSummary;
+  muted?: boolean;
+}) {
+  const totalUrls = summary.urls.length;
+  const failed = summary.urls.filter((u) => u.status === "failed");
+  const partial = summary.urls.filter((u) => u.status === "partial");
+  return (
+    <div
+      data-testid="assemble-summary"
+      className={`mt-5 rounded-xl border border-paper-soft bg-paper-soft/30 p-4 ${
+        muted ? "opacity-90" : ""
+      }`}
+    >
+      <div className="text-[11px] uppercase tracking-[0.18em] text-ink-muted font-semibold">
+        Source bundle
+      </div>
+      <div className="mt-1.5 text-xs text-ink leading-relaxed">
+        Received <strong>{summary.answersCount}</strong> answer
+        {summary.answersCount === 1 ? "" : "s"},{" "}
+        <strong>{summary.textCount}</strong> paste
+        {summary.textCount === 1 ? "" : "s"}, and read{" "}
+        <strong>{summary.usableUrlCount}</strong> of{" "}
+        <strong>{totalUrls}</strong> link
+        {totalUrls === 1 ? "" : "s"}.
+      </div>
+      {(failed.length > 0 || partial.length > 0) && (
+        <ul className="mt-2 space-y-1 text-[11px] font-mono leading-snug">
+          {failed.map((u, i) => (
+            <li key={`fail-${i}`} className="text-red-700">
+              ✗ {u.label || u.url} — couldn&apos;t read
+            </li>
+          ))}
+          {partial.map((u, i) => (
+            <li key={`partial-${i}`} className="text-amber-800">
+              ! {u.label || u.url} — read with warnings
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function RunningView({
   phase,
   user,
@@ -1847,6 +2318,10 @@ function RunningView({
         <Detail label="raw file" value={phase.rawPath} mono />
       </div>
 
+      {phase.assembleSummary && (
+        <AssembleSummaryBlock summary={phase.assembleSummary} muted />
+      )}
+
       {phase.orchestratorError && (
         <div className="mt-4 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
           {phase.orchestratorError}
@@ -1877,6 +2352,26 @@ function DoneView({
   user: AuthUser;
 }) {
   const wiki = phase.wikiImport;
+  const assemble = phase.assembleSummary;
+  // How many pages the synchronous direct-LLM drafter produced (hosted
+  // path, no Puppetmaster job). A positive count means the seed
+  // SUCCEEDED even though no orchestrator job ran — so the footer must
+  // NOT show the "Orchestrator was unavailable" warning in that case.
+  const draftedCount =
+    typeof phase.pagesCreated === "number"
+      ? phase.pagesCreated
+      : assemble?.pagesCreated;
+  const draftedDirectly =
+    !phase.orchestratorStarted &&
+    typeof draftedCount === "number" &&
+    draftedCount > 0;
+  // Genuine failure: no orchestrator job, the direct drafter produced
+  // zero pages, and we only have the raw file on disk. This is the one
+  // case that warrants the amber "unavailable / raw saved" warning.
+  const draftFailed =
+    !phase.orchestratorStarted &&
+    !draftedDirectly &&
+    !wiki;
   return (
     <div className="border-2 border-ink rounded-2xl bg-white p-6 sm:p-8">
       <div className="text-[11px] uppercase tracking-[0.22em] text-accent font-semibold">
@@ -1908,6 +2403,27 @@ function DoneView({
             </Link>
             .
           </>
+        ) : assemble ? (
+          <>
+            Drafted{" "}
+            {typeof assemble.pagesCreated === "number" ? (
+              <>
+                <strong>{assemble.pagesCreated}</strong> page
+                {assemble.pagesCreated === 1 ? "" : "s"}{" "}
+              </>
+            ) : (
+              <>your starter wiki </>
+            )}
+            from the bundle you assembled. Everything starts{" "}
+            <span className="font-mono">private</span> — review and promote at{" "}
+            <Link
+              href={`/${user.tenant_id}/owner`}
+              className="text-accent hover:underline"
+            >
+              /{user.tenant_id}/owner
+            </Link>
+            .
+          </>
         ) : (
           <>
             Drafted from your import. You can refine it any time at{" "}
@@ -1921,6 +2437,8 @@ function DoneView({
           </>
         )}
       </p>
+
+      {assemble && <AssembleSummaryBlock summary={assemble} />}
 
       {wiki && (wiki.conflicts.length > 0 || wiki.skipped.length > 0) && (
         <div className="mt-4 text-xs space-y-2">
@@ -1966,16 +2484,48 @@ function DoneView({
         >
           Open my wiki <span aria-hidden>→</span>
         </Link>
-        {!wiki && phase.orchestratorStarted ? (
-          <span className="text-xs text-ink-muted">
-            Orchestrator finished{phase.summary ? `: ${phase.summary}` : "."}
-          </span>
-        ) : !wiki ? (
-          <span className="text-xs text-amber-700">
-            Orchestrator was unavailable — raw saved at{" "}
-            <span className="font-mono">{phase.rawPath}</span>.
-          </span>
-        ) : null}
+        {(() => {
+          // The wiki-import path has its own header copy; nothing to add.
+          if (wiki) return null;
+
+          // Hosted path: Puppetmaster ("the orchestrator") is never
+          // installed by design — the backend falls through to the
+          // synchronous direct-LLM drafter, which returns pages_created.
+          // When it drafted pages, that's a SUCCESS, not a failure. The
+          // header already says "Drafted N pages", so don't contradict it
+          // with an alarming "orchestrator was unavailable" amber. This
+          // was the bug: pages were created, the wiki was live, but the
+          // footer claimed the run failed.
+          const drafted = assemble?.pagesCreated;
+          if (typeof drafted === "number" && drafted > 0) return null;
+
+          // Self-host path: a real Puppetmaster job ran and finished.
+          if (phase.orchestratorStarted) {
+            return (
+              <span className="text-xs text-ink-muted">
+                Drafting finished{phase.summary ? `: ${phase.summary}` : "."}
+              </span>
+            );
+          }
+
+          // Genuinely nothing got drafted (the drafter returned zero or
+          // errored). The raw input is saved — tell the user how to retry
+          // without blaming an "orchestrator" they never opted into.
+          return (
+            <span className="text-xs text-amber-700">
+              We saved your sources but couldn&apos;t draft pages
+              automatically — raw saved at{" "}
+              <span className="font-mono">{phase.rawPath}</span>. Draft from{" "}
+              <Link
+                href={`/${user.tenant_id}/owner`}
+                className="underline hover:text-amber-900"
+              >
+                /{user.tenant_id}/owner
+              </Link>
+              .
+            </span>
+          );
+        })()}
       </div>
 
       <ShareBlock user={user} />
