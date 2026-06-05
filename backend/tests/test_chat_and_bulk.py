@@ -302,10 +302,22 @@ def test_chat_stream_validates_input(client):
         assert r.status_code == 422
 
 
-def test_bulk_reingest_path(client, owner_headers, wiki_root):
-    """Reingest path either queues jobs (dev box with Puppetmaster) or
-    reports orchestrator unavailable. Both are acceptable; we just want
-    a stable response shape that the UI can render."""
+def test_bulk_reingest_path(client, owner_headers, wiki_root, monkeypatch):
+    """Reingest reports orchestrator-unavailable per item without crashing,
+    so the UI gets a stable per-item result shape for partial success.
+
+    We force PUPPETMASTER_BIN to a path that can't exist so the test is
+    deterministic AND never spawns a real billable Cursor agent. Without
+    this guard, on a dev box where `puppetmaster` is on PATH the test
+    spawned a real subprocess and leaked an orphaned "running" job into
+    the shared backend/.jobs.json (same convention as test_v1_polish /
+    test_hosted_multitenant)."""
+    from app import orchestrator
+
+    monkeypatch.setattr(
+        orchestrator, "PUPPETMASTER_BIN", "/no/such/binary-pllmw-test"
+    )
+
     rel = _write_raw(wiki_root, "reingest-me.md", "body to ingest")
     r = client.post(
         "/owner/raw/bulk",
@@ -319,9 +331,7 @@ def test_bulk_reingest_path(client, owner_headers, wiki_root):
     result = body["results"][0]
     # File should still exist regardless of whether the job kicked off.
     assert (wiki_root / rel).exists()
-    if result["ok"]:
-        assert result["action"] == "reingest"
-        assert "tracking_id" in result
-    else:
-        assert "orchestrator" in result["error"].lower() or \
-               "puppetmaster" in result["error"].lower()
+    # Binary is missing → the item must report failure, not pretend success.
+    assert result["ok"] is False
+    assert "orchestrator" in result["error"].lower() or \
+           "puppetmaster" in result["error"].lower()
