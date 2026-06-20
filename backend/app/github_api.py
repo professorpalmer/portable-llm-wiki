@@ -512,6 +512,57 @@ async def create_repo(
     return r.json()
 
 
+async def create_push_webhook(
+    token: str,
+    *,
+    full_name: str,
+    callback_url: str,
+    secret: str,
+) -> dict:
+    """POST /repos/{full_name}/hooks — register a push webhook.
+
+    Wires the instant-sync path: GitHub POSTs ``callback_url`` on every
+    push, signed with ``secret`` (HMAC-SHA256 in ``X-Hub-Signature-256``),
+    so the hosted mirror fast-forwards within seconds of the owner's
+    local push instead of waiting for the background poll.
+
+    Idempotent-ish: if a hook with the same config already exists GitHub
+    422s; we treat that as success (the hook is there, which is all we
+    need) and return an empty dict rather than raising.
+
+    Best-effort by contract — callers should swallow failures. A missing
+    webhook just means we fall back to the background poller; it must
+    never block repo-connect.
+    """
+    body = {
+        "name": "web",
+        "active": True,
+        "events": ["push"],
+        "config": {
+            "url": callback_url,
+            "content_type": "json",
+            "secret": secret,
+            "insecure_ssl": "0",
+        },
+    }
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        r = await client.post(
+            f"{GITHUB_API}/repos/{full_name}/hooks",
+            json=body,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
+    if r.status_code in (200, 201):
+        return r.json()
+    if r.status_code == 422 and "already exists" in r.text.lower():
+        # Hook with this config already present — the end state we want.
+        return {}
+    raise GitHubAPIError(r.status_code, r.text[:200])
+
+
 async def put_file(
     token: str,
     *,

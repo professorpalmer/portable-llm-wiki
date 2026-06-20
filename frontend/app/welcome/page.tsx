@@ -28,6 +28,10 @@ import {
   onboardingConnectRepo,
   onboardingImportWiki,
   onboardingListMyRepos,
+  ownerSyncCheck,
+  ownerSyncPull,
+  type PullSafety,
+  type SyncPullResult,
   type AssembleAnswerInput,
   type AssembleTextSourceInput,
   type AssembleUrlResult,
@@ -1243,6 +1247,170 @@ function ModeCard({
   );
 }
 
+// ---------- Sync freshness panel -------------------------------------------
+//
+// Honest staleness copy. The old AlreadyOnboarded bouncer told every
+// returning user "no need to re-import" unconditionally — even when the
+// hosted mirror had silently drifted behind the GitHub repo (the owner
+// authored locally for 10 days, hosted stayed at 67 pages while GitHub
+// had 132). This panel fetches the live remote verdict on mount and, when
+// the mirror is behind, surfaces "Synced N days ago — behind by M commits"
+// plus a one-click Sync now (smart pull: a safe auto fast-forward, no
+// scary force button unless the history genuinely diverged).
+
+function relativeTimeFromUnix(unixSeconds: number): string {
+  if (!unixSeconds) return "never";
+  const deltaMs = Date.now() - unixSeconds * 1000;
+  if (deltaMs < 0) return "just now";
+  const mins = Math.floor(deltaMs / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} minute${mins === 1 ? "" : "s"} ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.floor(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
+function SyncFreshnessPanel() {
+  const [check, setCheck] = useState<{
+    classification: PullSafety;
+    lastSyncedAt: number;
+  } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [pulling, setPulling] = useState(false);
+  const [pullResult, setPullResult] = useState<SyncPullResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await ownerSyncCheck();
+      // Defensive: only show the panel when the backend actually returned
+      // a usable classification. A non-hosted build, an unconnected repo,
+      // or a transient shape mismatch should hide the panel, not crash the
+      // bouncer.
+      if (data && data.ok && data.classification) {
+        setCheck({
+          classification: data.classification,
+          lastSyncedAt: data.last_synced_at,
+        });
+      } else {
+        setCheck(null);
+      }
+    } catch (e) {
+      // A 409 (no repo connected) or transient error shouldn't break the
+      // bouncer — just hide the panel.
+      setError(e instanceof Error ? e.message : "unknown error");
+      setCheck(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const doSync = useCallback(async () => {
+    setPulling(true);
+    setPullResult(null);
+    try {
+      const res = await ownerSyncPull(); // smart pull, no force
+      setPullResult(res.result);
+      // Re-check so the behind count and last-synced refresh.
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "unknown error");
+    } finally {
+      setPulling(false);
+    }
+  }, [refresh]);
+
+  if (loading) {
+    return (
+      <div className="mt-5 text-xs text-ink-muted">Checking GitHub sync…</div>
+    );
+  }
+  // No connected repo / transient error → stay quiet (the bouncer still works).
+  if (error || !check) return null;
+
+  const c = check.classification;
+  const behind = c.behind ?? 0;
+  const syncedAgo = relativeTimeFromUnix(check.lastSyncedAt);
+
+  // In sync (or local is ahead / even) → a small reassurance line.
+  if (behind <= 0) {
+    return (
+      <div
+        data-testid="sync-fresh"
+        className="mt-5 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900"
+      >
+        Up to date with{" "}
+        <code className="font-mono text-[12px]">github</code>
+        {check.lastSyncedAt ? ` · last synced ${syncedAgo}` : ""}.
+      </div>
+    );
+  }
+
+  // Behind → honest staleness + a Sync now button. Genuine divergence
+  // (tracked edits / diverged history → !auto_ff) keeps the user out of
+  // a silent overwrite; we tell them to resolve in the owner console.
+  return (
+    <div
+      data-testid="sync-stale"
+      className="mt-5 rounded-xl border border-amber-300 bg-amber-50 p-4"
+    >
+      <div className="text-[11px] uppercase tracking-[0.18em] text-amber-800 font-semibold">
+        Out of sync with GitHub
+      </div>
+      <div className="mt-1.5 text-sm text-ink leading-relaxed">
+        {check.lastSyncedAt ? `Synced ${syncedAgo} — ` : ""}behind by{" "}
+        <span className="font-semibold">{behind}</span> commit
+        {behind === 1 ? "" : "s"} on{" "}
+        <code className="font-mono text-[12px]">{c.branch}</code>. Your GitHub
+        repo has edits this hosted copy hasn&apos;t pulled yet.
+      </div>
+
+      {pullResult && pullResult.action === "pulled" && (
+        <div className="mt-2 text-xs text-emerald-800 font-medium">
+          Pulled {pullResult.behind} commit
+          {pullResult.behind === 1 ? "" : "s"}. Your wiki is current — refresh
+          to see the new pages.
+        </div>
+      )}
+      {pullResult &&
+        (pullResult.action === "dirty" || pullResult.action === "diverged") && (
+          <div className="mt-2 text-xs text-red-700">
+            Couldn&apos;t auto-sync: {pullResult.error}. Resolve it from the{" "}
+            owner console.
+          </div>
+        )}
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {c.auto_ff ? (
+          <button
+            type="button"
+            data-testid="sync-now"
+            onClick={doSync}
+            disabled={pulling}
+            className="px-3 py-1.5 rounded-md bg-ink text-paper text-xs font-medium hover:bg-ink-soft disabled:opacity-60"
+          >
+            {pulling
+              ? "Syncing…"
+              : `Sync now — pull ${behind} commit${behind === 1 ? "" : "s"}`}
+          </button>
+        ) : (
+          <span className="text-xs text-amber-900">
+            Local edits diverge from GitHub — resolve in the owner console to
+            avoid losing work.
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ---------- AlreadyOnboarded bouncer ---------------------------------------
 
 function AlreadyOnboarded({
@@ -1300,8 +1468,10 @@ function AlreadyOnboarded({
         <code className="font-mono text-[13px] text-ink">
           portablellm.wiki/{user.tenant_id}
         </code>
-        . Pick up where you left off — no need to re-import.
+        . Pick up where you left off.
       </p>
+
+      <SyncFreshnessPanel />
 
       <div className="mt-6 flex flex-wrap gap-3">
         <Link
@@ -2353,25 +2523,6 @@ function DoneView({
 }) {
   const wiki = phase.wikiImport;
   const assemble = phase.assembleSummary;
-  // How many pages the synchronous direct-LLM drafter produced (hosted
-  // path, no Puppetmaster job). A positive count means the seed
-  // SUCCEEDED even though no orchestrator job ran — so the footer must
-  // NOT show the "Orchestrator was unavailable" warning in that case.
-  const draftedCount =
-    typeof phase.pagesCreated === "number"
-      ? phase.pagesCreated
-      : assemble?.pagesCreated;
-  const draftedDirectly =
-    !phase.orchestratorStarted &&
-    typeof draftedCount === "number" &&
-    draftedCount > 0;
-  // Genuine failure: no orchestrator job, the direct drafter produced
-  // zero pages, and we only have the raw file on disk. This is the one
-  // case that warrants the amber "unavailable / raw saved" warning.
-  const draftFailed =
-    !phase.orchestratorStarted &&
-    !draftedDirectly &&
-    !wiki;
   return (
     <div className="border-2 border-ink rounded-2xl bg-white p-6 sm:p-8">
       <div className="text-[11px] uppercase tracking-[0.22em] text-accent font-semibold">
@@ -2496,7 +2647,12 @@ function DoneView({
           // with an alarming "orchestrator was unavailable" amber. This
           // was the bug: pages were created, the wiki was live, but the
           // footer claimed the run failed.
-          const drafted = assemble?.pagesCreated;
+          //
+          // Prefer the top-level phase.pagesCreated (threaded through
+          // beginJob for ALL drafter paths) and fall back to the
+          // assembly recap, so the generic URL/text import path is
+          // covered too — not just the guided-assembly bundle.
+          const drafted = phase.pagesCreated ?? assemble?.pagesCreated;
           if (typeof drafted === "number" && drafted > 0) return null;
 
           // Self-host path: a real Puppetmaster job ran and finished.

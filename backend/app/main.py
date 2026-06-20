@@ -118,8 +118,65 @@ async def _lifespan(_app: FastAPI):
             f"{', '.join(t.id for t in loaded[:10])}{' ...' if len(loaded) > 10 else ''}",
             flush=True,
         )
+
+        # Background drift killer: periodically fast-forward every
+        # connected tenant from GitHub so a hosted mirror can't silently
+        # fall behind the owner's local authoring (the "stuck at 67 pages,
+        # last-synced 10 days ago" bug). Only safe fast-forwards happen
+        # here — diverged/dirty tenants are left for the owner. Disabled
+        # when WIKI_TENANT_PULL_POLL_S=0.
+        poll_task = _maybe_start_tenant_pull_poller(_persistence)
+
     yield
-    # No teardown work — the OS will clean up subprocesses and threads.
+    # Stop the poller cleanly on shutdown so tests / reloads don't leak
+    # a dangling task. (Single-tenant mode never started one.)
+    try:
+        poll_task  # type: ignore[used-before-def]
+    except NameError:
+        poll_task = None
+    if poll_task is not None:
+        poll_task.cancel()
+
+
+async def _tenant_pull_poll_loop(_persistence) -> None:
+    """Sleep ``TENANT_PULL_POLL_S`` between sweeps, fast-forwarding every
+    connected tenant. Runs git in a worker thread so the blocking
+    subprocess calls never stall the event loop."""
+    import asyncio
+
+    interval = _persistence.TENANT_PULL_POLL_S
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            summary = await asyncio.to_thread(_persistence.smart_pull_all_tenants)
+            if summary.get("pulled"):
+                print(f"[tenant-pull-poll] {summary}", flush=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — a bad sweep must not kill the loop
+            print(f"[tenant-pull-poll] sweep error: {exc}", flush=True)
+
+
+def _maybe_start_tenant_pull_poller(_persistence):
+    """Start the background pull poller if enabled. Returns the asyncio
+    task (or None). Kept tiny + defensive so a missing event loop or a
+    zero interval is a clean no-op rather than a boot failure."""
+    import asyncio
+
+    if _persistence.TENANT_PULL_POLL_S <= 0:
+        print("[tenant-pull-poll] disabled (WIKI_TENANT_PULL_POLL_S<=0)", flush=True)
+        return None
+    try:
+        task = asyncio.create_task(_tenant_pull_poll_loop(_persistence))
+    except RuntimeError:
+        # No running loop (shouldn't happen under uvicorn's lifespan, but
+        # be safe under odd test harnesses).
+        return None
+    print(
+        f"[tenant-pull-poll] enabled, every {_persistence.TENANT_PULL_POLL_S}s",
+        flush=True,
+    )
+    return task
 
 
 app = FastAPI(

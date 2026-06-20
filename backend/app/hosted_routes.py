@@ -34,6 +34,9 @@ falls back to a synchronous LLM draft if Puppetmaster is unavailable).
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import os
 import re
 import secrets
@@ -1579,6 +1582,11 @@ async def onboarding_connect_repo(
             ),
         }
 
+    # Best-effort: register a GitHub push webhook so local→hosted edits
+    # propagate within seconds (the background poller is the safety net).
+    # Never blocks connect — a failure just means we rely on polling.
+    await _register_push_webhook_best_effort(tenant, token, full_name, default_branch)
+
     # If there was preexisting local content, the bootstrap already pushed
     # it as the seed commit. Just confirm and return status.
     return {
@@ -1590,6 +1598,41 @@ async def onboarding_connect_repo(
         "bootstrap": boot,
         "status": persistence.get_tenant_status(tenant),
     }
+
+
+def _webhook_callback_url() -> str:
+    """Public URL GitHub should POST push events to. Anchored on the API
+    host (PUBLIC_API_BASE_URL, derived from the OAuth redirect origin)."""
+    base = (settings.public_api_base_url or "").rstrip("/")
+    return f"{base}/hooks/github" if base else ""
+
+
+async def _register_push_webhook_best_effort(
+    tenant: tenants.Tenant, token: str, full_name: str, branch: str
+) -> None:
+    """Mint a per-tenant webhook secret and register a GitHub push hook.
+
+    Best-effort by contract: any failure (no callback URL configured,
+    GitHub error, insufficient scope) is swallowed — the background
+    poller still keeps the mirror fresh, just not instantly. The minted
+    secret is persisted on the tenant record (gitignored tenant.json),
+    never returned over the wire.
+    """
+    callback_url = _webhook_callback_url()
+    if not callback_url:
+        return
+    try:
+        secret = tenant.gh_webhook_secret or secrets.token_hex(32)
+        await github_api.create_push_webhook(
+            token,
+            full_name=full_name,
+            callback_url=callback_url,
+            secret=secret,
+        )
+        tenant.gh_webhook_secret = secret
+        tenants.manager().upsert(tenant)
+    except Exception:  # noqa: BLE001 — webhook is an optimization, never fatal
+        pass
 
 
 @router.get("/owner/sync/status")
@@ -1707,6 +1750,148 @@ def owner_sync_pull(request: Request, payload: Optional[dict] = None) -> dict:
         "result": result,
         "status": persistence.get_tenant_status(tenant),
     }
+
+
+@router.get("/owner/sync/check")
+def owner_sync_check(request: Request) -> dict:
+    """Live remote-vs-local verdict for the owner panel + /welcome.
+
+    Fetches the tenant's remote and returns the smart-pull classification
+    (behind/ahead counts, whether an auto fast-forward is safe, and any
+    tracked edits that would block one). Powers the honest staleness copy
+    ("Synced N days ago — behind by M commits") and decides whether the
+    UI shows a plain "Pull from GitHub" (safe) vs the destructive force
+    button (genuine divergence).
+
+    One ``git fetch`` per call — cheap, but a real network round-trip, so
+    callers invoke it on demand (panel mount / explicit refresh), not on
+    every request.
+    """
+    _require_hosted_mode()
+    user = _require_session_user(request)
+    tenant = tenants.manager().require(user["tenant_id"])
+    if not tenant.gh_repo:
+        raise HTTPException(
+            status_code=409,
+            detail="Tenant has no connected GitHub repo. Connect one first.",
+        )
+    classification = persistence.classify_pull_safety(tenant)
+    return {
+        "ok": bool(classification.get("ok")),
+        "classification": classification,
+        "last_synced_at": tenant.git_last_synced_at,
+        "status": persistence.get_tenant_status(tenant),
+    }
+
+
+# ---------------------------------------------------------------------------
+# GitHub push webhook — instant local→hosted propagation
+# ---------------------------------------------------------------------------
+#
+# The poller (persistence.smart_pull_all_tenants) is the safety net; this
+# is the fast path. GitHub POSTs here on every push, signed with the
+# per-tenant secret minted at connect time. We verify the signature,
+# resolve the tenant by repo full_name, and fast-forward — so a local
+# push shows up on the hosted mirror in seconds, zero button clicks.
+
+
+def _verify_github_signature(secret: str, raw_body: bytes, signature_header: str) -> bool:
+    """Constant-time check of GitHub's ``X-Hub-Signature-256`` header.
+
+    Header form: ``sha256=<hex>``. We HMAC the raw request body with the
+    tenant's stored secret and compare. Empty secret or malformed header
+    fails closed.
+    """
+    if not secret or not signature_header:
+        return False
+    prefix = "sha256="
+    if not signature_header.startswith(prefix):
+        return False
+    sent = signature_header[len(prefix):]
+    expected = hmac.new(
+        secret.encode("utf-8"), raw_body, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(sent, expected)
+
+
+def _tenant_for_repo(full_name: str) -> Optional[tenants.Tenant]:
+    """Find the tenant whose connected repo matches ``full_name`` (case-
+    insensitive). Returns None if no tenant owns that repo."""
+    if not full_name:
+        return None
+    target = full_name.strip().lower()
+    for t in tenants.manager().all_tenants():
+        if (t.gh_repo or "").strip().lower() == target:
+            return t
+    return None
+
+
+@router.post("/hooks/github")
+async def github_push_webhook(request: Request) -> dict:
+    """Receive GitHub push events and fast-forward the matching tenant.
+
+    Flow:
+      1. Parse the payload to learn which repo pushed (``repository.
+         full_name``) and which ref.
+      2. Resolve the owning tenant and verify ``X-Hub-Signature-256``
+         against that tenant's stored webhook secret. A bad/missing
+         signature 401s — this endpoint is unauthenticated otherwise.
+      3. On a push to the tenant's default branch, run the smart pull
+         and reload the index. Non-default-branch pushes and ``ping``
+         events are acknowledged without action.
+
+    Returns a small JSON ack. Never does anything destructive — it reuses
+    ``pull_tenant_now`` (force=False), so a diverged/dirty tenant is left
+    untouched for the owner to resolve in the console.
+    """
+    _require_hosted_mode()
+
+    raw_body = await request.body()
+    event = request.headers.get("X-GitHub-Event", "")
+
+    try:
+        payload = json.loads(raw_body.decode("utf-8") or "{}")
+    except (ValueError, UnicodeDecodeError):
+        raise HTTPException(status_code=400, detail="invalid JSON payload")
+
+    repo = payload.get("repository") or {}
+    full_name = str(repo.get("full_name") or "")
+    tenant = _tenant_for_repo(full_name)
+    if tenant is None:
+        # Unknown repo — nothing we manage. 404 so GitHub's webhook
+        # delivery log shows it as unrouted rather than silently OK.
+        raise HTTPException(status_code=404, detail="no tenant for repo")
+
+    signature = request.headers.get("X-Hub-Signature-256", "")
+    if not _verify_github_signature(tenant.gh_webhook_secret, raw_body, signature):
+        raise HTTPException(status_code=401, detail="bad signature")
+
+    # Ping (sent on hook creation) — acknowledge, no work.
+    if event == "ping":
+        return {"ok": True, "event": "ping", "tenant_id": tenant.id}
+    if event and event != "push":
+        return {"ok": True, "event": event, "ignored": True, "tenant_id": tenant.id}
+
+    # Only act on pushes to the branch we mirror.
+    branch = tenant.gh_default_branch or "main"
+    ref = str(payload.get("ref") or "")
+    if ref and ref != f"refs/heads/{branch}":
+        return {
+            "ok": True,
+            "event": "push",
+            "ignored_ref": ref,
+            "tenant_id": tenant.id,
+        }
+
+    result = persistence.pull_tenant_now(tenant)
+    if result.get("ok") and result.get("action") in {"pulled", "forced"}:
+        try:
+            with tenants.set_current_tenant(tenant):
+                tenant.reload_index()
+        except Exception as exc:  # noqa: BLE001
+            result["reload_warning"] = str(exc)[:200]
+
+    return {"ok": bool(result.get("ok")), "result": result, "tenant_id": tenant.id}
 
 
 # ---------------------------------------------------------------------------

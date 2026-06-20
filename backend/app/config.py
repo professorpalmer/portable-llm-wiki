@@ -13,6 +13,22 @@ VALID_TIERS = ("public", "recruiter", "friend", "private")
 TIER_ORDER = {tier: i for i, tier in enumerate(VALID_TIERS)}
 
 
+def _origin_of(url: str) -> str:
+    """Return the scheme://host[:port] origin of a URL, or "" if unparseable.
+
+    Used to derive the API host from the OAuth redirect URL so the GitHub
+    webhook callback can be built without a dedicated env var.
+    """
+    if not url:
+        return ""
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    if not parts.scheme or not parts.netloc:
+        return ""
+    return f"{parts.scheme}://{parts.netloc}"
+
+
 @dataclass(frozen=True)
 class _BaseSettings:
     """Process-wide settings loaded from env. The path-related properties
@@ -36,6 +52,11 @@ class _BaseSettings:
     github_oauth_client_id: str
     github_oauth_client_secret: str
     github_oauth_redirect_url: str
+    # Public origin of the API host (e.g. https://api.portablellm.wiki).
+    # Used to build the GitHub push-webhook callback URL. Defaults to the
+    # origin of github_oauth_redirect_url (which already lives on the API
+    # host) so it's correct without a separate env var in most deploys.
+    public_api_base_url: str
     # Session cookie name for the hosted product
     session_cookie_name: str
     session_secret: str
@@ -156,6 +177,10 @@ def _load_settings() -> Settings:
         github_oauth_redirect_url=os.environ.get(
             "GITHUB_OAUTH_REDIRECT_URL", ""
         ).strip(),
+        public_api_base_url=(
+            os.environ.get("PUBLIC_API_BASE_URL", "").strip()
+            or _origin_of(os.environ.get("GITHUB_OAUTH_REDIRECT_URL", "").strip())
+        ),
         session_cookie_name=os.environ.get("SESSION_COOKIE_NAME", "plw_session").strip()
         or "plw_session",
         session_secret=os.environ.get("SESSION_SECRET", "").strip(),

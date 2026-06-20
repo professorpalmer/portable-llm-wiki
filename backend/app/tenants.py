@@ -62,6 +62,11 @@ class Tenant:
     gh_token: str = ""  # OAuth access token; rotated on re-auth
     gh_repo: str = ""  # "<owner>/<repo>" — the wiki content repo we push to
     gh_default_branch: str = "main"
+    # Per-tenant secret used to verify GitHub push-webhook signatures
+    # (X-Hub-Signature-256). Minted when we register the webhook at
+    # repo-connect time. Like gh_token, it's a secret: persisted to
+    # tenant.json (gitignored) but NEVER exposed over the wire.
+    gh_webhook_secret: str = ""
     # Sync state (set + updated by persistence.flush_tenant_*). All values
     # are in-memory hints surfaced to the owner console; the wiki content
     # itself lives in git so these can be re-derived after a cold start.
@@ -280,6 +285,7 @@ class TenantManager:
             gh_token=str(data.get("gh_token", "")),
             gh_repo=str(data.get("gh_repo", "")),
             gh_default_branch=str(data.get("gh_default_branch", "main")) or "main",
+            gh_webhook_secret=str(data.get("gh_webhook_secret", "")),
             git_last_synced_at=float(data.get("git_last_synced_at", 0) or 0),
             git_last_error=str(data.get("git_last_error", "")),
             git_pushes_made=int(data.get("git_pushes_made", 0) or 0),
@@ -345,6 +351,9 @@ class TenantManager:
             # disk is already private but multi-tenant means we don't want
             # an accidental ``ls`` to leak someone else's token.
             "gh_token": tenant.gh_token,
+            # Webhook secret: same sensitivity class as the token. Stays
+            # on disk (gitignored via tenant.json) and never goes to_dict.
+            "gh_webhook_secret": tenant.gh_webhook_secret,
             "gh_repo": tenant.gh_repo,
             "gh_default_branch": tenant.gh_default_branch,
             "git_last_synced_at": tenant.git_last_synced_at,

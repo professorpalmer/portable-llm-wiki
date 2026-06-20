@@ -1951,7 +1951,8 @@ def test_tenant_status_has_no_token_in_response(multi_tenant_app, monkeypatch):
 
 
 def _stub_pull_run_git(monkeypatch, *, behind: int = 0, ahead: int = 0,
-                       dirty: bool = False, fetch_fails: bool = False,
+                       dirty: bool = False, dirty_kind: str = "untracked",
+                       fetch_fails: bool = False,
                        reset_fails: bool = False, merge_fails: bool = False):
     """Stub persistence._run_git to simulate a given branch divergence state.
 
@@ -1960,6 +1961,11 @@ def _stub_pull_run_git(monkeypatch, *, behind: int = 0, ahead: int = 0,
     status --porcelain, then either merge --ff-only or reset --hard.
     We respond based on the first arg + the scenario flags. Records
     every invocation so tests can assert on what *commands* ran.
+
+    ``dirty_kind`` controls what kind of dirt ``status --porcelain``
+    reports — ``"untracked"`` (a ``??`` row, which smart pull treats as
+    disposable and fast-forwards through) or ``"modified"`` (a tracked
+    edit that must block the FF).
     """
     from app import persistence
 
@@ -1980,7 +1986,11 @@ def _stub_pull_run_git(monkeypatch, *, behind: int = 0, ahead: int = 0,
                 return 0, str(behind)
             return 0, str(ahead)
         if cmd == "status":
-            return 0, "?? unstaged\n" if dirty else ""
+            if not dirty:
+                return 0, ""
+            if dirty_kind == "modified":
+                return 0, " M wiki/page.md\n"
+            return 0, "?? unstaged\n"
         if cmd == "merge":
             return (1, "merge failed") if merge_fails else (0, "")
         if cmd == "reset":
@@ -2099,20 +2109,47 @@ def test_pull_diverged_refuses_without_force(multi_tenant_app, monkeypatch):
     assert not any(c[0] in ("merge", "reset") for c in calls)
 
 
-def test_pull_dirty_working_tree_refuses(multi_tenant_app, monkeypatch):
-    """Uncommitted local changes block the pull. Otherwise a stray
-    edit gets nuked by FF + checkout. The UI tells the user to hit
-    Sync now first."""
+def test_pull_untracked_only_fast_forwards(multi_tenant_app, monkeypatch):
+    """Smart pull: an UNTRACKED-only working tree must NOT block a
+    fast-forward. A hosted mirror has nothing authored to lose, so stray
+    untracked cruft gets fast-forwarded straight through — action
+    ``pulled``, not the old scary ``dirty``. This is the headline fix:
+    the wart was treating all dirt as blocking.
+    """
     _set_session_user(multi_tenant_app, "alice", login="alice")
     _setup_connected_tenant("alice")
-    calls = _stub_pull_run_git(monkeypatch, behind=2, ahead=0, dirty=True)
+    calls = _stub_pull_run_git(
+        monkeypatch, behind=2, ahead=0, dirty=True, dirty_kind="untracked"
+    )
+
+    r = multi_tenant_app.post("/owner/sync/pull")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["result"]["action"] == "pulled", body["result"]
+    assert body["result"]["behind"] == 2
+    # The FF merge actually ran (untracked dirt didn't gate it).
+    assert any(c[0] == "merge" and "--ff-only" in c for c in calls), calls
+
+
+def test_pull_tracked_modified_still_blocks(multi_tenant_app, monkeypatch):
+    """Smart pull still protects REAL authored edits: a tracked-modified
+    file on a fast-forwardable branch must refuse with ``dirty`` and
+    require force / Sync-now, since a FF checkout would clobber it."""
+    _set_session_user(multi_tenant_app, "alice", login="alice")
+    _setup_connected_tenant("alice")
+    calls = _stub_pull_run_git(
+        monkeypatch, behind=2, ahead=0, dirty=True, dirty_kind="modified"
+    )
 
     r = multi_tenant_app.post("/owner/sync/pull")
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is False
-    assert body["result"]["action"] == "dirty"
+    assert body["result"]["action"] == "dirty", body["result"]
     assert body["result"]["dirty"] is True
+    assert body["result"]["tracked_modified"], body["result"]
+    # We bailed before mutating local state.
     assert not any(c[0] in ("merge", "reset") for c in calls)
 
 
@@ -2208,6 +2245,160 @@ def test_pull_response_does_not_leak_token(multi_tenant_app, monkeypatch):
     r = multi_tenant_app.post("/owner/sync/pull")
     assert r.status_code == 200
     assert "ghp_fake_token_for_pull_tests" not in r.text
+
+
+# ---------------------------------------------------------------------------
+# GET /owner/sync/check — live remote-vs-local verdict
+# ---------------------------------------------------------------------------
+
+
+def test_sync_check_reports_behind_and_auto_ff(multi_tenant_app, monkeypatch):
+    """The check endpoint surfaces the smart-pull classification: a mirror
+    that's purely behind with clean/untracked-only dirt is ``auto_ff`` so
+    the UI shows a plain Sync-now, not the destructive force button."""
+    _set_session_user(multi_tenant_app, "alice", login="alice")
+    _setup_connected_tenant("alice")
+    _stub_pull_run_git(monkeypatch, behind=4, ahead=0, dirty=False)
+
+    r = multi_tenant_app.get("/owner/sync/check")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    c = body["classification"]
+    assert c["behind"] == 4
+    assert c["auto_ff"] is True
+
+
+def test_sync_check_requires_connected_repo(multi_tenant_app):
+    """No repo connected → 409, never a misleading "in sync"."""
+    _set_session_user(multi_tenant_app, "alice", login="alice")
+    r = multi_tenant_app.get("/owner/sync/check")
+    assert r.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# Background poller — persistence.smart_pull_all_tenants
+# ---------------------------------------------------------------------------
+
+
+def test_smart_pull_all_tenants_drives_behind_tenant(multi_tenant_app, monkeypatch):
+    """The drift killer: a connected tenant that's behind GitHub gets
+    fast-forwarded by the poller sweep with zero user action — the core
+    acceptance criterion for Fix #2."""
+    from app import persistence
+
+    _setup_connected_tenant("alice")
+    _stub_pull_run_git(monkeypatch, behind=5, ahead=0, dirty=False)
+
+    summary = persistence.smart_pull_all_tenants()
+    assert summary["checked"] >= 1
+    assert summary["pulled"] >= 1
+    assert "alice" in summary["pulled_tenants"]
+
+
+def test_smart_pull_all_tenants_skips_unconnected(multi_tenant_app, monkeypatch):
+    """Tenants without a connected repo are never touched by the sweep."""
+    from app import persistence
+
+    # bob exists but has no gh_repo/token (default fixture state).
+    summary = persistence.smart_pull_all_tenants()
+    assert "bob" not in summary.get("pulled_tenants", [])
+
+
+# ---------------------------------------------------------------------------
+# POST /hooks/github — instant local→hosted propagation webhook
+# ---------------------------------------------------------------------------
+
+
+def _sign(secret: str, body: bytes) -> str:
+    import hashlib
+    import hmac
+
+    return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+
+def test_webhook_valid_signature_pulls(multi_tenant_app, monkeypatch):
+    """A correctly-signed push event for a known repo fast-forwards the
+    matching tenant — the instant path that kills drift without a poll."""
+    from app import persistence
+
+    tenant = _setup_connected_tenant("alice")
+    tenant.gh_webhook_secret = "whsec_test_secret"
+    from app import tenants as _tenants
+
+    _tenants.manager().upsert(tenant)
+
+    pulled = {"n": 0}
+
+    def fake_pull(t, *, force=False):
+        pulled["n"] += 1
+        return {"ok": True, "action": "pulled", "behind": 2, "ahead": 0}
+
+    monkeypatch.setattr(persistence, "pull_tenant_now", fake_pull)
+
+    body = json.dumps(
+        {"ref": "refs/heads/main", "repository": {"full_name": "alice/portable-llm-wiki"}}
+    ).encode()
+    r = multi_tenant_app.post(
+        "/hooks/github",
+        content=body,
+        headers={
+            "X-GitHub-Event": "push",
+            "X-Hub-Signature-256": _sign("whsec_test_secret", body),
+            "Content-Type": "application/json",
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert pulled["n"] == 1
+
+
+def test_webhook_bad_signature_rejected(multi_tenant_app, monkeypatch):
+    """A push event whose signature doesn't match the tenant's stored
+    secret is rejected (401) and never triggers a pull."""
+    from app import persistence
+    from app import tenants as _tenants
+
+    tenant = _setup_connected_tenant("alice")
+    tenant.gh_webhook_secret = "whsec_test_secret"
+    _tenants.manager().upsert(tenant)
+
+    pulled = {"n": 0}
+    monkeypatch.setattr(
+        persistence, "pull_tenant_now",
+        lambda t, *, force=False: pulled.__setitem__("n", pulled["n"] + 1) or {"ok": True},
+    )
+
+    body = json.dumps(
+        {"ref": "refs/heads/main", "repository": {"full_name": "alice/portable-llm-wiki"}}
+    ).encode()
+    r = multi_tenant_app.post(
+        "/hooks/github",
+        content=body,
+        headers={
+            "X-GitHub-Event": "push",
+            "X-Hub-Signature-256": _sign("WRONG_secret", body),
+            "Content-Type": "application/json",
+        },
+    )
+    assert r.status_code == 401
+    assert pulled["n"] == 0
+
+
+def test_webhook_unknown_repo_404(multi_tenant_app):
+    """A push for a repo no tenant owns is unrouted (404), not a silent OK."""
+    body = json.dumps(
+        {"ref": "refs/heads/main", "repository": {"full_name": "nobody/ghost-repo"}}
+    ).encode()
+    r = multi_tenant_app.post(
+        "/hooks/github",
+        content=body,
+        headers={
+            "X-GitHub-Event": "push",
+            "X-Hub-Signature-256": "sha256=deadbeef",
+            "Content-Type": "application/json",
+        },
+    )
+    assert r.status_code == 404
 
 
 # ---------------------------------------------------------------------------

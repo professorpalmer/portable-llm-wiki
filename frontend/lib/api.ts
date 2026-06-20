@@ -1776,9 +1776,14 @@ export type SyncPullResult = {
   behind: number;
   ahead: number;
   dirty: boolean;
+  // Smart-pull classification: tracked-modified files block a fast-forward
+  // (real authored edits), untracked files don't (disposable mirror cruft).
+  tracked_modified?: string[];
+  untracked?: string[];
   error?: string;
   fetch_note?: string;
   reload_warning?: string;
+  stashed_untracked?: boolean;
 };
 
 export type SyncPullResponse = {
@@ -1804,6 +1809,39 @@ export async function ownerSyncPull(
     method: "POST",
     body: JSON.stringify({ force: !!opts.force }),
   });
+}
+
+/** Smart-pull safety classification. Returned by `/owner/sync/check`,
+ * which fetches the remote and reports how local relates to it WITHOUT
+ * mutating anything. Drives the honest staleness copy ("Synced N days
+ * ago — behind by M commits") and decides whether the UI shows a plain
+ * "Pull from GitHub" (auto_ff true → safe) or the destructive force
+ * button (genuine divergence). */
+export type PullSafety = {
+  ok: boolean;
+  auto_ff: boolean;
+  reason: string;
+  branch: string;
+  behind: number;
+  ahead: number;
+  dirty: boolean;
+  tracked_modified: string[];
+  untracked: string[];
+  error: string | null;
+};
+
+export type SyncCheckResponse = {
+  ok: boolean;
+  classification: PullSafety;
+  last_synced_at: number;
+  status: GitHubSyncStatus;
+};
+
+/** Fetch the live remote-vs-local verdict for the connected tenant. One
+ * network round-trip (git fetch), so call on demand (panel mount /
+ * explicit refresh), not on every render. */
+export async function ownerSyncCheck(): Promise<SyncCheckResponse> {
+  return backendFetch<SyncCheckResponse>("/owner/sync/check");
 }
 
 /** Force-reset preview. Returned by the read-only endpoint

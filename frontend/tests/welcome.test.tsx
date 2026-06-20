@@ -564,4 +564,201 @@ describe("WelcomePage guided-assembly form", () => {
       screen.queryByText(/couldn['’]t draft pages automatically/i),
     ).toBeNull();
   });
+
+  it("shows the retry hint ONLY when the drafter produced zero pages", async () => {
+    stubAuthMeQueue([
+      authMeBody({ pageCount: 0, connected: true, repo: "alice/empty-wiki" }),
+    ]);
+
+    // Direct drafter ran but produced nothing: no orchestrator job, zero
+    // pages. This is the one case that legitimately warrants the amber
+    // "we couldn't draft / raw saved" footer — the complement of the
+    // success guard above.
+    mockAssemble.mockResolvedValueOnce({
+      ok: false,
+      tenant_id: "alice",
+      answers_count: 1,
+      text_count: 0,
+      urls: [],
+      usable_url_count: 0,
+      raw_path: "raw/imports/2026-06-04-onboarding-assembly.md",
+      orchestrator_started: false,
+      tracking_id: null,
+      pages_created: 0,
+      draft_error: "anthropic 529 overloaded",
+    });
+
+    render(<WelcomePage />);
+
+    fireEvent.change(
+      await screen.findByTestId("assemble-question-identity"),
+      { target: { value: "I am Alice." } },
+    );
+    fireEvent.click(screen.getByTestId("assemble-submit"));
+
+    expect(
+      await screen.findByText(/couldn['’]t draft pages automatically/i),
+    ).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Honest staleness — the AlreadyOnboarded bouncer's sync freshness panel
+// ---------------------------------------------------------------------------
+//
+// Fix #3: the bouncer used to tell every returning user "no need to
+// re-import" unconditionally, even when the hosted mirror had silently
+// drifted behind the GitHub repo (stuck at 67 pages while GitHub had
+// 132). The SyncFreshnessPanel fetches the live remote verdict on mount
+// and, when behind, surfaces "Synced N days ago — behind by M commits"
+// plus a one-click Sync-now that runs the SMART pull (a safe auto
+// fast-forward — never the destructive force button unless history
+// genuinely diverged).
+
+/** Fetch stub that answers /auth/me + the two sync endpoints the
+ * freshness panel touches. ``checkBody`` is the /owner/sync/check
+ * payload; ``onPull`` lets a test observe / shape the Sync-now POST. */
+function stubBouncerWithSync(
+  checkBody: any,
+  onPull?: () => any,
+): void {
+  global.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    const json = (body: any) =>
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    if (url.includes("/auth/me")) {
+      return json(
+        authMeBody({ pageCount: 132, connected: true, repo: "alice/cary-wiki" }),
+      );
+    }
+    if (url.includes("/owner/sync/check")) {
+      return json(checkBody);
+    }
+    if (url.includes("/owner/sync/pull")) {
+      return json(
+        onPull
+          ? onPull()
+          : {
+              ok: true,
+              result: { ok: true, action: "pulled", behind: 0, ahead: 0, dirty: false },
+              status: {},
+            },
+      );
+    }
+    throw new Error(`unexpected fetch in test: ${url}`);
+  }) as any;
+}
+
+describe("WelcomePage AlreadyOnboarded sync freshness", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    cleanup();
+  });
+  afterEach(() => {
+    delete (global as any).fetch;
+  });
+
+  it("shows honest 'behind by M commits' + a Sync-now button when the mirror drifted", async () => {
+    stubBouncerWithSync({
+      ok: true,
+      classification: {
+        ok: true,
+        auto_ff: true,
+        reason: "behind by 65, fast-forward safe",
+        branch: "main",
+        behind: 65,
+        ahead: 0,
+        dirty: false,
+        tracked_modified: [],
+        untracked: [],
+        error: null,
+      },
+      last_synced_at: 1,
+      status: {},
+    });
+
+    render(<WelcomePage />);
+
+    // The drift banner must appear with the real behind count — NOT the
+    // old unconditional "no need to re-import".
+    const stale = await screen.findByTestId("sync-stale");
+    expect(stale.textContent).toMatch(/behind by/i);
+    expect(stale.textContent).toMatch(/65 commits/);
+    // A safe auto-FF surfaces the plain Sync-now button (no scary force).
+    expect(screen.getByTestId("sync-now")).toBeInTheDocument();
+  });
+
+  it("clicking Sync now runs the smart pull and reports success", async () => {
+    let pulled = false;
+    stubBouncerWithSync(
+      {
+        ok: true,
+        classification: {
+          ok: true,
+          auto_ff: true,
+          reason: "behind by 3, fast-forward safe",
+          branch: "main",
+          behind: 3,
+          ahead: 0,
+          dirty: false,
+          tracked_modified: [],
+          untracked: [],
+          error: null,
+        },
+        last_synced_at: 1,
+        status: {},
+      },
+      () => {
+        pulled = true;
+        return {
+          ok: true,
+          result: { ok: true, action: "pulled", behind: 3, ahead: 0, dirty: false },
+          status: {},
+        };
+      },
+    );
+
+    render(<WelcomePage />);
+
+    const syncNow = await screen.findByTestId("sync-now");
+    fireEvent.click(syncNow);
+
+    await waitFor(() => {
+      expect(pulled).toBe(true);
+    });
+    expect(
+      await screen.findByText(/Pulled 3 commits/i),
+    ).toBeInTheDocument();
+  });
+
+  it("hides the destructive force button when local edits genuinely diverge", async () => {
+    stubBouncerWithSync({
+      ok: true,
+      classification: {
+        ok: true,
+        auto_ff: false,
+        reason: "behind by 2, 1 local edit(s) at risk",
+        branch: "main",
+        behind: 2,
+        ahead: 0,
+        dirty: true,
+        tracked_modified: ["wiki/about.md"],
+        untracked: [],
+        error: null,
+      },
+      last_synced_at: 1,
+      status: {},
+    });
+
+    render(<WelcomePage />);
+
+    const stale = await screen.findByTestId("sync-stale");
+    // No one-click Sync-now when it's unsafe — we steer to the owner
+    // console instead of silently overwriting authored edits.
+    expect(screen.queryByTestId("sync-now")).not.toBeInTheDocument();
+    expect(stale.textContent).toMatch(/diverge/i);
+  });
 });

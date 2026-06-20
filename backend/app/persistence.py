@@ -67,6 +67,13 @@ GIT_USER_EMAIL: str = (
 )
 PUSH_DELAY_S: float = float(os.environ.get("WIKI_GIT_PUSH_DELAY_S", "8") or "8")
 AUTOSYNC_ENABLED: bool = _env_truthy("WIKI_GIT_AUTOSYNC", bool(GIT_REMOTE))
+# How often the hosted background poller fast-forwards each connected
+# tenant from GitHub, in seconds. This is the drift killer: without it,
+# a hosted mirror only reconciles on owner login. 0 disables the poller.
+# Default 300s (5 min) — cheap on Render's single service + persistent disk.
+TENANT_PULL_POLL_S: float = float(
+    os.environ.get("WIKI_TENANT_PULL_POLL_S", "300") or "300"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -998,20 +1005,35 @@ def get_tenant_status(tenant: "Tenant") -> dict:
 # Without this pull path our hosted copy goes stale silently the moment
 # the user picks up an alternate edit channel.
 #
-# Conflict policy:
-#   * clean local + remote ahead       → fast-forward pull (always safe)
-#   * clean local + nothing new        → "already up to date"
-#   * unpushed local commits           → refuse unless force=True
-#                                        (user should hit "Sync now" first)
-#   * uncommitted working-tree changes → refuse unless force=True
-#   * force=True                       → ``git fetch && git reset --hard
-#                                        origin/<branch>``. Destructive;
-#                                        the UI confirms before sending.
+# Conflict policy (smart pull):
+#   * remote ahead + tree clean OR untracked-only → fast-forward pull.
+#     Stray untracked files never block a hosted mirror's FF — there's
+#     nothing authored on this side to lose. If an incoming file would
+#     collide with untracked cruft, we stash the cruft, FF, then drop it.
+#   * nothing new                       → "already up to date"
+#   * unpushed local commits (ahead>0,  → "ahead_only" (nudge Sync now)
+#     behind==0)
+#   * tracked-modified files + remote   → refuse ("dirty"): real authored
+#     ahead                               edits would be clobbered by FF;
+#                                         force / Sync-now required.
+#   * both sides have commits           → refuse ("diverged"); force req'd
+#     (ahead>0 AND behind>0)
+#   * force=True                        → ``git fetch && git reset --hard
+#                                         origin/<branch>``. Destructive;
+#                                         the UI confirms before sending.
+#
+# The wart this kills: the OLD policy treated ALL dirt as blocking, so a
+# hosted mirror that accumulated a stray untracked file (the common drift
+# case) refused every pull and the only escape was the scary "Force pull
+# (discard local)" button — even though the mirror had nothing worth
+# protecting. ``classify_pull_safety`` is the half-built classifier from
+# ``preview_force_reset`` promoted to a first-class decision.
 #
 # Returned dict shape:
 #   { ok, action: "pulled" | "up_to_date" | "ahead_only" | "diverged"
 #                | "dirty" | "forced",
 #     behind: int, ahead: int, dirty: bool,
+#     tracked_modified: [str], untracked: [str],
 #     error?: str, fetch_note?: str }
 
 
@@ -1100,6 +1122,43 @@ def _porcelain_status(cwd: Path) -> list[dict]:
             kind = "staged"
         rows.append({"status": code, "path": path, "kind": kind})
     return rows
+
+
+def _split_porcelain_dirt(cwd: Path) -> tuple[list[str], list[str]]:
+    """Classify working-tree dirt into (tracked_changes, untracked_paths).
+
+    This powers the *smart pull* decision: an untracked-only working
+    tree never blocks a fast-forward (a hosted mirror has no authored
+    content to lose), whereas tracked modifications represent real
+    edits and must be protected.
+
+    Unlike :func:`_porcelain_status`, this goes through ``_run_git`` so
+    the per-tenant pull tests can stub a divergence scenario without a
+    real on-disk repo. ``_run_git`` strips the combined output, which
+    can drop the single leading column-space on the first porcelain row
+    (e.g. ``" M f"`` → ``"M f"``). That's fine here: we only need the
+    tracked-vs-untracked split, and untracked rows are the unambiguous
+    ``??`` prefix regardless of leading whitespace.
+    """
+    rc, out = _run_git(["status", "--porcelain"], cwd=cwd)
+    tracked: list[str] = []
+    untracked: list[str] = []
+    if rc != 0:
+        return tracked, untracked
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        stripped = line.lstrip()
+        if stripped.startswith("??"):
+            parts = stripped.split(None, 1)
+            untracked.append(parts[1] if len(parts) > 1 else "")
+        else:
+            # Any non-untracked porcelain row is a tracked change
+            # (modified, staged, renamed, deleted). Keep the path for
+            # the UI; fall back to the raw row when we can't parse it.
+            parts = line.split(None, 1)
+            tracked.append(parts[1] if len(parts) > 1 else line.strip())
+    return tracked, untracked
 
 
 def _commits_in_range(cwd: Path, rev_range: str, *, limit: int = 20) -> list[dict]:
@@ -1243,6 +1302,100 @@ def preview_force_reset(tenant: "Tenant") -> dict:
     return result
 
 
+def classify_pull_safety(tenant: "Tenant") -> dict:
+    """Decide whether the tenant's wiki can be safely auto-fast-forwarded.
+
+    This is the brain behind smart pull (and the background poller). It
+    fetches ``origin/<branch>`` and reports how the local copy relates
+    to it, splitting working-tree dirt into *tracked-modified* (real
+    authored edits — must be protected) vs *untracked* (cruft — never
+    blocks a mirror's fast-forward).
+
+    ``auto_ff`` is True iff a fast-forward is both possible and safe:
+    we are strictly behind the remote (``behind > 0``), have no local
+    commits of our own (``ahead == 0``), and no tracked-modified files.
+    Untracked files don't disqualify the FF.
+
+    Returned dict (all fields always present)::
+
+        {
+          "ok": bool,                 # False only on connection/fetch error
+          "auto_ff": bool,            # safe to fast-forward with no prompt
+          "reason": str,              # short human-readable verdict
+          "branch": str,
+          "behind": int,
+          "ahead": int,
+          "dirty": bool,
+          "tracked_modified": [str],  # paths blocking an FF
+          "untracked": [str],         # paths that survive / get stashed
+          "error": Optional[str],
+        }
+
+    Never raises. Pure read (fetch + rev-list + status) — no mutation.
+    """
+    out: dict = {
+        "ok": False,
+        "auto_ff": False,
+        "reason": "",
+        "branch": (tenant.gh_default_branch or "main"),
+        "behind": 0,
+        "ahead": 0,
+        "dirty": False,
+        "tracked_modified": [],
+        "untracked": [],
+        "error": None,
+    }
+    if not tenant.gh_repo or not tenant.gh_token:
+        out["error"] = "tenant not connected"
+        out["reason"] = "not connected"
+        return out
+    if not _is_git_repo(tenant.wiki_root):
+        out["error"] = "wiki_root is not a git repo (run bootstrap first)"
+        out["reason"] = "not bootstrapped"
+        return out
+
+    branch = tenant.gh_default_branch or "main"
+    root = tenant.wiki_root
+
+    _ensure_tenant_git_identity(tenant)
+    _run_git(
+        ["remote", "set-url", "origin", _tenant_remote_url(tenant)], cwd=root
+    )
+    rc, fetch_out = _run_git(["fetch", "origin", branch], cwd=root, timeout=60)
+    if rc != 0:
+        out["error"] = f"fetch failed: {fetch_out[:200]}"
+        out["reason"] = "fetch failed"
+        return out
+
+    behind = _count_commits(root, f"HEAD..origin/{branch}")
+    ahead = _count_commits(root, f"origin/{branch}..HEAD")
+    tracked, untracked = _split_porcelain_dirt(root)
+    out.update(
+        ok=True,
+        behind=behind,
+        ahead=ahead,
+        dirty=bool(tracked or untracked),
+        tracked_modified=tracked,
+        untracked=untracked,
+    )
+
+    if ahead > 0 and behind > 0:
+        out["reason"] = f"diverged ({ahead} local, {behind} remote)"
+    elif behind == 0 and ahead > 0:
+        out["reason"] = f"ahead by {ahead} (nothing to pull)"
+    elif behind == 0:
+        out["reason"] = "up to date"
+    elif tracked:
+        out["reason"] = f"behind by {behind}, {len(tracked)} local edit(s) at risk"
+    else:
+        out["auto_ff"] = True
+        out["reason"] = (
+            f"behind by {behind}, fast-forward safe"
+            + (f" ({len(untracked)} untracked file(s) stashed)" if untracked else "")
+        )
+    return out
+
+
 def pull_tenant_now(tenant: "Tenant", *, force: bool = False) -> dict:
     """Pull the tenant's wiki from its GitHub remote.
 
@@ -1260,6 +1413,8 @@ def pull_tenant_now(tenant: "Tenant", *, force: bool = False) -> dict:
         "behind": 0,
         "ahead": 0,
         "dirty": False,
+        "tracked_modified": [],
+        "untracked": [],
     }
     if not tenant.gh_repo or not tenant.gh_token:
         result["error"] = "tenant not connected"
@@ -1287,10 +1442,12 @@ def pull_tenant_now(tenant: "Tenant", *, force: bool = False) -> dict:
 
     behind = _count_commits(root, f"HEAD..origin/{branch}")
     ahead = _count_commits(root, f"origin/{branch}..HEAD")
-    dirty = _is_working_tree_dirty(root)
+    tracked, untracked = _split_porcelain_dirt(root)
     result["behind"] = behind
     result["ahead"] = ahead
-    result["dirty"] = dirty
+    result["dirty"] = bool(tracked or untracked)
+    result["tracked_modified"] = tracked
+    result["untracked"] = untracked
 
     # Force path: blow away local state and take whatever GitHub has.
     # Wired up for the "yes I really want to discard local" button.
@@ -1307,14 +1464,9 @@ def pull_tenant_now(tenant: "Tenant", *, force: bool = False) -> dict:
         _mark_tenant_synced(tenant)
         return result
 
-    # Safe-path decision tree.
-    if dirty:
-        result["error"] = (
-            "Working tree has uncommitted changes. Hit 'Sync now' to "
-            "push them first, or call pull with force=true to discard."
-        )
-        result["action"] = "dirty"
-        return result
+    # Smart-path decision tree. Note: dirt no longer blocks
+    # unconditionally — only tracked-modified files on a fast-forwardable
+    # branch do. Untracked cruft on a hosted mirror is disposable.
     if behind == 0 and ahead == 0:
         result["ok"] = True
         result["action"] = "up_to_date"
@@ -1334,10 +1486,39 @@ def pull_tenant_now(tenant: "Tenant", *, force: bool = False) -> dict:
         result["action"] = "diverged"
         return result
 
-    # Clean fast-forward case.
+    # behind > 0, ahead == 0 → a fast-forward is on the table.
+    if tracked:
+        # Real authored edits live in the working tree. A FF would
+        # checkout over them. Make the user resolve (push via Sync now,
+        # or force to discard). This is the ONLY remaining "dirty" case.
+        result["error"] = (
+            f"Working tree has {len(tracked)} modified tracked file(s). "
+            "Hit 'Sync now' to push them first, or pull with force=true "
+            "to discard."
+        )
+        result["action"] = "dirty"
+        return result
+
+    # Clean OR untracked-only → auto fast-forward. Stray untracked files
+    # on a mirror have nothing to protect, so they must never gate the
+    # pull. Try a plain FF first; only if untracked cruft physically
+    # blocks the merge (an incoming path collides with an untracked
+    # file) do we stash + retry + drop, discarding the disposable cruft.
     rc, out = _run_git(
         ["merge", "--ff-only", f"origin/{branch}"], cwd=root
     )
+    if rc != 0 and untracked and _looks_like_untracked_overwrite(out):
+        result["stashed_untracked"] = True
+        _run_git(
+            ["stash", "push", "--include-untracked", "-m", "plw-auto-pull"],
+            cwd=root,
+        )
+        rc, out = _run_git(
+            ["merge", "--ff-only", f"origin/{branch}"], cwd=root
+        )
+        # The stash held only disposable cruft on a mirror. Drop it so a
+        # stale copy of a now-tracked file can't re-conflict on pop.
+        _run_git(["stash", "drop"], cwd=root)
     if rc != 0:
         _mark_tenant_error(tenant, f"git merge --ff-only failed: {out}")
         result["error"] = out[:200]
@@ -1346,3 +1527,72 @@ def pull_tenant_now(tenant: "Tenant", *, force: bool = False) -> dict:
     result["action"] = "pulled"
     _mark_tenant_synced(tenant)
     return result
+
+
+def _looks_like_untracked_overwrite(git_output: str) -> bool:
+    """True when an FF merge failed because an incoming tracked file
+    would clobber an existing untracked file. That's the one untracked
+    scenario git refuses to fast-forward through — and the one where
+    stashing the cruft is the right unblock on a hosted mirror."""
+    low = (git_output or "").lower()
+    return "untracked working tree files would be overwritten" in low
+
+
+def smart_pull_all_tenants() -> dict:
+    """Fast-forward every connected tenant from GitHub, skipping any that
+    would require a force or human decision.
+
+    This is the body of the background poller (and the webhook can reuse
+    ``pull_tenant_now`` directly for a single tenant). It leans entirely
+    on the smart-pull policy: ``pull_tenant_now`` never mutates local
+    state destructively without ``force=True``, so iterating it over all
+    tenants is safe by construction — diverged / dirty tenants are left
+    untouched for the owner to resolve.
+
+    Reloads the in-memory index for any tenant we actually moved on disk
+    so freshly-pulled pages are reachable on the very next request. Never
+    raises; returns a summary the caller can log.
+    """
+    from . import tenants as _tenants
+
+    summary: dict = {
+        "checked": 0,
+        "pulled": 0,
+        "up_to_date": 0,
+        "skipped": 0,
+        "errors": 0,
+        "pulled_tenants": [],
+    }
+    try:
+        all_tenants = _tenants.manager().all_tenants()
+    except Exception:  # noqa: BLE001 — never let the poller die on a bad registry
+        return summary
+
+    for tenant in all_tenants:
+        if not (tenant.gh_repo and tenant.gh_token):
+            continue
+        if not _is_git_repo(tenant.wiki_root):
+            continue
+        summary["checked"] += 1
+        try:
+            res = pull_tenant_now(tenant)
+        except Exception:  # noqa: BLE001 — isolate one tenant's failure
+            summary["errors"] += 1
+            continue
+        action = res.get("action")
+        if res.get("ok") and action == "pulled":
+            summary["pulled"] += 1
+            summary["pulled_tenants"].append(tenant.id)
+            try:
+                with _tenants.set_current_tenant(tenant):
+                    tenant.reload_index()
+            except Exception:  # noqa: BLE001
+                pass
+        elif res.get("ok") and action == "up_to_date":
+            summary["up_to_date"] += 1
+        elif res.get("error"):
+            summary["errors"] += 1
+        else:
+            # ahead_only / diverged / dirty — intentionally left alone.
+            summary["skipped"] += 1
+    return summary

@@ -363,3 +363,74 @@ def test_flush_aborts_rebase_on_real_conflict(tmp_path: Path, monkeypatch):
     # Rebase aborted cleanly — no .git/rebase-merge dir lingering.
     assert not (wiki_root / ".git" / "rebase-merge").exists()
     assert not (wiki_root / ".git" / "rebase-apply").exists()
+
+
+# ---------------------------------------------------------------------------
+# 3. smart pull — untracked cruft never blocks a mirror's fast-forward,
+#    but tracked-modified edits still do (real on-disk git, no stubs)
+# ---------------------------------------------------------------------------
+
+
+def test_pull_untracked_cruft_fast_forwards(tmp_path: Path, monkeypatch):
+    """The headline fix. A hosted mirror that's behind GitHub but has a
+    stray UNTRACKED file in its working tree must fast-forward cleanly —
+    not dead-end on the old ``dirty`` refusal that only the scary force
+    button could escape. The untracked cruft has nothing to protect.
+    """
+    bare = tmp_path / "remote.git"
+    bare.mkdir()
+    _init_bare(bare)
+    _seed_remote(bare, tmp_path)
+
+    from app import persistence as _persistence
+
+    _patch_remote_url(monkeypatch, bare)
+    wiki_root = tmp_path / "tenant-prof"
+    tenant = _make_tenant("prof", wiki_root, bare)
+    _persistence.bootstrap_tenant(tenant)
+
+    # Remote moves ahead by one commit (a web edit / another device).
+    _commit_remote_change(
+        bare, tmp_path, "remote-page.md", "# Remote\n\nNew content.\n"
+    )
+    # Leave a stray untracked file in the local working tree.
+    (wiki_root / "cruft.tmp").write_text("editor swap file\n", encoding="utf-8")
+
+    result = _persistence.pull_tenant_now(tenant)
+    assert result.get("ok") is True, result
+    assert result.get("action") == "pulled", result
+    assert result.get("behind") == 1, result
+    # The remote commit actually landed locally.
+    assert (wiki_root / "remote-page.md").exists()
+
+
+def test_pull_tracked_modified_blocks_without_force(tmp_path: Path, monkeypatch):
+    """Smart pull still guards REAL authored edits: a tracked file with
+    uncommitted changes blocks the fast-forward (action ``dirty``), so a
+    FF checkout can't silently clobber the user's work. Force is the
+    explicit escape hatch."""
+    bare = tmp_path / "remote.git"
+    bare.mkdir()
+    _init_bare(bare)
+    _seed_remote(bare, tmp_path)
+
+    from app import persistence as _persistence
+
+    _patch_remote_url(monkeypatch, bare)
+    wiki_root = tmp_path / "tenant-prof"
+    tenant = _make_tenant("prof", wiki_root, bare)
+    _persistence.bootstrap_tenant(tenant)
+
+    _commit_remote_change(
+        bare, tmp_path, "remote-page.md", "# Remote\n\nNew content.\n"
+    )
+    # Modify a TRACKED file (README.md was seeded + committed) without
+    # committing — a real in-progress edit.
+    (wiki_root / "README.md").write_text("seed\n\nlocal WIP edit\n", encoding="utf-8")
+
+    result = _persistence.pull_tenant_now(tenant)
+    assert result.get("ok") is False, result
+    assert result.get("action") == "dirty", result
+    assert result.get("tracked_modified"), result
+    # We did not move HEAD — the remote commit is NOT applied yet.
+    assert not (wiki_root / "remote-page.md").exists()
