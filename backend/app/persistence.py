@@ -67,6 +67,15 @@ GIT_USER_EMAIL: str = (
 )
 PUSH_DELAY_S: float = float(os.environ.get("WIKI_GIT_PUSH_DELAY_S", "8") or "8")
 AUTOSYNC_ENABLED: bool = _env_truthy("WIKI_GIT_AUTOSYNC", bool(GIT_REMOTE))
+# Per-tenant autopush (hosted multi-tenant mode). Distinct from the
+# single-tenant global AUTOSYNC_ENABLED above: a CONNECTED tenant repo is
+# the user's durability guarantee, so hosted edits must auto-push to it by
+# default — independent of whether a *global* WIKI_GIT_REMOTE is set (it
+# isn't in hosted mode, which is exactly why gating tenant pushes on
+# AUTOSYNC_ENABLED silently disabled them and left edits "saved on the
+# server" but never durable). Default ON; set WIKI_TENANT_AUTOPUSH=0 to
+# turn every tenant into manual-sync-only.
+TENANT_AUTOPUSH_ENABLED: bool = _env_truthy("WIKI_TENANT_AUTOPUSH", True)
 # How often the hosted background poller fast-forwards each connected
 # tenant from GitHub, in seconds. This is the drift killer: without it,
 # a hosted mirror only reconciles on owner login. 0 disables the poller.
@@ -424,21 +433,22 @@ def describe_sync() -> dict:
 
     if tenant is not None:
         if tenant.gh_repo and tenant.gh_token:
-            # Mirror flush_tenant_async, which no-ops when autosync is off or
-            # the tenant repo hasn't been cloned/bootstrapped yet — either way
-            # the write won't actually reach the remote.
-            if not AUTOSYNC_ENABLED:
+            # Mirror flush_tenant_async, which no-ops when tenant autopush is
+            # off or the tenant repo hasn't been cloned/bootstrapped yet —
+            # either way the write won't actually reach the remote.
+            if not TENANT_AUTOPUSH_ENABLED:
                 return {
                     "will_sync": False,
                     "mode": "tenant",
                     "remote": tenant.gh_repo,
                     "branch": GIT_BRANCH,
-                    "reason": "autosync_disabled",
+                    "reason": "autopush_disabled",
                     "detail": (
-                        "Saved on the server. A GitHub repo is connected, but "
-                        "autopush is OFF (WIKI_GIT_AUTOSYNC is disabled), so "
-                        "this change will NOT reach the remote until autosync "
-                        "is re-enabled or you trigger a manual sync."
+                        "Saved on the server. Your GitHub repo "
+                        f"({tenant.gh_repo}) is connected, but tenant autopush "
+                        "is OFF (WIKI_TENANT_AUTOPUSH is disabled), so this "
+                        "change won't reach GitHub until you trigger a manual "
+                        "sync from the owner console."
                     ),
                 }
             if not _is_git_repo(tenant.wiki_root):
@@ -777,8 +787,8 @@ def flush_tenant_async(tenant: "Tenant", message: str) -> None:
     """
     if not tenant.gh_repo or not tenant.gh_token:
         return  # not connected, no-op
-    if not AUTOSYNC_ENABLED:
-        return
+    if not TENANT_AUTOPUSH_ENABLED:
+        return  # operator opted every tenant into manual-sync-only
     st = _get_tenant_state(tenant.id)
     with st.lock:
         if message:
@@ -986,6 +996,7 @@ def get_tenant_status(tenant: "Tenant") -> dict:
             "remote_url_public": (
                 f"https://github.com/{tenant.gh_repo}" if tenant.gh_repo else None
             ),
+            "autopush_enabled": TENANT_AUTOPUSH_ENABLED,
             "last_synced_at": tenant.git_last_synced_at,
             "last_error": tenant.git_last_error,
             "pushes_made": tenant.git_pushes_made,

@@ -301,12 +301,18 @@ def _bound_tenant(tmp_path, *, gh_repo="acme/wiki", gh_token="tok", git=True):
 
 
 def test_describe_sync_tenant_connected_syncs(tmp_path, monkeypatch):
-    """Connected tenant + autosync on + bootstrapped repo -> durable."""
+    """Connected tenant + tenant autopush on + bootstrapped repo -> durable.
+
+    Note this no longer depends on the single-tenant WIKI_GIT_AUTOSYNC flag:
+    a connected tenant repo autopushes by default (TENANT_AUTOPUSH_ENABLED),
+    independent of whether a global WIKI_GIT_REMOTE is set."""
     from app import persistence as _persistence  # noqa: WPS433
     from app.tenants import set_current_tenant
 
     monkeypatch.setattr(_persistence, "GIT_REMOTE", "")
-    monkeypatch.setattr(_persistence, "AUTOSYNC_ENABLED", True)
+    # Global autosync OFF — proves tenant autopush is decoupled from it.
+    monkeypatch.setattr(_persistence, "AUTOSYNC_ENABLED", False)
+    monkeypatch.setattr(_persistence, "TENANT_AUTOPUSH_ENABLED", True)
     with set_current_tenant(_bound_tenant(tmp_path)):
         verdict = _persistence.describe_sync()
     assert verdict["will_sync"] is True
@@ -314,20 +320,24 @@ def test_describe_sync_tenant_connected_syncs(tmp_path, monkeypatch):
     assert verdict["remote"] == "acme/wiki"
 
 
-def test_describe_sync_tenant_autosync_disabled_does_not_lie(tmp_path, monkeypatch):
-    """Connected tenant but WIKI_GIT_AUTOSYNC off: flush_tenant_async no-ops,
-    so the verdict must report will_sync False (not a durable success)."""
+def test_describe_sync_tenant_autopush_disabled_does_not_lie(tmp_path, monkeypatch):
+    """Connected tenant but WIKI_TENANT_AUTOPUSH off: flush_tenant_async
+    no-ops, so the verdict must report will_sync False (not a durable
+    success) and point at a manual sync — NOT at connecting a repo."""
     from app import persistence as _persistence  # noqa: WPS433
     from app.tenants import set_current_tenant
 
     monkeypatch.setattr(_persistence, "GIT_REMOTE", "")
-    monkeypatch.setattr(_persistence, "AUTOSYNC_ENABLED", False)
+    monkeypatch.setattr(_persistence, "TENANT_AUTOPUSH_ENABLED", False)
     with set_current_tenant(_bound_tenant(tmp_path)):
         verdict = _persistence.describe_sync()
     assert verdict["will_sync"] is False
     assert verdict["mode"] == "tenant"
-    assert verdict["reason"] == "autosync_disabled"
-    assert "WIKI_GIT_AUTOSYNC" in verdict["detail"]
+    assert verdict["reason"] == "autopush_disabled"
+    assert "WIKI_TENANT_AUTOPUSH" in verdict["detail"]
+    # The repo IS connected, so the detail must not tell the user to connect
+    # one — it should name the connected repo instead.
+    assert "acme/wiki" in verdict["detail"]
 
 
 def test_describe_sync_tenant_not_bootstrapped_does_not_lie(tmp_path, monkeypatch):
@@ -337,7 +347,7 @@ def test_describe_sync_tenant_not_bootstrapped_does_not_lie(tmp_path, monkeypatc
     from app.tenants import set_current_tenant
 
     monkeypatch.setattr(_persistence, "GIT_REMOTE", "")
-    monkeypatch.setattr(_persistence, "AUTOSYNC_ENABLED", True)
+    monkeypatch.setattr(_persistence, "TENANT_AUTOPUSH_ENABLED", True)
     with set_current_tenant(_bound_tenant(tmp_path, git=False)):
         verdict = _persistence.describe_sync()
     assert verdict["will_sync"] is False
