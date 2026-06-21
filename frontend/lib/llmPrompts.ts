@@ -236,7 +236,11 @@ export function buildFullFetchPrompt(llmUrl: string): string {
     `response is a self-describing handshake with the wiki's API ` +
     `endpoints documented in plain text. Follow those endpoints to ` +
     `retrieve the relevant pages, then answer my questions citing ` +
-    `the page URLs you read.\n\nHandshake URL: ${llmUrl}\n\n` +
+    `the page URLs you read. Answer ONLY from pages you actually ` +
+    `fetched — do not summarize from prior knowledge. If you cannot ` +
+    `fetch the URL, tell me plainly that you could not reach it and ` +
+    `stop; do NOT invent or guess an answer.\n\n` +
+    `Handshake URL: ${llmUrl}\n\n` +
     `First task: introduce this person to me and tell me the three ` +
     `most interesting things about them.`
   );

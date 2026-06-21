@@ -100,6 +100,18 @@ describe("buildFullFetchPrompt", () => {
     const prompt = buildFullFetchPrompt(SAMPLE_URL);
     expect(prompt.toLowerCase()).toContain("first task");
   });
+
+  it("forbids fabricating an answer when the fetch fails (anti-confabulation)", () => {
+    // Regression guard for the real-world failure that motivated this:
+    // ChatGPT couldn't follow the apex→www redirect, then hallucinated a
+    // whole summary of a wiki it never read. The prompt must instruct the
+    // model to say it couldn't fetch rather than invent, AND to answer
+    // only from pages it actually pulled.
+    const prompt = buildFullFetchPrompt(SAMPLE_URL).toLowerCase();
+    expect(prompt).toMatch(/do not (invent|guess|summarize)/);
+    expect(prompt).toMatch(/could not reach|cannot fetch/);
+    expect(prompt).toContain("only from pages");
+  });
 });
 
 

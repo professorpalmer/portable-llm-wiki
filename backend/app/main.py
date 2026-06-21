@@ -723,6 +723,90 @@ async def wiki_chat_stream(
     )
 
 
+def _served_host(request: Request) -> str:
+    """The host the current request was actually served on, lowercased and
+    port-stripped.
+
+    Vercel + Render set ``x-forwarded-host`` when they front the backend;
+    ``host`` is the direct-connection fallback. Returns ``""`` when neither
+    is present (e.g. a synthetic ASGI scope with no Host header).
+    """
+    forwarded = (
+        request.headers.get("x-forwarded-host")
+        or request.headers.get("host")
+        or ""
+    ).strip().lower()
+    if not forwarded:
+        return ""
+    # Forwarded host can carry a port (``:443``) or be a comma-joined list
+    # when multiple proxies prepend their view; take the first hop.
+    forwarded = forwarded.split(",", 1)[0].strip()
+    return forwarded.split(":", 1)[0]
+
+
+def _apex_www_twins(host: str) -> set[str]:
+    """Return ``{host, its apex/www twin}`` for an apex⇄www pair.
+
+    ``example.com`` → ``{example.com, www.example.com}``
+    ``www.example.com`` → ``{www.example.com, example.com}``
+
+    Used to decide whether the request's served host is the redirect
+    counterpart of the configured ``PUBLIC_BASE_URL`` host. Only the
+    single ``www.`` label is treated as a twin — deeper subdomains
+    (``api.`` etc.) are intentionally NOT collapsed.
+    """
+    host = (host or "").strip().lower()
+    if not host:
+        return set()
+    twins = {host}
+    if host.startswith("www."):
+        twins.add(host[len("www.") :])
+    else:
+        twins.add(f"www.{host}")
+    return twins
+
+
+def _canonical_base_for_host(base: str, served_host: str) -> str:
+    """Rebuild ``base`` on ``served_host`` when the two are apex/www twins.
+
+    This is the single source of truth for the apex⇄www canonicalization
+    that keeps every public-facing URL we emit on the SAME host the caller
+    actually reached — eliminating the cross-host 307 that OpenAI's browse
+    tool (and phone QR scanners) refuse to follow.
+
+    The rule: if ``served_host`` is the apex/www twin of ``base``'s host,
+    return ``base`` rebuilt with ``served_host`` (no trailing slash). In
+    every other case (no served host, unparseable base, unrelated host,
+    or an exact match) return ``base`` rstripped of trailing slashes —
+    the previous behavior is preserved on any miss.
+
+    Self-healing property: whichever host the LLM successfully fetched the
+    handshake from is the host every follow-up URL in that handshake will
+    point at. It does not matter which direction the production redirect
+    runs (apex→www or www→apex); the emitted URLs never require a hop.
+    """
+    fallback = (base or "").rstrip("/")
+    if not served_host:
+        return fallback
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+
+        parts = urlsplit(base)
+        configured_host = (parts.hostname or "").lower()
+        if not configured_host or configured_host == served_host:
+            return fallback
+        if served_host not in _apex_www_twins(configured_host):
+            return fallback
+        new_netloc = served_host
+        if parts.port and ":" not in new_netloc:
+            new_netloc = f"{served_host}:{parts.port}"
+        return urlunsplit(
+            (parts.scheme, new_netloc, parts.path, parts.query, parts.fragment)
+        ).rstrip("/")
+    except Exception:  # noqa: BLE001
+        return fallback
+
+
 @app.get("/public-config")
 def public_config(request: Request) -> dict:
     """Non-secret config the frontend needs at runtime — primarily the
@@ -761,7 +845,7 @@ def public_config(request: Request) -> dict:
       user is browsing from — which by definition is the variant that
       doesn't require a redirect.
     """
-    base = settings.public_base_url
+    base = str(settings.public_base_url)
     # Hosted multi-tenant mode is the only deploy shape where we have a
     # production apex/www split; OSS / self-host stays on whatever the
     # operator configured.
@@ -769,50 +853,11 @@ def public_config(request: Request) -> dict:
         return {"public_base_url": base}
 
     # Hosted mode: prefer the request host if it's a known apex/www
-    # variant of the configured base. ``x-forwarded-host`` is what
-    # Vercel + Render set when they front the backend; ``host`` is the
-    # direct-connection fallback.
-    forwarded = (
-        request.headers.get("x-forwarded-host")
-        or request.headers.get("host")
-        or ""
-    ).strip().lower()
-    if not forwarded:
-        return {"public_base_url": base}
-
-    # Strip a port if present (forwarded host can carry ``:443``).
-    forwarded_host = forwarded.split(":", 1)[0]
-    try:
-        from urllib.parse import urlsplit, urlunsplit
-
-        parts = urlsplit(base)
-        configured_host = (parts.hostname or "").lower()
-        if not configured_host:
-            return {"public_base_url": base}
-
-        # Is the request's host an apex/www twin of the configured one?
-        twins = {configured_host}
-        if configured_host.startswith("www."):
-            twins.add(configured_host[len("www.") :])
-        else:
-            twins.add(f"www.{configured_host}")
-
-        if forwarded_host in twins:
-            # Rebuild with the user's actual host so the URL has no
-            # redirect to follow.
-            new_netloc = forwarded_host
-            if parts.port and ":" not in new_netloc:
-                new_netloc = f"{forwarded_host}:{parts.port}"
-            canonical = urlunsplit(
-                (parts.scheme, new_netloc, parts.path, parts.query, parts.fragment)
-            ).rstrip("/")
-            return {"public_base_url": canonical}
-    except Exception:  # noqa: BLE001
-        # Any URL-parse weirdness: fall back to the configured value.
-        # The previous behavior is preserved on failure.
-        pass
-
-    return {"public_base_url": base}
+    # variant of the configured base, so the URL we hand back has no
+    # redirect to follow. Delegated to the shared canonicalizer that the
+    # /llm handshake and /llms.txt index use too — one source of truth.
+    canonical = _canonical_base_for_host(base, _served_host(request))
+    return {"public_base_url": canonical or base}
 
 
 def _viewer_for_url_token(
@@ -847,7 +892,7 @@ def _viewer_for_url_token(
     return real
 
 
-def _public_url_bases() -> tuple[str, str]:
+def _public_url_bases(served_host: str = "") -> tuple[str, str]:
     """Compute ``(view_base, api_base)`` for the current request context.
 
     The /llm handshake and /llms.txt index both need to emit absolute
@@ -876,10 +921,20 @@ def _public_url_bases() -> tuple[str, str]:
     * **Single-tenant OSS bare backend**: no frontend proxy, both bases
       are just ``public_base_url``.
 
+    Args:
+        served_host: The host the current request was actually served on
+            (from ``_served_host(request)``). When it's the apex/www twin
+            of the configured ``PUBLIC_BASE_URL`` host, every emitted URL
+            is rebuilt on that host so the LLM's follow-up calls land on
+            the SAME host it just fetched from — no cross-host 307 to
+            follow. Pass ``""`` (the default) to keep the configured host,
+            which preserves the original behavior for callers without a
+            request in scope.
+
     Returns:
         Tuple of (view_base, api_base). Neither has a trailing slash.
     """
-    base = settings.public_base_url.rstrip("/")
+    base = _canonical_base_for_host(str(settings.public_base_url), served_host)
     tenant = _tenants.current_tenant_or_none()
     if tenant is not None and not settings.single_tenant_mode:
         tenant_base = f"{base}/{tenant.id}"
@@ -894,6 +949,7 @@ def _public_url_bases() -> tuple[str, str]:
 
 @app.api_route("/llm", methods=["GET", "HEAD"])
 def llm_handshake(
+    request: Request,
     t: Optional[str] = Query(default=None, description="Optional share token, equivalent to X-Share-Token header"),
     authorization: Optional[str] = Header(default=None),
     x_share_token: Optional[str] = Header(default=None, alias="X-Share-Token"),
@@ -950,7 +1006,7 @@ def llm_handshake(
             about_hint = f" The wiki's primary subject appears to be **{about_page.title}**."
             break
 
-    _view_base, api_base = _public_url_bases()
+    _view_base, api_base = _public_url_bases(_served_host(request))
 
     # Auth-related guidance differs based on what the caller already
     # presented — if they came in with a token, echo it back so the LLM
@@ -1009,6 +1065,14 @@ def llm_handshake(
         )
 
     markdown = f"""# Portable LLM Wiki: self-describing handshake
+
+> **You have successfully fetched this wiki.** If you are reading this
+> text, your fetch worked — proceed with the steps below. Answer the
+> user **only** from this handshake and the wiki pages it links to; do
+> **not** summarize from prior training knowledge, and do **not**
+> fabricate facts about the owner. If at any point a fetch fails, tell
+> the user plainly that you could not reach the page — never invent a
+> plausible-sounding answer in its place.
 
 You are connected to a **Portable LLM Wiki** instance. This is an open
 protocol for vendor-neutral, markdown-based personal-context memory.
@@ -1081,7 +1145,7 @@ retrieval automatically.
 
 
 @app.api_route("/llms.txt", methods=["GET", "HEAD"])
-def llms_txt() -> PlainTextResponse:
+def llms_txt(request: Request) -> PlainTextResponse:
     """The emerging llms.txt convention (llmstxt.org).
 
     A short, root-level markdown file that crawlers and LLMs can fetch to
@@ -1090,7 +1154,7 @@ def llms_txt() -> PlainTextResponse:
     """
     _refresh()
     public_pages = [p for p in index.all_pages() if p.tier == "public"]
-    view_base, api_base = _public_url_bases()
+    view_base, api_base = _public_url_bases(_served_host(request))
 
     notable_links = "\n".join(
         f"- [{p.title}]({view_base}/page/{p.slug}): {(p.excerpt or '').strip()[:120]}"
