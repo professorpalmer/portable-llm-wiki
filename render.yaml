@@ -13,26 +13,64 @@
 #
 # After deploy, the post-click runway lives at scripts/deploy.md.
 #
-# Free-tier persistence (recommended):
-#   Render's free plan uses an ephemeral filesystem — writes are lost
-#   when the container cold-starts after 15 min idle. To get persistence
-#   on the free tier, point the wiki at a private GitHub content repo
-#   via WIKI_GIT_REMOTE (see scripts/deploy.md for the 4-step setup).
-#   On boot, the container clones the repo into /app/wiki. Every
-#   mutation triggers a debounced commit + push back to that repo. Cold
-#   starts re-clone the latest state, so the wiki survives indefinitely.
+# ─────────────────────────────────────────────────────────────────────
+# TWO DEPLOY SHAPES — pick before you click, they have different cost:
+# ─────────────────────────────────────────────────────────────────────
 #
-# Alternative: upgrade to Starter ($7/mo) and mount a Render Disk at
-# /app/wiki instead. Faster startup, more expensive, less portable.
+# A) HOSTED MULTI-TENANT (this is what powers portablellm.wiki).
+#    SINGLE_TENANT_MODE=0. Many users, each with their own wiki under
+#    TENANTS_ROOT=/app/tenants. This shape REQUIRES the Starter plan +
+#    the persistent Disk configured below, because every tenant's wiki
+#    (and the registry that maps a GitHub login → its content) lives on
+#    that disk. Without the disk, a cold start / redeploy wipes every
+#    tenant and each user has to re-log-in to re-hydrate from GitHub.
+#    The blueprint defaults to THIS shape so the production config is
+#    captured as infra-as-code and the Render dashboard can never drift
+#    out of sync with the repo (a silent dashboard/blueprint mismatch is
+#    exactly what once left the disk orphaned at the wrong mount path).
+#
+# B) SINGLE-TENANT OSS SELF-HOST (free, the original v0 path).
+#    SINGLE_TENANT_MODE=1. One wiki, yours. You do NOT need the Disk or
+#    the Starter plan — Render's free tier plus git-backed persistence is
+#    enough. To opt down to free, make exactly two edits below before
+#    deploying:
+#       1. change `plan: starter` → `plan: free`
+#       2. delete the entire `disk:` block
+#    Then get durable persistence for free by pointing WIKI_GIT_REMOTE at
+#    a private GitHub content repo (see scripts/deploy.md). On boot the
+#    container clones it into /app/wiki; every mutation debounce-commits
+#    back; cold starts re-clone the latest state. Survives indefinitely
+#    on $0. (Free tier cannot mount a Render Disk at all — that's why the
+#    disk block and free plan are mutually exclusive.)
 
 services:
   - type: web
     name: portable-llm-wiki-backend
     runtime: docker
-    plan: free
+    # Starter ($7/mo) is REQUIRED for the hosted multi-tenant shape (A)
+    # because Render Disks (below) are unavailable on the free plan.
+    # Single-tenant OSS self-hosters: change to `free` and delete the
+    # `disk:` block — see "TWO DEPLOY SHAPES" in the header above.
+    plan: starter
     region: oregon
     dockerfilePath: ./backend/Dockerfile
     dockerContext: .
+    # --- Persistent disk (hosted multi-tenant shape only) ---
+    # Mounts a durable volume at /app/tenants so every tenant's wiki and
+    # the tenant registry survive restarts, redeploys, and idle
+    # spin-downs. MUST mount at /app/tenants specifically: that is the
+    # value of TENANTS_ROOT below, and it is the ONLY app-data directory
+    # that needs to outlive the container. Do NOT mount at `/app` (it
+    # would shadow the baked-in application code at /app/backend) or at
+    # `/app/wiki` (that's just the unused default-tenant fallback, which
+    # the image re-seeds from wiki-demo/ on every boot). 1 GB is the
+    # smallest tier and is ~3000x our current content footprint.
+    # Single-tenant OSS self-hosters on free tier: delete this whole
+    # block (see the header).
+    disk:
+      name: wiki-tenants
+      mountPath: /app/tenants
+      sizeGB: 1
     # The Dockerfile's CMD runs uvicorn directly. The Avery-tenant seed
     # is handled inside the FastAPI app's lifespan hook
     # (app/avery_seed.py::auto_seed_if_missing) the first time the
