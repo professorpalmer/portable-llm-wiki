@@ -19,6 +19,7 @@ import QRCode from "qrcode";
 import { fetchPublicConfig } from "@/lib/api";
 import { useTenant } from "@/lib/useTenant";
 import { OwnerGate } from "@/components/OwnerGate";
+import { buildOfflineBriefing, isBriefingComplete } from "@/lib/briefing";
 import {
   buildHumanShareUrl,
   buildLlmUrlForTier,
@@ -290,6 +291,29 @@ function SharePageInner({ tenant }: { tenant?: string }) {
           <PromptButtonRow llmUrl={llmUrl} />
         </div>
 
+        {/* ============================================================ */}
+        {/* OFFLINE BRIEFING — the bulletproof, no-fetch-required path    */}
+        {/* ============================================================ */}
+        {/* The three prompts above still depend on the recipient's LLM  */}
+        {/* actually fetching the URL. ChatGPT in "search" mode (and     */}
+        {/* some Gemini/Perplexity configs) DON'T fetch — they web-search */}
+        {/* the URL string, find nothing (a just-deployed wiki isn't      */}
+        {/* indexed), and give up or hallucinate. This button sidesteps   */}
+        {/* that class of failure entirely: it assembles the handshake +  */}
+        {/* page manifest + the actual top-page CONTENT into one ~15KB    */}
+        {/* clipboard blob, so even a zero-fetch model answers from real  */}
+        {/* wiki content already in its context. This is the artifact to  */}
+        {/* hand someone when you don't control which mode their LLM is   */}
+        {/* in. Built client-side from the same APIs an LLM would call,   */}
+        {/* tier-scoped by the live token, so it's a true mirror of what  */}
+        {/* the recipient is allowed to see. */}
+        <OfflineBriefingButton
+          llmUrl={llmUrl}
+          token={liveToken ?? ""}
+          tenant={tenant}
+          ready={Boolean(llmUrl) && tokenReady}
+        />
+
         <button
           onClick={loadPreview}
           className="mt-5 text-xs text-ink-muted hover:text-ink underline"
@@ -521,6 +545,93 @@ function PromptButtonRow({ llmUrl }: { llmUrl: string }) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+
+// ====================================================================
+// OfflineBriefingButton — the no-fetch-required share artifact
+// ====================================================================
+//
+// Surfaced on the PUBLIC /share page (previously this capability lived
+// only in the owner-private PersonalLlmUrlPanel). Builds a single
+// paste-ready blob — handshake + manifest + the actual content of the
+// top pages — so a recipient whose LLM CANNOT fetch (ChatGPT search
+// mode, etc.) still gets real wiki content in-context instead of a
+// fabricated answer.
+//
+// Tier-correct: passes the live tier token through to buildOfflineBriefing
+// so the blob contains exactly the pages the recipient is allowed to see
+// (public-only when no token; recruiter/friend pages when a token is
+// active). For the public tier the token is "" and the blob inlines the
+// public pages — still fully functional, just public-scoped.
+//
+// Resilient: buildOfflineBriefing never throws on a partial fetch (it
+// tags missing sections), and isBriefingComplete tells us whether to
+// show the success or the "partial" warning state.
+
+type BriefingState = "idle" | "building" | "copied" | "partial" | "error";
+
+export function OfflineBriefingButton({
+  llmUrl,
+  token,
+  tenant,
+  ready,
+}: {
+  llmUrl: string;
+  token: string;
+  tenant?: string;
+  ready: boolean;
+}) {
+  const [state, setState] = useState<BriefingState>("idle");
+
+  async function copyBriefing() {
+    if (!ready || state === "building") return;
+    setState("building");
+    try {
+      const blob = await buildOfflineBriefing({ llmUrl, token, tenant });
+      if (typeof navigator !== "undefined" && navigator.clipboard) {
+        await navigator.clipboard.writeText(blob);
+      }
+      setState(isBriefingComplete(blob) ? "copied" : "partial");
+      setTimeout(() => setState("idle"), 2400);
+    } catch {
+      // True failure (network down, clipboard blocked). The three
+      // URL-based prompts above remain available as the fallback.
+      setState("error");
+      setTimeout(() => setState("idle"), 2400);
+    }
+  }
+
+  const label =
+    state === "building"
+      ? "building briefing…"
+      : state === "copied"
+        ? "briefing copied ✓"
+        : state === "partial"
+          ? "partial briefing copied ⚠ (some pages unreachable)"
+          : state === "error"
+            ? "briefing failed — try a prompt above instead"
+            : "Copy full briefing — works in ANY LLM, no fetch needed";
+
+  return (
+    <div className="mt-3 w-full">
+      <button
+        onClick={copyBriefing}
+        disabled={!ready || state === "building"}
+        title="Assembles the handshake + your top pages into one paste. Use this for ChatGPT search mode or any tool that won't fetch a URL."
+        aria-label="Copy full offline briefing — works in any LLM without fetching"
+        className="w-full px-3 py-2.5 rounded-lg border border-accent/40 bg-accent/5 text-accent text-sm font-medium hover:border-accent/70 hover:bg-accent/10 inline-flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+      >
+        <span aria-hidden>📋</span>
+        <span>{label}</span>
+      </button>
+      <p className="mt-1.5 text-[10px] leading-snug text-ink-muted text-center">
+        Most bulletproof option. ~15KB paste with real page content baked
+        in — answers correctly even when the recipient&apos;s LLM can&apos;t
+        open links (ChatGPT search mode, some Gemini/Perplexity setups).
+      </p>
     </div>
   );
 }
