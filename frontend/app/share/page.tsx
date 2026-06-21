@@ -608,9 +608,9 @@ export function OfflineBriefingButton({
     state === "building"
       ? "building briefing…"
       : state === "copied"
-        ? "briefing copied ✓"
+        ? "briefing copied"
         : state === "partial"
-          ? "partial briefing copied ⚠ (some pages unreachable)"
+          ? "partial briefing copied (some pages unreachable)"
           : state === "error"
             ? "briefing failed — try a prompt above instead"
             : "Copy full briefing — works in ANY LLM, no fetch needed";
@@ -624,7 +624,6 @@ export function OfflineBriefingButton({
         aria-label="Copy full offline briefing — works in any LLM without fetching"
         className="w-full px-3 py-2.5 rounded-lg border border-accent/40 bg-accent/5 text-accent text-sm font-medium hover:border-accent/70 hover:bg-accent/10 inline-flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
       >
-        <span aria-hidden>📋</span>
         <span>{label}</span>
       </button>
       <p className="mt-1.5 text-[10px] leading-snug text-ink-muted text-center">
