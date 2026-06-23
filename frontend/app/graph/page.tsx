@@ -62,6 +62,20 @@ const TIER_RING: Record<string, string> = {
   private: "#ef4444",
 };
 
+// How permanent (always-painted) labels are chosen. Cycles in this order so a
+// single button can reach every state:
+//   hubs — top-degree nodes + current selection (the calm default)
+//   all  — every node labelled (busy, but complete)
+//   off  — no permanent labels at all; only hover/selection reveal a name
+type LabelMode = "hubs" | "all" | "off";
+
+const LABEL_MODE_ORDER: LabelMode[] = ["hubs", "all", "off"];
+const LABEL_MODE_TEXT: Record<LabelMode, string> = {
+  hubs: "labels: hubs only",
+  all: "labels: all",
+  off: "labels: off",
+};
+
 export default function GraphPage() {
   const tenant = useTenant();
   const [graph, setGraph] = useState<GraphResponse | null>(null);
@@ -71,7 +85,7 @@ export default function GraphPage() {
   const [hoveredSlug, setHoveredSlug] = useState<string | null>(null);
   const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
   const [sectionFilter, setSectionFilter] = useState<string>("");
-  const [showAllLabels, setShowAllLabels] = useState(false);
+  const [labelMode, setLabelMode] = useState<LabelMode>("off");
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   // The ForceGraph2D instance exposes d3Force(...) and zoomToFit() — keep a ref.
   // The library's exported type is loose; using `any` here is intentional.
@@ -151,13 +165,15 @@ export default function GraphPage() {
     return out;
   }, [graph]);
 
-  // Decide which nodes get a permanent label vs. hover-only. Default: show
-  // labels for the top-degree nodes (the hubs) and anything in the current
-  // selection's neighborhood. Avoids the "labels piled on top of each other"
-  // problem on dense graphs. The "show all" toggle overrides.
+  // Decide which nodes get a permanent label vs. hover-only.
+  //   off  — nothing permanent; hover/selection still reveal a name.
+  //   all  — every node labelled.
+  //   hubs — top-degree nodes plus the current selection's neighborhood.
+  // The hubs default avoids the "labels piled on top of each other" problem on
+  // dense graphs while keeping the view readable.
   const labelSet = useMemo(() => {
-    if (!filtered) return new Set<string>();
-    if (showAllLabels) return new Set(filtered.nodes.map((n) => n.slug));
+    if (!filtered || labelMode === "off") return new Set<string>();
+    if (labelMode === "all") return new Set(filtered.nodes.map((n) => n.slug));
     const set = new Set<string>();
     const sorted = [...filtered.nodes].sort((a, b) => b.degree - a.degree);
     // Show top 6 by degree as permanent labels.
@@ -167,7 +183,7 @@ export default function GraphPage() {
       for (const n of selectedNeighbors) set.add(n.slug);
     }
     return set;
-  }, [filtered, selectedSlug, selectedNeighbors, showAllLabels]);
+  }, [filtered, selectedSlug, selectedNeighbors, labelMode]);
 
   // Tune the d3-force layout when graph data changes. Defaults are tuned for
   // sparse graphs; our wiki graph has avg degree ~9, which collapses without
@@ -287,15 +303,22 @@ export default function GraphPage() {
 
         <span className="ml-auto flex gap-2">
           <button
-            onClick={() => setShowAllLabels((v) => !v)}
+            onClick={() =>
+              setLabelMode(
+                (m) =>
+                  LABEL_MODE_ORDER[
+                    (LABEL_MODE_ORDER.indexOf(m) + 1) % LABEL_MODE_ORDER.length
+                  ],
+              )
+            }
             className={`text-xs px-2 py-1 rounded border ${
-              showAllLabels
-                ? "border-accent text-accent"
-                : "border-paper-soft text-ink-muted hover:border-ink hover:text-ink"
+              labelMode === "off"
+                ? "border-paper-soft text-ink-muted hover:border-ink hover:text-ink"
+                : "border-accent text-accent"
             }`}
-            title="Toggle all labels (off = top hubs + selection only)"
+            title="Cycle labels: hubs only → all → off"
           >
-            {showAllLabels ? "all labels on" : "labels: hubs only"}
+            {LABEL_MODE_TEXT[labelMode]}
           </button>
           <button
             onClick={() => fgRef.current?.zoomToFit?.(500, 80)}
@@ -415,7 +438,7 @@ export default function GraphPage() {
                   isSelected ||
                   isHovered ||
                   labelSet.has(node.slug) ||
-                  scale > 1.6;
+                  (labelMode !== "off" && scale > 1.6);
                 if (shouldLabel) {
                   const fullTitle = node.title as string;
                   const label =
