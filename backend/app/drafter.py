@@ -24,12 +24,12 @@ from typing import Optional
 
 from .config import settings
 from .orchestrator import (
-    PUPPETMASTER_BIN,
     TrackedJob,
     _stream_logs,
     _load_jobs,
     _save_jobs,
     _lock,
+    build_worker_cmd,
 )
 
 
@@ -259,15 +259,7 @@ def _spawn_drafter_job(
     log_path = log_dir / f"{tracking_id}.log"
 
     cwd = str(settings.wiki_root)
-    cmd = [
-        PUPPETMASTER_BIN,
-        "cursor",
-        prompt,
-        "--cwd",
-        cwd,
-        "--timeout-seconds",
-        "600",
-    ]
+    cmd = build_worker_cmd(prompt, cwd, timeout_seconds=600)
 
     job = TrackedJob(
         tracking_id=tracking_id,

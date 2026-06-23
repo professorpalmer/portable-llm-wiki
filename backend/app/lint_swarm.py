@@ -35,12 +35,12 @@ from typing import Optional
 from .config import settings
 from . import orchestrator
 from .orchestrator import (
-    PUPPETMASTER_BIN,
     TrackedJob,
     _stream_logs,
     _load_jobs,
     _save_jobs,
     _lock,
+    build_worker_cmd,
 )
 
 
@@ -332,15 +332,9 @@ def _spawn_worker(
     prompt, output_file = _build_worker_prompt(worker_name, artifacts_dir_abs)
 
     cwd = str(settings.wiki_root)
-    cmd = [
-        PUPPETMASTER_BIN,
-        "cursor",
-        prompt,
-        "--cwd",
-        cwd,
-        "--timeout-seconds",
-        "600",
-    ]
+    # Lint workers write a findings JSON to .lint/<swarm>/<worker>.json, so
+    # they need a write-enabled worker like every other backend job.
+    cmd = build_worker_cmd(prompt, cwd, timeout_seconds=600)
 
     job = TrackedJob(
         tracking_id=tracking_id,

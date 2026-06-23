@@ -2,8 +2,14 @@
 
 This module uses Puppetmaster's CLI as a subprocess. It expects the
 ``puppetmaster`` binary to be on PATH (or at the path configured by
-``PUPPETMASTER_BIN``) running the Cursor SDK adapter against the
-wiki root.
+``PUPPETMASTER_BIN``) running a write-enabled worker against the wiki root.
+
+Adapter choice: backend jobs run unattended, so they default to the
+**Claude Code** adapter, which authenticates with ``ANTHROPIC_API_KEY``
+(already present in the backend env). The Cursor SDK adapter needs a
+separate ``CURSOR_API_KEY`` the backend doesn't carry, which silently
+degraded ingest runs. Override with ``ORCHESTRATOR_ADAPTER=cursor`` where a
+Cursor key is provisioned.
 
 Why subprocess and not the MCP server: MCP is a protocol between LLM clients
 and servers, not a programmable API. Subprocess is the contract for calling
@@ -11,8 +17,8 @@ Puppetmaster from server-side code.
 
 Job lifecycle:
   1. Client POSTs /owner/ingest → backend writes raw/<file>.md
-  2. Backend spawns: `puppetmaster cursor "<ingest prompt>" --cwd <wiki_root>`
-     in the background; returns immediately with a tracking_id.
+  2. Backend spawns a write-enabled worker (see ``build_worker_cmd``) in the
+     background; returns immediately with a tracking_id.
   3. We track (tracking_id ↔ puppetmaster job_id ↔ pid) in jobs.json.
   4. Frontend polls /owner/jobs/{tracking_id} → we shell out to
      `puppetmaster status / show / artifacts` for the live state.
@@ -35,6 +41,51 @@ from .config import settings
 
 PUPPETMASTER_BIN = os.environ.get("PUPPETMASTER_BIN", "puppetmaster")
 JOBS_FILE = Path(__file__).resolve().parent.parent / ".jobs.json"
+
+# Which Puppetmaster adapter backend workers run on. Claude Code is the
+# default because it authenticates with ANTHROPIC_API_KEY, which the backend
+# already has; the Cursor adapter needs a CURSOR_API_KEY the backend doesn't
+# carry. Optional ORCHESTRATOR_MODEL pins a specific model on the adapter.
+ORCHESTRATOR_ADAPTER = os.environ.get("ORCHESTRATOR_ADAPTER", "claude").strip().lower()
+ORCHESTRATOR_MODEL = os.environ.get("ORCHESTRATOR_MODEL", "").strip()
+
+
+def build_worker_cmd(
+    prompt: str,
+    cwd: str,
+    timeout_seconds: int,
+    *,
+    write: bool = True,
+) -> list[str]:
+    """Build the Puppetmaster CLI invocation for a backend worker.
+
+    ``write`` selects a file-writing mode. Every backend job writes files —
+    ingest/import create wiki pages, the drafter writes a page, the linter
+    writes a findings JSON — so it defaults to True. This is the bug that made
+    ingests silently produce nothing: the Cursor adapter without ``--implement``
+    runs analysis-only and cannot touch the working tree, and Claude needs
+    ``--permission-mode acceptEdits`` to write for real.
+    """
+    cmd = [
+        PUPPETMASTER_BIN,
+        ORCHESTRATOR_ADAPTER,
+        prompt,
+        "--cwd",
+        cwd,
+        "--timeout-seconds",
+        str(timeout_seconds),
+    ]
+    if write:
+        # The wiki root is a long-lived git repo that is usually dirty when a
+        # job starts (the raw source was just written), so don't refuse on it.
+        cmd.append("--allow-dirty")
+        if ORCHESTRATOR_ADAPTER == "cursor":
+            cmd.append("--implement")
+        elif ORCHESTRATOR_ADAPTER == "claude":
+            cmd += ["--permission-mode", "acceptEdits"]
+    if ORCHESTRATOR_MODEL:
+        cmd += ["--model", ORCHESTRATOR_MODEL]
+    return cmd
 
 
 class OrchestratorUnavailable(RuntimeError):
@@ -237,15 +288,8 @@ def start_import_job(raw_rel_path: str, kind: str, note: str = "") -> TrackedJob
     cwd = str(settings.wiki_root)
     prompt = _import_prompt(raw_rel_path, kind, note)
 
-    cmd = [
-        PUPPETMASTER_BIN,
-        "cursor",
-        prompt,
-        "--cwd",
-        cwd,
-        "--timeout-seconds",
-        "900",  # imports do more work than incremental ingests
-    ]
+    # Imports do more work than incremental ingests, so allow more time.
+    cmd = build_worker_cmd(prompt, cwd, timeout_seconds=900)
 
     job = TrackedJob(
         tracking_id=tracking_id,
@@ -392,15 +436,7 @@ def start_ingest_job(raw_rel_path: str, note: str = "") -> TrackedJob:
     cwd = str(settings.wiki_root)
     prompt = _ingest_prompt(raw_rel_path, note)
 
-    cmd = [
-        PUPPETMASTER_BIN,
-        "cursor",
-        prompt,
-        "--cwd",
-        cwd,
-        "--timeout-seconds",
-        "600",
-    ]
+    cmd = build_worker_cmd(prompt, cwd, timeout_seconds=600)
 
     job = TrackedJob(
         tracking_id=tracking_id,
