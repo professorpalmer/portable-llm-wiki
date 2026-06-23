@@ -523,12 +523,34 @@ function UrlPanel({ tenant }: { tenant?: string }) {
               running — new wiki pages will land in a few minutes.
             </div>
           )}
-          {!result.orchestrator_started && runIngest && (
-            <div className="mt-2 text-xs text-amber-700">
-              Ingest did not start. Raw scrape is saved; you can re-run
-              ingest from the owner console.
-            </div>
-          )}
+          {!result.orchestrator_started &&
+            runIngest &&
+            typeof result.pages_created === "number" &&
+            result.pages_created > 0 && (
+              <div className="mt-2 text-xs text-emerald-800">
+                Drafted {result.pages_created} page
+                {result.pages_created === 1 ? "" : "s"} directly from the
+                scrape — review them at{" "}
+                <a
+                  href={`${tenant ? `/${tenant}` : ""}/owner`}
+                  className="underline hover:text-emerald-900"
+                >
+                  the owner console
+                </a>
+                .
+              </div>
+            )}
+          {!result.orchestrator_started &&
+            runIngest &&
+            !(typeof result.pages_created === "number" && result.pages_created > 0) && (
+              <div className="mt-2 text-xs text-amber-700">
+                {result.draft_error
+                  ? `We couldn't draft pages automatically (${result.draft_error}). `
+                  : "Ingest did not start. "}
+                Raw scrape is saved; you can re-run ingest from the owner
+                console.
+              </div>
+            )}
         </div>
       )}
     </section>

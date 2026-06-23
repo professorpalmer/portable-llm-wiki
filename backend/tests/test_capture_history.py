@@ -124,24 +124,30 @@ def test_reingest_raw_404_when_missing(client, owner_headers):
 
 
 def test_reingest_raw_responds_with_either_503_or_job_id(
-    client, owner_headers, wiki_root
+    client, owner_headers, wiki_root, monkeypatch
 ):
-    """The reingest endpoint either:
-      - Returns 503 when Puppetmaster isn't on PATH (CI default), or
-      - Returns 200 + tracking_id when Puppetmaster IS installed (dev box).
-    Both are acceptable — we just need to make sure we never silently
-    crash or pretend success without giving the caller something to poll.
+    """The reingest endpoint returns a clean 503 (not a 500/NameError) when
+    the orchestrator can't be spawned.
+
+    We force PUPPETMASTER_BIN to a path that can't exist so the test is
+    deterministic AND never spawns a real billable Cursor agent. Without
+    this guard, on a dev box where `puppetmaster` is on PATH the test took
+    the 200 branch by spawning a real subprocess, which leaked an orphaned
+    "running" job into the shared backend/.jobs.json (same convention as
+    test_v1_polish / test_hosted_multitenant). The 200 + tracking_id
+    branch is covered without a real spawn elsewhere.
     """
+    from app import orchestrator
+
+    monkeypatch.setattr(
+        orchestrator, "PUPPETMASTER_BIN", "/no/such/binary-pllmw-test"
+    )
+
     rel = _write_raw(wiki_root, "conversations", "queue-me.md", "body")
     r = client.post(f"/owner/{rel}/reingest", headers=owner_headers)
-    assert r.status_code in (200, 503)
-    if r.status_code == 503:
-        detail = r.json()["detail"].lower()
-        assert "orchestrator" in detail or "puppetmaster" in detail
-    else:
-        body = r.json()
-        assert "tracking_id" in body
-        assert body["kind"] == "ingest"
+    assert r.status_code == 503
+    detail = r.json()["detail"].lower()
+    assert "orchestrator" in detail or "puppetmaster" in detail
 
 
 # ---------------------------------------------------------------------------
