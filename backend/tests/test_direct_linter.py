@@ -264,8 +264,18 @@ def test_lint_swarm_errors_clearly_when_neither_puppetmaster_nor_llm_key(
     not found" that confused hosted users into thinking they needed
     to install puppetmaster when the actual fix was adding an API
     key."""
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    # Pin the keys to EMPTY STRING rather than delenv. config.py calls
+    # ``load_dotenv()`` at import, and the reloads below re-run it; with
+    # ``override=False`` load_dotenv SKIPS keys already present in the env
+    # but RE-INJECTS ones that are absent. So a bare ``delenv`` would let
+    # a developer's real ``backend/.env`` ANTHROPIC_API_KEY leak back in on
+    # reload and this "no key configured" test would spuriously fail on
+    # their machine (CI is unaffected — .env is gitignored). Pinning to ""
+    # keeps the key present-but-empty, which load_dotenv leaves alone and
+    # the settings loader treats as unset. This mirrors the same guard the
+    # session conftest applies to these exact leaky keys.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
 
     # IMPORTANT reload order: config first (settings rebound), then
     # every downstream module that captured a reference to the OLD

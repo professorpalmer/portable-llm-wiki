@@ -4,12 +4,18 @@ This module uses Puppetmaster's CLI as a subprocess. It expects the
 ``puppetmaster`` binary to be on PATH (or at the path configured by
 ``PUPPETMASTER_BIN``) running a write-enabled worker against the wiki root.
 
-Adapter choice: backend jobs run unattended, so they default to the
-**Claude Code** adapter, which authenticates with ``ANTHROPIC_API_KEY``
-(already present in the backend env). The Cursor SDK adapter needs a
-separate ``CURSOR_API_KEY`` the backend doesn't carry, which silently
-degraded ingest runs. Override with ``ORCHESTRATOR_ADAPTER=cursor`` where a
-Cursor key is provisioned.
+Adapter choice: backend jobs run unattended, so the adapter is RESOLVED
+from Puppetmaster's own platform lock at runtime (see
+``resolve_orchestrator_adapter``) rather than hardcoded. The orchestrator
+picks the first platform that is both enabled by the lock AND configured
+(deps + credentials present), the same way ``puppetmaster edit`` defaults
+its ``--adapter``. This means the backend never collides with whatever
+lock the operator has set (cursor-only, hermes-only, both, ...). Set
+``ORCHESTRATOR_ADAPTER=<verb>`` to force a specific adapter and bypass
+resolution entirely. Each adapter still needs its own credential in the
+backend env (e.g. ``ANTHROPIC_API_KEY`` for claude, ``CURSOR_API_KEY`` for
+cursor); if the chosen adapter is unconfigured PM emits an actionable
+error instead of silently degrading.
 
 Why subprocess and not the MCP server: MCP is a protocol between LLM clients
 and servers, not a programmable API. Subprocess is the contract for calling
@@ -42,12 +48,121 @@ from .config import settings
 PUPPETMASTER_BIN = os.environ.get("PUPPETMASTER_BIN", "puppetmaster")
 JOBS_FILE = Path(__file__).resolve().parent.parent / ".jobs.json"
 
-# Which Puppetmaster adapter backend workers run on. Claude Code is the
-# default because it authenticates with ANTHROPIC_API_KEY, which the backend
-# already has; the Cursor adapter needs a CURSOR_API_KEY the backend doesn't
-# carry. Optional ORCHESTRATOR_MODEL pins a specific model on the adapter.
-ORCHESTRATOR_ADAPTER = os.environ.get("ORCHESTRATOR_ADAPTER", "claude").strip().lower()
+# Optional hard override. When ORCHESTRATOR_ADAPTER is set we use it verbatim
+# (escape hatch for an operator who knows exactly what they want). When it's
+# empty we RESOLVE the adapter at runtime from Puppetmaster's own platform
+# lock so the orchestrator never collides with it -- see
+# ``resolve_orchestrator_adapter`` below. This is the durable fix for the
+# class of failure where the backend hardcoded ``claude`` and then either (a)
+# got refused by a cursor-only lock, or (b) silently degraded when its key was
+# missing. The orchestrator now asks PM "which adapter may I actually run?"
+# the same way ``puppetmaster edit`` does, instead of guessing.
+ORCHESTRATOR_ADAPTER_OVERRIDE = os.environ.get("ORCHESTRATOR_ADAPTER", "").strip().lower()
 ORCHESTRATOR_MODEL = os.environ.get("ORCHESTRATOR_MODEL", "").strip()
+
+# Map Puppetmaster *platform* names (as reported by ``platform status``) to
+# the *verb* the orchestrator invokes (``puppetmaster <verb> <prompt>``).
+# Most are identical; claude-code's verb is ``claude``.
+_PLATFORM_TO_VERB = {
+    "cursor": "cursor",
+    "claude-code": "claude",
+    "codex": "codex",
+    "openai": "openai",
+    "hermes": "hermes",
+}
+
+# Cache the resolved adapter for the process lifetime so we don't shell out to
+# ``puppetmaster platform/adapters`` on every single job. The lock is global
+# user state that rarely changes within a backend's run; an operator who flips
+# it can restart the backend (same contract as every other env-derived value).
+_resolved_adapter_cache: Optional[str] = None
+
+
+def _pm_enabled_platforms() -> Optional[set[str]]:
+    """Return the set of platforms the PM lock currently ENABLES, or None if
+    the lock can't be read (PM missing, older PM without ``--json``, etc.)."""
+    try:
+        out = subprocess.run(
+            [PUPPETMASTER_BIN, "platform", "status", "--json"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if out.returncode != 0:
+            return None
+        data = json.loads(out.stdout)
+        enabled = data.get("enabled")
+        if isinstance(enabled, list):
+            return {str(x).strip().lower() for x in enabled}
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def _pm_configured_adapters() -> Optional[set[str]]:
+    """Return the set of adapters PM reports as ``configured`` (deps + creds
+    present), or None if the probe fails. Adapter names match platform names."""
+    try:
+        out = subprocess.run(
+            [PUPPETMASTER_BIN, "adapters"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if out.returncode != 0:
+            return None
+        data = json.loads(out.stdout)
+        return {
+            str(a.get("name", "")).strip().lower()
+            for a in data
+            if isinstance(a, dict) and a.get("configured") is True
+        }
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def resolve_orchestrator_adapter() -> str:
+    """Pick the Puppetmaster verb the backend worker should run on.
+
+    Resolution order:
+      1. ORCHESTRATOR_ADAPTER override, if set -- verbatim, no questions.
+      2. The first platform that is BOTH enabled by the lock AND configured
+         (deps + creds present), mapped to its invocation verb. This mirrors
+         how ``puppetmaster edit`` defaults its ``--adapter`` to "the
+         highest-priority adapter the platform lock enables", so the
+         orchestrator stops fighting the lock.
+      3. If the lock is readable but nothing is both-enabled-and-configured,
+         fall back to the first *enabled* platform anyway (let PM emit its own
+         helpful "enable it / configure it" error instead of us masking it).
+      4. If PM can't be probed at all, fall back to ``claude`` (the historical
+         default) so a PM-less/older environment behaves as before.
+
+    Cached for the process lifetime; restart the backend to re-resolve after
+    flipping the lock or provisioning a new adapter key.
+    """
+    global _resolved_adapter_cache
+    if ORCHESTRATOR_ADAPTER_OVERRIDE:
+        return ORCHESTRATOR_ADAPTER_OVERRIDE
+    if _resolved_adapter_cache is not None:
+        return _resolved_adapter_cache
+
+    enabled = _pm_enabled_platforms()
+    if enabled is None:
+        # Couldn't read the lock -- preserve historical behavior.
+        _resolved_adapter_cache = "claude"
+        return _resolved_adapter_cache
+
+    configured = _pm_configured_adapters() or set()
+    # Deterministic preference order among whatever's enabled+configured.
+    preference = ["cursor", "claude-code", "codex", "hermes", "openai"]
+
+    both = [p for p in preference if p in enabled and p in configured]
+    if both:
+        chosen = both[0]
+    else:
+        # Nothing both enabled and configured. Pick the first enabled platform
+        # (preference-ordered) and let PM surface its own actionable error.
+        enabled_pref = [p for p in preference if p in enabled]
+        chosen = enabled_pref[0] if enabled_pref else "claude-code"
+
+    _resolved_adapter_cache = _PLATFORM_TO_VERB.get(chosen, chosen)
+    return _resolved_adapter_cache
 
 
 def build_worker_cmd(
@@ -66,9 +181,10 @@ def build_worker_cmd(
     runs analysis-only and cannot touch the working tree, and Claude needs
     ``--permission-mode acceptEdits`` to write for real.
     """
+    adapter = resolve_orchestrator_adapter()
     cmd = [
         PUPPETMASTER_BIN,
-        ORCHESTRATOR_ADAPTER,
+        adapter,
         prompt,
         "--cwd",
         cwd,
@@ -79,9 +195,11 @@ def build_worker_cmd(
         # The wiki root is a long-lived git repo that is usually dirty when a
         # job starts (the raw source was just written), so don't refuse on it.
         cmd.append("--allow-dirty")
-        if ORCHESTRATOR_ADAPTER == "cursor":
+        # Per-adapter write-enable flags. Without these the worker runs
+        # analysis-only and silently produces no file changes.
+        if adapter == "cursor":
             cmd.append("--implement")
-        elif ORCHESTRATOR_ADAPTER == "claude":
+        elif adapter == "claude":
             cmd += ["--permission-mode", "acceptEdits"]
     if ORCHESTRATOR_MODEL:
         cmd += ["--model", ORCHESTRATOR_MODEL]
