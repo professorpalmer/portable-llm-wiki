@@ -370,9 +370,27 @@ class WikiIndex:
 
     def _load_page(self, md_path: Path) -> Page:
         rel = md_path.relative_to(settings.wiki_root)
-        post = frontmatter.load(md_path)
-        meta = post.metadata or {}
-        body = post.content or ""
+        # Defense-in-depth: a single page with malformed YAML frontmatter must never
+        # crash a reader. frontmatter.load raises ScannerError on e.g. an unquoted
+        # colon in a title; fall back to body-only + filename-derived metadata so one
+        # bad page degrades gracefully instead of 500ing the manifest / /llm handshake.
+        try:
+            post = frontmatter.load(md_path)
+            meta = post.metadata or {}
+            body = post.content or ""
+        except Exception as exc:  # noqa: BLE001
+            print(f"[wiki] frontmatter parse failed for {md_path}: {exc} -- loading body-only")
+            try:
+                raw = md_path.read_text(encoding="utf-8")
+            except Exception:
+                raw = ""
+            # strip a leading frontmatter block if present, keep the body
+            body = raw
+            if raw.startswith("---"):
+                _end = raw.find("\n---", 3)
+                if _end != -1:
+                    body = raw[_end + 4:]
+            meta = {}
         section = _section_from_relpath(rel)
 
         title = str(meta.get("title") or md_path.stem.replace("-", " ").title()).strip()
