@@ -7,8 +7,10 @@ unintentionally.
 """
 from __future__ import annotations
 
+import os
 import re
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -18,6 +20,16 @@ from typing import Iterable
 import frontmatter
 
 from .config import TIER_ORDER, VALID_TIERS, settings
+
+# How long a freshness verdict is trusted before we re-walk the corpus.
+# Under load, ``reload_if_stale`` would otherwise rglob+stat every markdown
+# file on EVERY read request; bounding it to one scan per interval turns an
+# O(pages) per-request cost into an amortized near-zero one. Writes call
+# ``reload()`` directly, so post-mutation freshness is unaffected. Tunable
+# via env for very-large or very-hot wikis.
+_STALE_CHECK_INTERVAL_S: float = float(
+    os.environ.get("WIKI_STALE_CHECK_INTERVAL_S", "2") or "2"
+)
 
 WIKILINK_RE = re.compile(r"\[\[([^\]\|]+?)(?:\|([^\]]+))?\]\]")
 PAGE_TYPES = (
@@ -35,6 +47,72 @@ def _slugify(title: str) -> str:
     s = title.strip().lower()
     s = re.sub(r"[^a-z0-9]+", "-", s)
     return s.strip("-")
+
+
+# Dated pages (decisions, sources) carry a ``YYYY-MM-DD`` filename/slug prefix
+# but are routinely linked by a human "2026-07-01 Title" display form — or by an
+# undated title, or by the bare slug. Strip a leading ISO date (``-`` or
+# whitespace separated) so every form normalizes to the same key.
+_DATE_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[-\s]+")
+
+
+def _strip_date_prefix(text: str) -> str:
+    return _DATE_PREFIX_RE.sub("", text.strip())
+
+
+class LinkResolver:
+    """Resolve a raw ``[[target]]`` string to a canonical page slug, tolerant of
+    the slug-vs-title and date-prefix display forms that pervade the corpus.
+
+    A target resolves (in priority order) to a page whose:
+      * title matches verbatim (case-insensitive), or
+      * slug matches verbatim, or
+      * slugified title/slug matches the slugified target — so
+        ``[[Jeppesen ForeFlight]]`` finds slug ``jeppesen-foreflight`` and
+        ``[[project-compass]]`` finds title ``Project Compass``, or
+      * any of the above after stripping a leading ISO date prefix — so
+        ``[[2026-07-01 Marionette Public Repo]]`` finds the dated page and an
+        undated link finds a dated page.
+
+    Exact title/slug matches always win over normalized ones; ambiguous
+    normalized collisions resolve to the first page seen (insertion order).
+    """
+
+    def __init__(self, pages: Iterable["Page"]):
+        self._by_title: dict[str, str] = {}
+        self._by_slug: dict[str, str] = {}
+        self._by_norm: dict[str, str] = {}
+        for page in pages:
+            self._by_title.setdefault(page.title.strip().lower(), page.slug)
+            self._by_slug.setdefault(page.slug.strip().lower(), page.slug)
+            for key in self._norm_keys(page.title) | self._norm_keys(page.slug):
+                self._by_norm.setdefault(key, page.slug)
+
+    @staticmethod
+    def _norm_keys(text: str) -> set[str]:
+        keys: set[str] = set()
+        for candidate in (text, _strip_date_prefix(text)):
+            slug = _slugify(candidate)
+            if slug:
+                keys.add(slug)
+        return keys
+
+    def resolve(self, target: str) -> str | None:
+        key = target.strip().lower()
+        if key in self._by_title:
+            return self._by_title[key]
+        if key in self._by_slug:
+            return self._by_slug[key]
+        undated = _strip_date_prefix(target).lower()
+        if undated in self._by_title:
+            return self._by_title[undated]
+        for norm_key in self._norm_keys(target):
+            if norm_key in self._by_norm:
+                return self._by_norm[norm_key]
+        return None
+
+    def resolves(self, target: str) -> bool:
+        return self.resolve(target) is not None
 
 
 @dataclass
@@ -169,6 +247,7 @@ class WikiIndex:
         self._slug_by_title: dict[str, str] = {}
         self._last_scan: float = 0.0
         self._last_wiki_mtime: float = 0.0
+        self._last_stale_check: float = 0.0
 
     # ---------- public API ----------
 
@@ -177,6 +256,14 @@ class WikiIndex:
         return self._last_scan
 
     def reload_if_stale(self) -> None:
+        # Debounce the full-tree mtime scan: at most one walk per
+        # _STALE_CHECK_INTERVAL_S no matter the request rate. This is the
+        # difference between "feels instant under a traffic spike" and
+        # "stats the whole corpus on every page view".
+        now = time.monotonic()
+        if now - self._last_stale_check < _STALE_CHECK_INTERVAL_S:
+            return
+        self._last_stale_check = now
         latest = self._latest_mtime(settings.wiki_dir)
         if latest > self._last_wiki_mtime:
             self.reload()
@@ -198,11 +285,12 @@ class WikiIndex:
                     pages[page.slug] = page
                     titles[page.title.lower()] = page.slug
 
+            resolver = LinkResolver(pages.values())
             for slug, page in pages.items():
                 resolved: list[str] = []
                 for linked_title in page.links_out:
-                    target_slug = titles.get(linked_title.lower())
-                    if target_slug and target_slug != slug:
+                    target_slug = resolver.resolve(linked_title)
+                    if target_slug and target_slug != slug and target_slug not in resolved:
                         resolved.append(target_slug)
                 page.links_out = resolved
 
