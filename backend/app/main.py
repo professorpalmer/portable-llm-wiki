@@ -87,8 +87,12 @@ async def _lifespan(_app: FastAPI):
       which tenants exist. Each tenant's wiki is lazily indexed on first
       request, so cold-boot stays fast even with many tenants.
     """
+    from . import observability as _observability
     from . import persistence as _persistence
     from . import tenants as _tenants
+
+    if _observability.init_sentry():
+        print("[observability] Sentry error tracking enabled", flush=True)
 
     if settings.single_tenant_mode:
         result = _persistence.bootstrap_on_startup()
@@ -204,6 +208,14 @@ app.add_middleware(
 from .rate_limit import RateLimitMiddleware  # noqa: E402 — must follow `app =`
 
 app.add_middleware(RateLimitMiddleware)
+
+# Structured per-request logging (method/path/status/latency/IP). Added
+# after the rate limiter so it observes 429s too; kept inside the
+# TenantPrefix ASGI middleware (added below) so that one stays outermost
+# and its contextvar handling is undisturbed.
+from .observability import RequestLogMiddleware  # noqa: E402
+
+app.add_middleware(RequestLogMiddleware)
 
 
 # ---------------------------------------------------------------------------

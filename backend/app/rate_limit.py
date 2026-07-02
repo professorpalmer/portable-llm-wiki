@@ -82,13 +82,52 @@ def _enabled() -> bool:
     return os.getenv("RATE_LIMIT_ENABLED", "1").strip() != "0"
 
 
+# --- LLM-synthesis limits ---------------------------------------------------
+# /wiki/query, /wiki/chat, /wiki/chat/stream are the ONLY public endpoints
+# that spend the owner's Anthropic/OpenAI budget. They live under /wiki/ so
+# the crawler-friendly bypass would otherwise exempt them entirely, letting
+# any anonymous client loop POST /wiki/chat and run the model bill to the
+# moon. We meter them on a SEPARATE, stricter per-IP bucket and back that up
+# with a global daily ceiling (a hard spend cap that degrades to 429 instead
+# of an unbounded invoice). Owners and valid share-token holders still bypass.
+
+
+def _llm_per_minute() -> int:
+    return max(1, _env_int("RATE_LIMIT_LLM_PER_MINUTE", 12))
+
+
+def _llm_burst() -> int:
+    return max(1, _env_int("RATE_LIMIT_LLM_BURST", 6))
+
+
+def _llm_daily_max() -> int:
+    """Global daily cap on anonymous LLM-synthesis calls. 0 disables the
+    ceiling (per-IP bucket still applies). Default 5000/day is generous for
+    real readers but caps a scripted-abuse bill at a knowable ceiling."""
+    return max(0, _env_int("RATE_LIMIT_LLM_DAILY_MAX", 5000))
+
+
+def _trusted_proxy_hops() -> int:
+    """How many trusted reverse-proxy hops sit in front of the app. On
+    Render (and Vercel's rewrite proxy) that's a single hop, so the real
+    client is the RIGHTMOST X-Forwarded-For entry the proxy appended, not
+    the leftmost one the client can forge. Configurable for stacked proxies."""
+    return max(1, _env_int("RATE_LIMIT_TRUSTED_PROXY_HOPS", 1))
+
+
 # ---------------------------------------------------------------------------
 # Bucket state. {ip: (tokens, last_refill_monotonic_ts)}.
 # ---------------------------------------------------------------------------
 
+# Bucket state is keyed by "<namespace>:<ip>" so the public bucket and the
+# stricter LLM-synthesis bucket for the same client never share tokens.
 _state: dict[str, tuple[float, float]] = {}
 _lock = threading.Lock()
 _request_counter = 0
+
+# Global daily ceiling state for LLM-synthesis calls (the spend backstop).
+_llm_day_key: str = ""
+_llm_day_count: int = 0
 
 _CLEANUP_EVERY_N_REQUESTS = 1000
 _IDLE_PRUNE_SECONDS = 300.0
@@ -101,22 +140,30 @@ def _reset_state() -> None:
     start from an empty state — otherwise the order tests run in changes
     their meaning. Not part of the runtime public API.
     """
-    global _request_counter
+    global _request_counter, _llm_day_key, _llm_day_count
     with _lock:
         _state.clear()
         _request_counter = 0
+        _llm_day_key = ""
+        _llm_day_count = 0
 
 
 def _client_ip(request: Request) -> str:
-    """Render and Vercel both forward the originating client via
-    X-Forwarded-For. The first comma-separated value is the real client;
-    the rest is the proxy chain we don't care about. Fall back to the
-    direct TCP peer when no XFF header is present (local dev / curl)."""
+    """Resolve the real client IP for rate-limiting.
+
+    Behind a reverse proxy (Render, Vercel) the client cannot be trusted to
+    populate ``X-Forwarded-For`` honestly — a value it sends is PREPENDED,
+    and the proxy appends the true peer. So the trustworthy entry is the
+    Nth-from-the-right, where N = number of trusted proxy hops. Taking the
+    leftmost value (the old behavior) let any client rotate a forged XFF per
+    request and dodge the limiter entirely. Falls back to the direct TCP peer
+    when no XFF header is present (local dev / curl)."""
     xff = request.headers.get("x-forwarded-for")
     if xff:
-        first = xff.split(",", 1)[0].strip()
-        if first:
-            return first
+        parts = [p.strip() for p in xff.split(",") if p.strip()]
+        if parts:
+            idx = max(0, len(parts) - _trusted_proxy_hops())
+            return parts[idx]
     client = request.client
     if client and client.host:
         return client.host
@@ -182,6 +229,52 @@ def _is_llm_targeted_path(path: str) -> bool:
     )
 
 
+# Expensive synthesis endpoints — these spend the owner's LLM budget on
+# every call. They sit under /wiki/ (so the crawler bypass would catch them)
+# but must be metered, not exempted. Listed as a separate, narrow set so a
+# future cheap /wiki/* read endpoint isn't accidentally throttled.
+_LLM_SYNTHESIS_PREFIXES: tuple[str, ...] = (
+    "/wiki/query",
+    "/wiki/chat",  # covers /wiki/chat and /wiki/chat/stream
+)
+
+
+def _is_llm_synthesis_path(path: str) -> bool:
+    """True for the budget-spending synthesis endpoints (query/chat).
+
+    Tenant-prefixed variants (``/t/<tenant>/wiki/chat``) match too — the
+    middleware sees the raw URL path before tenant routing rewrites it.
+    """
+    if path.startswith("/t/"):
+        _, rest = path[3:].split("/", 1) if "/" in path[3:] else (path[3:], "")
+        path = "/" + rest
+    return any(
+        path == p or path.startswith(p + "/") for p in _LLM_SYNTHESIS_PREFIXES
+    )
+
+
+def _llm_daily_budget_ok() -> bool:
+    """Reserve one slot against the global daily synthesis ceiling.
+
+    Returns True (and increments today's count) when there's budget left,
+    False when the ceiling is reached. A ceiling of 0 means "unbounded".
+    The day key is UTC ``YYYY-MM-DD`` so the count auto-resets at midnight
+    without a background job."""
+    ceiling = _llm_daily_max()
+    if ceiling <= 0:
+        return True
+    global _llm_day_key, _llm_day_count
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    with _lock:
+        if _llm_day_key != today:
+            _llm_day_key = today
+            _llm_day_count = 0
+        if _llm_day_count >= ceiling:
+            return False
+        _llm_day_count += 1
+        return True
+
+
 def _has_valid_share_token(request: Request) -> bool:
     """Return True if the request carries a share token that resolves
     to a real tier in the current tenant's store.
@@ -238,37 +331,48 @@ def _maybe_cleanup_locked(now: float, refill_rate: float, capacity: float) -> No
         _state.pop(ip, None)
 
 
-def _consume(ip: str) -> tuple[bool, float, float, float]:
-    """Try to consume one token from ``ip``'s bucket.
+def _consume(
+    ip: str,
+    *,
+    per_minute: int | None = None,
+    burst: int | None = None,
+    namespace: str = "public",
+) -> tuple[bool, float, float, float]:
+    """Try to consume one token from ``ip``'s bucket in ``namespace``.
+
+    ``per_minute``/``burst`` default to the public-traffic env values; the
+    LLM-synthesis path passes its own stricter pair. Buckets are namespaced
+    so the public and synthesis limits for one IP are fully independent.
 
     Returns ``(allowed, remaining_after_decision, retry_after_seconds,
     reset_unix_timestamp)``. ``retry_after_seconds`` is 0.0 on success.
     """
     global _request_counter
-    per_minute = _per_minute()
-    burst = _burst()
+    per_minute = _per_minute() if per_minute is None else per_minute
+    burst = _burst() if burst is None else burst
     refill_rate = per_minute / 60.0  # tokens per second
     capacity = float(burst)
     now = time.monotonic()
+    key = f"{namespace}:{ip}"
 
     with _lock:
         _request_counter += 1
         # New IPs start with a full bucket. ``last_ts = now`` so the
         # first request doesn't get phantom refill credit.
-        tokens, last_ts = _state.get(ip, (capacity, now))
+        tokens, last_ts = _state.get(key, (capacity, now))
         elapsed = max(0.0, now - last_ts)
         tokens = min(capacity, tokens + elapsed * refill_rate)
 
         if tokens >= 1.0:
             tokens -= 1.0
-            _state[ip] = (tokens, now)
+            _state[key] = (tokens, now)
             allowed = True
             retry_after = 0.0
         else:
             # Persist the refilled (sub-1) token count and now-ts so the
             # next call gets correct refill from this moment, not the
             # original last_ts.
-            _state[ip] = (tokens, now)
+            _state[key] = (tokens, now)
             allowed = False
             retry_after = (1.0 - tokens) / refill_rate if refill_rate > 0 else 60.0
 
@@ -306,6 +410,20 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         if _is_owner(request):
             return await call_next(request)
+
+        # ----- LLM-synthesis budget guard --------------------------------
+        # query/chat/chat-stream spend the owner's model budget. They must
+        # be metered BEFORE the crawler bypass below (which would otherwise
+        # exempt them as /wiki/* reads). Owner + valid-share-token callers
+        # are handled separately: owner bypassed above; the share-token
+        # bypass further down still lets a minted personal-LLM-URL chat
+        # through unthrottled. Anonymous callers hit a stricter per-IP
+        # bucket AND a global daily ceiling so a scripted /wiki/chat storm
+        # can't run up an unbounded invoice.
+        if _is_llm_synthesis_path(request.url.path) and not _has_valid_share_token(
+            request
+        ):
+            return await self._meter_synthesis(request, call_next)
 
         # ----- LLM-targeted-endpoint bypass -------------------------------
         # The whole point of this product is to be fetched by ChatGPT,
@@ -350,6 +468,58 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             )
             # Retry-After is the standard HTTP header; we round up so a
             # well-behaved client waits at least until a token is ready.
+            response.headers["Retry-After"] = str(max(1, int(retry_after + 0.999)))
+        else:
+            response = await call_next(request)
+
+        response.headers["X-RateLimit-Limit"] = str(per_minute)
+        response.headers["X-RateLimit-Remaining"] = str(max(0, int(remaining)))
+        response.headers["X-RateLimit-Reset"] = str(int(reset_unix))
+        return response
+
+    async def _meter_synthesis(
+        self,
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        """Meter an LLM-synthesis request against the stricter per-IP bucket
+        and the global daily budget ceiling. 429s carry the same body and
+        header contract as the public limiter, plus a ``scope`` discriminator
+        so clients (and the UI) can tell a per-IP throttle from a global
+        budget exhaustion."""
+        ip = _client_ip(request)
+        per_minute = _llm_per_minute()
+        allowed, remaining, retry_after, reset_unix = _consume(
+            ip,
+            per_minute=per_minute,
+            burst=_llm_burst(),
+            namespace="llm",
+        )
+
+        if allowed and not _llm_daily_budget_ok():
+            # Per-IP bucket had room, but the global daily ceiling is spent.
+            # Refund nothing (the per-IP token is cheap); reject so the bill
+            # stays bounded. The keyword-only digest still works for owners.
+            body = {
+                "detail": "daily AI answer budget reached; try again tomorrow",
+                "retry_after_seconds": 3600,
+                "limit": per_minute,
+                "window_seconds": 60,
+                "scope": "global_daily_budget",
+            }
+            resp: Response = JSONResponse(status_code=429, content=body)
+            resp.headers["Retry-After"] = "3600"
+            return resp
+
+        if not allowed:
+            body = {
+                "detail": "AI answer rate limit exceeded",
+                "retry_after_seconds": round(retry_after, 3),
+                "limit": per_minute,
+                "window_seconds": 60,
+                "scope": "per_ip",
+            }
+            response: Response = JSONResponse(status_code=429, content=body)
             response.headers["Retry-After"] = str(max(1, int(retry_after + 0.999)))
         else:
             response = await call_next(request)

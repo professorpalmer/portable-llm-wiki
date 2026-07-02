@@ -1,5 +1,6 @@
 import "./globals.css";
 import type { Metadata } from "next";
+import { Analytics } from "@vercel/analytics/react";
 import { NavBar } from "@/components/NavBar";
 import { ShareTokenCatcher } from "@/components/ShareTokenCatcher";
 
@@ -67,6 +68,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <ShareTokenCatcher />
         <NavBar />
         <main className="flex-1">{children}</main>
+        <Analytics />
         <footer className="border-t border-paper-soft text-xs text-ink-muted">
           <div className="max-w-5xl mx-auto px-4 sm:px-5 py-4 flex items-center justify-between">
             <span>

@@ -30,10 +30,13 @@ The caller composes a markdown blob from these fields and passes it to
 
 from __future__ import annotations
 
+import ipaddress
+import os
 import re
+import socket
 from dataclasses import dataclass, field
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -41,6 +44,66 @@ from bs4 import BeautifulSoup
 MAX_BYTES = 1_000_000  # ~1 MB cap on what we'll download
 REQUEST_TIMEOUT = 20.0
 USER_AGENT = "PortableLLMWikiBot/1.0 (+https://portablellm.wiki)"
+MAX_REDIRECTS = 5
+
+
+def _allow_private_targets() -> bool:
+    """Escape hatch for self-hosters who deliberately scrape internal hosts
+    (an intranet profile page, a LAN service). OFF by default — the hosted
+    product must never let a signed-in user point the scraper at internal
+    infrastructure. Set URL_SCRAPE_ALLOW_PRIVATE=1 to relax."""
+    return os.getenv("URL_SCRAPE_ALLOW_PRIVATE", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _ip_is_blocked(ip_text: str) -> bool:
+    """True for any address we must never connect to from the server:
+    loopback, RFC1918 private, link-local (incl. the 169.254.169.254 cloud
+    metadata endpoint), unique-local IPv6, reserved, multicast, unspecified."""
+    try:
+        ip = ipaddress.ip_address(ip_text)
+    except ValueError:
+        return True  # un-parseable → treat as unsafe
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
+
+
+def _host_resolves_safe(host: str) -> tuple[bool, str]:
+    """Resolve ``host`` (A + AAAA) and confirm EVERY address is a public,
+    routable IP. Returns (ok, reason). Blocks SSRF to cloud metadata,
+    localhost, and internal networks. Re-run for every redirect hop.
+
+    Residual caveat (honest): this validates at resolve time, so a TOCTOU
+    DNS-rebind between this check and httpx's own resolution is still
+    theoretically possible. Closing that fully requires pinning the
+    connection to the validated IP; for this owner/signed-in-user-gated
+    onboarding flow the resolve-time check removes the practical hole.
+    """
+    if _allow_private_targets():
+        return True, ""
+    if not host:
+        return False, "missing host"
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except (socket.gaierror, UnicodeError) as exc:
+        return False, f"DNS resolution failed: {exc}"
+    if not infos:
+        return False, "host did not resolve"
+    for info in infos:
+        ip_text = info[4][0]
+        if _ip_is_blocked(ip_text):
+            return False, f"blocked address {ip_text} (private/loopback/link-local)"
+    return True, ""
 
 
 @dataclass
@@ -117,35 +180,58 @@ async def scrape(url: str) -> ScrapedPage:
     if parsed.scheme not in ("http", "https"):
         page.errors.append(f"unsupported scheme {parsed.scheme!r}; expected http or https")
         return page
-    if not parsed.netloc:
+    if not parsed.hostname:
         page.errors.append("URL missing a hostname")
         return page
 
+    safe, reason = _host_resolves_safe(parsed.hostname)
+    if not safe:
+        page.errors.append(f"refusing to fetch {parsed.hostname!r}: {reason}")
+        return page
+
+    # Manual redirect following so we can re-validate the target host on
+    # every hop. httpx's built-in follow_redirects would chase a 3xx to an
+    # internal address without giving us a chance to re-check it — the
+    # classic SSRF redirect bypass.
+    r: Optional[httpx.Response] = None
     try:
         async with httpx.AsyncClient(
             timeout=REQUEST_TIMEOUT,
-            follow_redirects=True,
-            max_redirects=5,
+            follow_redirects=False,
             headers={
                 "User-Agent": USER_AGENT,
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.5",
             },
         ) as client:
-            # HEAD-then-GET so we can skip oversized assets. Not all servers
-            # respect HEAD, so we tolerate failures here.
-            try:
-                head = await client.head(url)
-                length = int(head.headers.get("content-length", "0") or 0)
-                if length > MAX_BYTES:
-                    page.errors.append(f"response too large ({length} bytes); aborting")
+            current = url
+            for _ in range(MAX_REDIRECTS + 1):
+                r = await client.get(current)
+                if r.status_code not in (301, 302, 303, 307, 308):
+                    break
+                location = r.headers.get("location")
+                if not location:
+                    break
+                current = urljoin(current, location)
+                hop = urlparse(current)
+                if hop.scheme not in ("http", "https") or not hop.hostname:
+                    page.errors.append(f"redirect to unsupported target {current!r}")
                     return page
-            except Exception:  # noqa: BLE001
-                pass
-
-            r = await client.get(url)
+                ok, why = _host_resolves_safe(hop.hostname)
+                if not ok:
+                    page.errors.append(
+                        f"refusing redirect to {hop.hostname!r}: {why}"
+                    )
+                    return page
+            else:
+                page.errors.append("too many redirects; aborting")
+                return page
     except httpx.HTTPError as exc:
         page.errors.append(f"http error: {exc}")
+        return page
+
+    if r is None:  # defensive: loop never assigned (unreachable in practice)
+        page.errors.append("no response received")
         return page
 
     page.final_url = str(r.url)

@@ -9,3 +9,6 @@ python-dotenv==1.0.1
 pypdf==5.1.0
 itsdangerous==2.2.0
 beautifulsoup4==4.12.3
+# Optional error tracking. Only used when SENTRY_DSN is set (see
+# app/observability.py); the import is guarded so the app runs without it.
+sentry-sdk==2.64.0

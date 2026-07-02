@@ -81,6 +81,20 @@ def _make_app() -> FastAPI:
     def tenant_llm(tenant: str):
         return {"tenant": tenant}
 
+    # Budget-spending synthesis endpoints — metered on the stricter LLM
+    # bucket, NOT exempted by the /wiki/ crawler bypass.
+    @app.post("/wiki/query")
+    def wiki_query():
+        return {"answer": "..."}
+
+    @app.post("/wiki/chat")
+    def wiki_chat():
+        return {"answer": "..."}
+
+    @app.post("/wiki/chat/stream")
+    def wiki_chat_stream():
+        return {"answer": "..."}
+
     @app.get("/owner/share-tokens")
     def owner_share_tokens():
         # Owner-gated path — used by tests to verify NON-LLM paths
@@ -384,6 +398,105 @@ def test_share_token_in_header_bypasses_rate_limit(monkeypatch):
     for _ in range(15):
         r = client.get("/ping", headers=headers)
         assert r.status_code == 200, r.text
+
+
+# ---------------------------------------------------------------------------
+# LLM-synthesis budget guard — the "viral wiki runs up an unbounded model
+# bill" fix. query/chat/chat-stream must be metered even though they live
+# under the /wiki/ crawler-bypass prefix.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", ["/wiki/query", "/wiki/chat", "/wiki/chat/stream"])
+def test_synthesis_endpoints_are_metered_not_bypassed(monkeypatch, path):
+    """The crawler bypass exempts /wiki/ reads, but the budget-spending
+    synthesis endpoints must still be throttled or a scripted loop runs the
+    owner's Anthropic/OpenAI bill to the moon."""
+    monkeypatch.setenv("RATE_LIMIT_LLM_PER_MINUTE", "60")
+    monkeypatch.setenv("RATE_LIMIT_LLM_BURST", "3")
+    monkeypatch.setenv("RATE_LIMIT_LLM_DAILY_MAX", "0")  # isolate per-IP bucket
+
+    client = TestClient(_make_app())
+    for _ in range(3):
+        assert client.post(path).status_code == 200
+    r = client.post(path)
+    assert r.status_code == 429
+    assert r.json()["scope"] == "per_ip"
+
+
+def test_synthesis_bucket_independent_of_public_bucket(monkeypatch):
+    """Cheap reads and expensive synthesis must not drain each other."""
+    monkeypatch.setenv("RATE_LIMIT_PER_MINUTE", "60")
+    monkeypatch.setenv("RATE_LIMIT_BURST", "5")
+    monkeypatch.setenv("RATE_LIMIT_LLM_PER_MINUTE", "60")
+    monkeypatch.setenv("RATE_LIMIT_LLM_BURST", "2")
+    monkeypatch.setenv("RATE_LIMIT_LLM_DAILY_MAX", "0")
+
+    client = TestClient(_make_app())
+    # Exhaust the LLM bucket.
+    assert client.post("/wiki/query").status_code == 200
+    assert client.post("/wiki/query").status_code == 200
+    assert client.post("/wiki/query").status_code == 429
+    # The public bucket for the same IP is untouched.
+    r = client.get("/ping")
+    assert r.status_code == 200
+    assert r.headers["X-RateLimit-Remaining"] == "4"
+
+
+def test_synthesis_global_daily_budget_ceiling(monkeypatch):
+    """Once the global daily ceiling is hit, synthesis 429s with a distinct
+    scope even if the per-IP bucket still has tokens (rotating IPs can't
+    defeat the spend cap)."""
+    monkeypatch.setenv("RATE_LIMIT_LLM_PER_MINUTE", "600")
+    monkeypatch.setenv("RATE_LIMIT_LLM_BURST", "100")
+    monkeypatch.setenv("RATE_LIMIT_LLM_DAILY_MAX", "2")
+
+    client = TestClient(_make_app())
+    assert client.post("/wiki/query").status_code == 200
+    assert client.post("/wiki/query").status_code == 200
+    r = client.post("/wiki/query")
+    assert r.status_code == 429
+    assert r.json()["scope"] == "global_daily_budget"
+
+
+def test_owner_bypasses_synthesis_meter(monkeypatch):
+    """The owner running their own wiki is never throttled on chat/query."""
+    monkeypatch.setenv("RATE_LIMIT_LLM_PER_MINUTE", "60")
+    monkeypatch.setenv("RATE_LIMIT_LLM_BURST", "1")
+    monkeypatch.setenv("RATE_LIMIT_LLM_DAILY_MAX", "1")
+
+    client = TestClient(_make_app())
+    headers = {"Authorization": f"Bearer {OWNER_TOKEN}"}
+    for _ in range(10):
+        assert client.post("/wiki/chat", headers=headers).status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# X-Forwarded-For trust — the spoof-resistance fix. The real client is the
+# rightmost (proxy-appended) entry, not the leftmost (client-forgeable) one.
+# ---------------------------------------------------------------------------
+
+
+def test_spoofed_leftmost_xff_does_not_evade_limiter(monkeypatch):
+    """Behind one trusted proxy, a client rotating the LEFTMOST XFF value
+    per request must still share one bucket (keyed on the rightmost,
+    proxy-appended hop) — otherwise the limiter is trivially defeated."""
+    monkeypatch.setenv("RATE_LIMIT_PER_MINUTE", "60")
+    monkeypatch.setenv("RATE_LIMIT_BURST", "2")
+    monkeypatch.setenv("RATE_LIMIT_TRUSTED_PROXY_HOPS", "1")
+
+    client = TestClient(_make_app())
+    # Same trusted peer (rightmost = 203.0.113.9) but a forged, rotating
+    # leftmost value. All three hit the SAME bucket → third 429s.
+    assert client.get(
+        "/ping", headers={"X-Forwarded-For": "1.1.1.1, 203.0.113.9"}
+    ).status_code == 200
+    assert client.get(
+        "/ping", headers={"X-Forwarded-For": "2.2.2.2, 203.0.113.9"}
+    ).status_code == 200
+    assert client.get(
+        "/ping", headers={"X-Forwarded-For": "3.3.3.3, 203.0.113.9"}
+    ).status_code == 429
 
 
 def test_invalid_share_token_does_not_bypass(monkeypatch):
