@@ -32,6 +32,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
+from .win_console import hide_child_consoles
+
+# Install before any subprocess machinery (git autosync, Puppetmaster
+# orchestrator) so console-subsystem children never flash visible windows
+# when the backend runs console-less under Marionette on Windows.
+hide_child_consoles()
+
 from .auth import Viewer, current_viewer, require_owner
 from .capture import (
     capture_audio,
