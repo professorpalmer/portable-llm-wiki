@@ -79,7 +79,7 @@ export function ConnectMarionetteButton({
       </button>
       <p className="mt-2 text-xs text-ink-muted leading-relaxed max-w-md">
         Mints a private personal LLM URL and opens Marionette so the wiki
-        graph links at owner tier — no copy/paste.
+        graph links at private tier — no copy/paste.
       </p>
       {error && (
         <p className="mt-2 text-xs text-red-700" role="alert">
