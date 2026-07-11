@@ -43,6 +43,8 @@ import {
   type MyReposResponse,
   type OnboardingAssembleResponse,
 } from "@/lib/api";
+import { rememberMarionetteClientFromLocation } from "@/lib/marionetteConnect";
+import { ConnectMarionetteButton } from "@/components/ConnectMarionetteButton";
 
 // ---------- API shapes ----------------------------------------------------
 
@@ -342,6 +344,12 @@ export default function WelcomePage() {
   );
 
   const [phase, setPhase] = useState<WizardPhase>({ kind: "idle" });
+
+  // Marionette opens /welcome?client=marionette — remember across wizard steps
+  // so DoneView can auto-handoff the owner personal LLM URL.
+  useEffect(() => {
+    rememberMarionetteClientFromLocation();
+  }, []);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
   // ---- Auth + state fetcher ---------------------------------------------
@@ -2629,6 +2637,7 @@ function DoneView({
       )}
 
       <div className="mt-5 flex flex-wrap gap-3 items-center">
+        <ConnectMarionetteButton tenant={user.tenant_id} auto className="w-full sm:w-auto" />
         <Link
           href={`/${user.tenant_id}`}
           className="px-4 py-2.5 rounded-lg bg-ink text-paper text-sm font-medium hover:bg-ink-soft inline-flex items-center gap-2"

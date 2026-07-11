@@ -48,6 +48,7 @@ import {
   type ShareTokenInfo,
 } from "@/lib/api";
 import { buildOfflineBriefing, isBriefingComplete } from "@/lib/briefing";
+import { ConnectMarionetteButton } from "@/components/ConnectMarionetteButton";
 
 
 // Mirror of ShareTokensPanel's helper so personal URLs are constructed
@@ -210,6 +211,8 @@ export function PersonalLlmUrlPanel({
         everything, so treat it like a password (1Password, etc.). Revoke
         anytime; you can mint a new one in 5 seconds.
       </p>
+
+      <ConnectMarionetteButton tenant={tenant || ""} force className="mt-4" />
 
       {/* Mint form. Label-first so the user has to think "which device
           is this for" — encourages per-device tokens which makes
