@@ -43,8 +43,12 @@ import {
   type MyReposResponse,
   type OnboardingAssembleResponse,
 } from "@/lib/api";
-import { rememberMarionetteClientFromLocation } from "@/lib/marionetteConnect";
 import { ConnectMarionetteButton } from "@/components/ConnectMarionetteButton";
+import {
+  buildOwnerConnectPath,
+  isMarionetteClient,
+  rememberMarionetteClientFromLocation,
+} from "@/lib/marionetteConnect";
 
 // ---------- API shapes ----------------------------------------------------
 
@@ -1434,12 +1438,21 @@ function AlreadyOnboarded({
   onForceImport: () => void;
   onCleaned: (remaining: number) => void;
 }) {
+  const router = useRouter();
   const [cleaning, setCleaning] = useState(false);
   const [cleanResult, setCleanResult] = useState<
     | { ok: true; deletedCount: number; deleted: string[] }
     | { ok: false; error: string }
     | null
   >(null);
+
+  // Marionette opened welcome after login: skip the scavenger hunt and land
+  // on Owner console scrolled to Connect to Marionette.
+  useEffect(() => {
+    rememberMarionetteClientFromLocation();
+    if (!isMarionetteClient()) return;
+    router.replace(buildOwnerConnectPath(user.tenant_id));
+  }, [router, user.tenant_id]);
 
   const handleCleanup = useCallback(async () => {
     setCleaning(true);
@@ -1482,6 +1495,15 @@ function AlreadyOnboarded({
       <SyncFreshnessPanel />
 
       <div className="mt-6 flex flex-wrap gap-3">
+        {isMarionetteClient() ? (
+          <Link
+            href={buildOwnerConnectPath(user.tenant_id)}
+            className="inline-flex items-center gap-2 px-5 py-3 rounded-xl bg-accent text-paper text-sm font-semibold hover:opacity-90"
+          >
+            <span>Connect to Marionette</span>
+            <span aria-hidden>→</span>
+          </Link>
+        ) : null}
         <Link
           href={`/${user.tenant_id}`}
           className="inline-flex items-center gap-2 px-5 py-3 rounded-xl bg-ink text-paper text-sm font-semibold hover:bg-ink-soft"
@@ -1490,7 +1512,7 @@ function AlreadyOnboarded({
           <span aria-hidden>→</span>
         </Link>
         <Link
-          href={`/${user.tenant_id}/owner`}
+          href={buildOwnerConnectPath(user.tenant_id)}
           className="inline-flex items-center gap-2 px-5 py-3 rounded-xl border border-ink/20 text-ink text-sm font-medium hover:border-ink"
         >
           Owner console

@@ -49,6 +49,11 @@ import {
 } from "@/lib/api";
 import { buildOfflineBriefing, isBriefingComplete } from "@/lib/briefing";
 import { ConnectMarionetteButton } from "@/components/ConnectMarionetteButton";
+import {
+  MARIONETTE_CONNECT_HASH,
+  scrollToMarionetteConnect,
+  shouldFocusMarionetteConnect,
+} from "@/lib/marionetteConnect";
 
 
 // Mirror of ShareTokensPanel's helper so personal URLs are constructed
@@ -89,6 +94,12 @@ export function PersonalLlmUrlPanel({
   // private. Without this filter the two panels would double-list
   // identical rows.
   const privateTokens = tokens.filter((t) => t.tier === "private");
+
+  useEffect(() => {
+    if (!shouldFocusMarionetteConnect()) return;
+    const t = window.setTimeout(() => scrollToMarionetteConnect(), 120);
+    return () => window.clearTimeout(t);
+  }, []);
 
   async function refresh() {
     setLoading(true);
@@ -192,7 +203,8 @@ export function PersonalLlmUrlPanel({
 
   return (
     <section
-      className="mt-6 bg-white border-2 border-red-200 rounded-xl p-5"
+      id={MARIONETTE_CONNECT_HASH}
+      className="mt-6 bg-white border-2 border-red-200 rounded-xl p-5 scroll-mt-24 transition-shadow"
       data-testid="personal-llm-url-panel"
     >
       <div className="flex items-center gap-2 mb-1 flex-wrap">

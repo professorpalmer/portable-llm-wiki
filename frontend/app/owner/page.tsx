@@ -47,6 +47,11 @@ import {
 } from "@/lib/api";
 import { useTenant } from "@/lib/useTenant";
 import { OwnerGate } from "@/components/OwnerGate";
+import {
+  rememberMarionetteClientFromLocation,
+  scrollToMarionetteConnect,
+  shouldFocusMarionetteConnect,
+} from "@/lib/marionetteConnect";
 
 // Public-facing link so the average viewer who's never heard the word
 // "Puppetmaster" can click through and see what it actually is — a
@@ -180,6 +185,15 @@ function OwnerPageInner({ tenant }: { tenant?: string }) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hosted, tenant]);
+
+  // Marionette deep-link: after auth, scroll Owner console to Connect.
+  useEffect(() => {
+    rememberMarionetteClientFromLocation();
+    if (!authed) return;
+    if (!shouldFocusMarionetteConnect()) return;
+    const t = window.setTimeout(() => scrollToMarionetteConnect(), 180);
+    return () => window.clearTimeout(t);
+  }, [authed]);
 
   async function verify() {
     setError(null);

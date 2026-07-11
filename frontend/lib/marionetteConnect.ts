@@ -16,6 +16,8 @@ export const MARIONETTE_CLIENT_KEY = "pllmwiki.client.marionette";
 export const MARIONETTE_RETURN_KEY = "pllmwiki.marionette.return";
 export const MARIONETTE_NONCE_KEY = "pllmwiki.marionette.nonce";
 export const MARIONETTE_SCHEME = "marionette://wiki-connect";
+/** Owner-console hash target for the Connect to Marionette control. */
+export const MARIONETTE_CONNECT_HASH = "connect-marionette";
 
 function isLoopbackReturn(url: string): boolean {
   try {
@@ -161,5 +163,50 @@ export function handoffToMarionette(personalLlmUrl: string): void {
     } catch {
       /* ignore */
     }
+  }
+}
+
+/** Path + hash that lands on Owner console scrolled to Connect Marionette. */
+export function buildOwnerConnectPath(tenant: string): string {
+  const seg = (tenant || "").replace(/^\/+|\/+$/g, "");
+  return `/${seg}/owner#${MARIONETTE_CONNECT_HASH}`;
+}
+
+export function shouldFocusMarionetteConnect(): boolean {
+  try {
+    if (typeof window === "undefined") return false;
+    const hash = (window.location.hash || "").replace(/^#/, "");
+    return hash === MARIONETTE_CONNECT_HASH;
+  } catch {
+    return false;
+  }
+}
+
+/** Smooth-scroll + brief highlight on the Connect to Marionette anchor. */
+export function scrollToMarionetteConnect(): void {
+  if (typeof document === "undefined") return;
+  const el = document.getElementById(MARIONETTE_CONNECT_HASH);
+  if (!el) return;
+  try {
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+  } catch {
+    try {
+      el.scrollIntoView();
+    } catch {
+      /* ignore */
+    }
+  }
+  try {
+    el.classList.add("ring-2", "ring-accent", "ring-offset-2", "ring-offset-paper");
+    window.setTimeout(() => {
+      el.classList.remove(
+        "ring-2",
+        "ring-accent",
+        "ring-offset-2",
+        "ring-offset-paper",
+      );
+    }, 3500);
+  } catch {
+    /* ignore */
   }
 }
