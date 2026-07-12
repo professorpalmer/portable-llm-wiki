@@ -1,6 +1,6 @@
 {
   "name": "portable-llm-wiki-frontend",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "scripts": {
     "dev": "next dev -H 0.0.0.0 -p 3000",

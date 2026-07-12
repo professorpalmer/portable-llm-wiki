@@ -6,6 +6,18 @@ itself is versioned separately. See [SPEC.md](./SPEC.md).
 Format roughly follows [Keep a Changelog](https://keepachangelog.com),
 ordered newest-first.
 
+## Unreleased
+
+- **Share-token hit counters no longer block GitHub smart-pull.**
+  `resolve()` used to rewrite tracked `.share-tokens.json` on every
+  successful use (bumping `hits` / `last_used_at` without a flush),
+  leaving permanent tracked dirt that forced the Force-reset modal
+  whenever the tenant was behind remote. Hits now live in a gitignored
+  `.share-token-stats.json` sidecar; mint/revoke identity still flushes
+  to GitHub. Smart-pull also treats residual hits-only dirt on
+  `.share-tokens.json` as disposable bookkeeping and fast-forwards
+  instead of returning `action: "dirty"`. Patch bump to **0.2.2**.
+
 ## 2.2.0. Durability you can see — no more silent no-op
 
 The "I created a note and it never showed up" trap, closed. Git-backed

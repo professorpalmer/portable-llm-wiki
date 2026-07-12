@@ -35,6 +35,20 @@ import pytest
 # ---------------------------------------------------------------------------
 
 
+def _rmtree_best_effort(path: Path) -> None:
+    """Best-effort delete for ephemeral git workdirs.
+
+    On Windows, git can briefly hold locks on ``.git/objects`` after a
+    push, so ``shutil.rmtree`` races and raises PermissionError. Tests
+    only need the bare remote afterwards; leaving a seed clone under
+    ``tmp_path`` is fine — pytest cleans the session dir later.
+    """
+    try:
+        shutil.rmtree(path)
+    except OSError:
+        pass
+
+
 def _git(args: Iterable[str], cwd: Path) -> str:
     """Run git and return stdout; raise on nonzero exit."""
     out = subprocess.run(
@@ -64,7 +78,7 @@ def _seed_remote(bare: Path, tmp: Path, gitignore_body: str = "") -> None:
     _git(["add", "-A"], cwd=work)
     _git(["commit", "-m", "seed"], cwd=work)
     _git(["push", "origin", "main"], cwd=work)
-    shutil.rmtree(work)
+    _rmtree_best_effort(work)
 
 
 def _make_tenant(tenant_id: str, wiki_root: Path, bare_remote: Path):
@@ -206,7 +220,7 @@ def test_already_committed_tenant_json_gets_untracked_on_bootstrap(
     _git(["add", "-A"], cwd=work)
     _git(["commit", "-m", "leak"], cwd=work)
     _git(["push", "origin", "main"], cwd=work)
-    shutil.rmtree(work)
+    _rmtree_best_effort(work)
 
     from app import persistence as _persistence
 
@@ -256,7 +270,7 @@ def _commit_remote_change(
     _git(["add", "-A"], cwd=work)
     _git(["commit", "-m", f"remote: {filename}"], cwd=work)
     _git(["push", "origin", "main"], cwd=work)
-    shutil.rmtree(work)
+    _rmtree_best_effort(work)
 
 
 def test_flush_auto_rebases_when_push_is_non_fast_forward(
@@ -433,4 +447,142 @@ def test_pull_tracked_modified_blocks_without_force(tmp_path: Path, monkeypatch)
     assert result.get("action") == "dirty", result
     assert result.get("tracked_modified"), result
     # We did not move HEAD — the remote commit is NOT applied yet.
+    assert not (wiki_root / "remote-page.md").exists()
+
+
+def test_pull_share_tokens_hits_only_dirt_fast_forwards(
+    tmp_path: Path, monkeypatch
+):
+    """Hits-only dirt on ``.share-tokens.json`` must not block smart-pull.
+
+    Regression for the Force-reset modal that fired on every sync when
+    ``resolve()`` had rewritten hit counters into the tracked identity
+    file while the tenant was behind GitHub. Bookkeeping dirt is
+    discarded and the fast-forward proceeds; real WIP (see
+    ``test_pull_tracked_modified_blocks_without_force``) still blocks.
+    """
+    import json
+
+    bare = tmp_path / "remote.git"
+    bare.mkdir()
+    _init_bare(bare)
+
+    # Seed remote WITH a tracked .share-tokens.json (the durable mint
+    # path) so local hit bumps show up as tracked modifications.
+    token_record = {
+        "id": "abcd1234efgh",
+        "token_hash": "a" * 64,
+        "label": "Recruiter",
+        "tier": "recruiter",
+        "created_at": "2026-05-23T22:00:00+00:00",
+        "expires_at": None,
+        "revoked_at": None,
+        "hits": 0,
+        "last_used_at": None,
+    }
+    work = tmp_path / "_seed_share"
+    _git(["clone", str(bare), str(work)], cwd=tmp_path)
+    _git(["config", "user.email", "seed@test.local"], cwd=work)
+    _git(["config", "user.name", "seed"], cwd=work)
+    (work / "README.md").write_text("seed\n", encoding="utf-8")
+    (work / ".share-tokens.json").write_text(
+        json.dumps({"tokens": [token_record]}, indent=2),
+        encoding="utf-8",
+    )
+    _git(["add", "-A"], cwd=work)
+    _git(["commit", "-m", "seed with share tokens"], cwd=work)
+    _git(["push", "origin", "main"], cwd=work)
+    _rmtree_best_effort(work)
+
+    from app import persistence as _persistence
+
+    _patch_remote_url(monkeypatch, bare)
+    wiki_root = tmp_path / "tenant-prof"
+    tenant = _make_tenant("prof", wiki_root, bare)
+    _persistence.bootstrap_tenant(tenant)
+
+    _commit_remote_change(
+        bare, tmp_path, "remote-page.md", "# Remote\n\nNew content.\n"
+    )
+
+    # Simulate the old resolve() bookkeeping rewrite: same identity,
+    # bumped hits / last_used_at only.
+    dirty = dict(token_record)
+    dirty["hits"] = 7
+    dirty["last_used_at"] = "2026-07-12T08:00:00+00:00"
+    (wiki_root / ".share-tokens.json").write_text(
+        json.dumps({"tokens": [dirty]}, indent=2),
+        encoding="utf-8",
+    )
+
+    result = _persistence.pull_tenant_now(tenant)
+    assert result.get("ok") is True, result
+    assert result.get("action") == "pulled", result
+    assert result.get("discarded_share_token_hits") is True, result
+    assert (wiki_root / "remote-page.md").exists()
+
+
+def test_pull_share_tokens_substantive_mint_still_blocks(
+    tmp_path: Path, monkeypatch
+):
+    """A real uncommitted mint (new token id) must still return dirty."""
+    import json
+
+    bare = tmp_path / "remote.git"
+    bare.mkdir()
+    _init_bare(bare)
+
+    token_record = {
+        "id": "abcd1234efgh",
+        "token_hash": "a" * 64,
+        "label": "Recruiter",
+        "tier": "recruiter",
+        "created_at": "2026-05-23T22:00:00+00:00",
+        "expires_at": None,
+        "revoked_at": None,
+    }
+    work = tmp_path / "_seed_share2"
+    _git(["clone", str(bare), str(work)], cwd=tmp_path)
+    _git(["config", "user.email", "seed@test.local"], cwd=work)
+    _git(["config", "user.name", "seed"], cwd=work)
+    (work / "README.md").write_text("seed\n", encoding="utf-8")
+    (work / ".share-tokens.json").write_text(
+        json.dumps({"tokens": [token_record]}, indent=2),
+        encoding="utf-8",
+    )
+    _git(["add", "-A"], cwd=work)
+    _git(["commit", "-m", "seed with share tokens"], cwd=work)
+    _git(["push", "origin", "main"], cwd=work)
+    _rmtree_best_effort(work)
+
+    from app import persistence as _persistence
+
+    _patch_remote_url(monkeypatch, bare)
+    wiki_root = tmp_path / "tenant-prof"
+    tenant = _make_tenant("prof", wiki_root, bare)
+    _persistence.bootstrap_tenant(tenant)
+
+    _commit_remote_change(
+        bare, tmp_path, "remote-page.md", "# Remote\n\nNew content.\n"
+    )
+
+    # Uncommitted mint: add a second token — identity changed.
+    minted = dict(token_record)
+    new_token = {
+        "id": "newtoken0001",
+        "token_hash": "b" * 64,
+        "label": "Friend",
+        "tier": "friend",
+        "created_at": "2026-07-12T08:00:00+00:00",
+        "expires_at": None,
+        "revoked_at": None,
+    }
+    (wiki_root / ".share-tokens.json").write_text(
+        json.dumps({"tokens": [minted, new_token]}, indent=2),
+        encoding="utf-8",
+    )
+
+    result = _persistence.pull_tenant_now(tenant)
+    assert result.get("ok") is False, result
+    assert result.get("action") == "dirty", result
     assert not (wiki_root / "remote-page.md").exists()

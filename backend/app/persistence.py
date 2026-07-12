@@ -31,6 +31,7 @@ Render env-var panel like a secret store. Don't echo this URL into logs.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -1172,6 +1173,121 @@ def _split_porcelain_dirt(cwd: Path) -> tuple[list[str], list[str]]:
     return tracked, untracked
 
 
+# Paths whose only meaningful dirt is share-token hit bookkeeping.
+# ``.share-token-stats.json`` is gitignored in normal setups; included
+# so a mis-tracked sidecar never alone blocks a fast-forward.
+_SHARE_TOKEN_BOOKKEEPING_PATHS = frozenset(
+    {".share-tokens.json", ".share-token-stats.json"}
+)
+
+
+def _normalize_share_token_identity(raw: dict) -> dict:
+    """Identity fields used to decide whether share-token dirt is hits-only."""
+    return {
+        "id": raw.get("id"),
+        "token_hash": raw.get("token_hash"),
+        "label": raw.get("label"),
+        "tier": raw.get("tier"),
+        "created_at": raw.get("created_at"),
+        "expires_at": raw.get("expires_at"),
+        "revoked_at": raw.get("revoked_at"),
+    }
+
+
+def _share_token_records_identity_equal(head_raw: object, work_raw: object) -> bool:
+    """True when two ``.share-tokens.json`` payloads differ only in hits
+    / last_used_at (same token set and identity fields).
+    """
+
+    def _tokens(blob: object) -> list[dict]:
+        if not isinstance(blob, dict):
+            return []
+        tokens = blob.get("tokens", [])
+        if not isinstance(tokens, list):
+            return []
+        return [t for t in tokens if isinstance(t, dict)]
+
+    # Accept already-parsed dicts or JSON text.
+    def _parse(blob: object) -> object:
+        if isinstance(blob, (bytes, str)):
+            try:
+                return json.loads(blob)
+            except (TypeError, ValueError):
+                return None
+        return blob
+
+    head_tokens = _tokens(_parse(head_raw))
+    work_tokens = _tokens(_parse(work_raw))
+    if len(head_tokens) != len(work_tokens):
+        return False
+    head_by_id = {
+        str(t.get("id")): _normalize_share_token_identity(t) for t in head_tokens
+    }
+    work_by_id = {
+        str(t.get("id")): _normalize_share_token_identity(t) for t in work_tokens
+    }
+    if set(head_by_id) != set(work_by_id):
+        return False
+    return all(head_by_id[tid] == work_by_id[tid] for tid in head_by_id)
+
+
+def _is_share_tokens_hits_only_dirt(cwd: Path, tracked_paths: list[str]) -> bool:
+    """True when the only tracked dirt is share-token hit bookkeeping.
+
+    ``resolve()`` used to bump ``hits`` / ``last_used_at`` inside the
+    tracked ``.share-tokens.json``. That left a permanent ``[M]`` that
+    blocked every smart-pull while the tenant was behind GitHub — even
+    though no real wiki content had changed. Hits now live in a
+    gitignored sidecar, but older working trees (and any residual
+    tracked rewrite) can still show hits-only dirt; treat that as
+    disposable bookkeeping rather than authored edits.
+    """
+    if not tracked_paths:
+        return False
+    normalized: set[str] = set()
+    for p in tracked_paths:
+        if not p:
+            continue
+        path = p.replace("\\", "/")
+        while path.startswith("./"):
+            path = path[2:]
+        normalized.add(path)
+    if not normalized or not normalized.issubset(_SHARE_TOKEN_BOOKKEEPING_PATHS):
+        return False
+    # Sidecar-only dirt (if somehow tracked) is always bookkeeping.
+    if normalized == {".share-token-stats.json"}:
+        return True
+    if ".share-tokens.json" not in normalized:
+        return False
+
+    rc, head_out = _run_git(
+        ["show", "HEAD:.share-tokens.json"], cwd=cwd
+    )
+    if rc != 0:
+        # File not in HEAD — a brand-new uncommitted mint is substantive.
+        return False
+    work_path = cwd / ".share-tokens.json"
+    if not work_path.exists():
+        return False
+    try:
+        work_text = work_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return _share_token_records_identity_equal(head_out, work_text)
+
+
+def _discard_share_token_bookkeeping_dirt(cwd: Path) -> None:
+    """Reset tracked share-token bookkeeping files to HEAD.
+
+    Safe to call when dirt was already classified as hits-only: restores
+    ``.share-tokens.json`` so the subsequent FF merge is unblocked.
+    Sidecar checkout / cache-rm failures are ignored (normally untracked).
+    """
+    _run_git(["checkout", "--", ".share-tokens.json"], cwd=cwd)
+    _run_git(["checkout", "--", ".share-token-stats.json"], cwd=cwd)
+    _run_git(["rm", "--cached", "-f", ".share-token-stats.json"], cwd=cwd)
+
+
 def _commits_in_range(cwd: Path, rev_range: str, *, limit: int = 20) -> list[dict]:
     """Return ``git log --oneline <range>`` parsed into structured rows.
 
@@ -1499,16 +1615,28 @@ def pull_tenant_now(tenant: "Tenant", *, force: bool = False) -> dict:
 
     # behind > 0, ahead == 0 → a fast-forward is on the table.
     if tracked:
-        # Real authored edits live in the working tree. A FF would
-        # checkout over them. Make the user resolve (push via Sync now,
-        # or force to discard). This is the ONLY remaining "dirty" case.
-        result["error"] = (
-            f"Working tree has {len(tracked)} modified tracked file(s). "
-            "Hit 'Sync now' to push them first, or pull with force=true "
-            "to discard."
-        )
-        result["action"] = "dirty"
-        return result
+        # Hit-count bookkeeping on .share-tokens.json is not authored
+        # content — discard it and fall through to the same FF path as
+        # a clean tree. Real edits (other files, or a substantive mint
+        # that changed the token list) still block.
+        if _is_share_tokens_hits_only_dirt(root, tracked):
+            _discard_share_token_bookkeeping_dirt(root)
+            tracked, untracked = _split_porcelain_dirt(root)
+            result["tracked_modified"] = tracked
+            result["untracked"] = untracked
+            result["dirty"] = bool(tracked or untracked)
+            result["discarded_share_token_hits"] = True
+        if tracked:
+            # Real authored edits live in the working tree. A FF would
+            # checkout over them. Make the user resolve (push via Sync now,
+            # or force to discard). This is the ONLY remaining "dirty" case.
+            result["error"] = (
+                f"Working tree has {len(tracked)} modified tracked file(s). "
+                "Hit 'Sync now' to push them first, or pull with force=true "
+                "to discard."
+            )
+            result["action"] = "dirty"
+            return result
 
     # Clean OR untracked-only → auto fast-forward. Stray untracked files
     # on a mirror have nothing to protect, so they must never gate the

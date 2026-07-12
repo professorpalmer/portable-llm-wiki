@@ -276,6 +276,78 @@ def test_head_llm_handshake_succeeds(client):
     assert r2.status_code == 200
 
 
+def test_resolve_writes_sidecar_not_identity_store(client, owner_headers, wiki_root):
+    """resolve() must not rewrite tracked ``.share-tokens.json``.
+
+    Hit counters live in the gitignored ``.share-token-stats.json``
+    sidecar so every successful share-token use cannot leave permanent
+    tracked dirt that blocks smart-pull when the tenant is behind GitHub.
+    """
+    import hashlib
+    import json
+    import time
+    from pathlib import Path
+
+    from app import share_tokens
+
+    minted = _mint(client, owner_headers, "sidecar probe", "recruiter")
+    plaintext = minted["token"]
+    token_id = minted["id"]
+
+    identity = Path(wiki_root) / ".share-tokens.json"
+    assert identity.exists()
+    before_bytes = identity.read_bytes()
+    before_hash = hashlib.sha256(before_bytes).hexdigest()
+    before_mtime = identity.stat().st_mtime_ns
+    # Ensure mtime resolution can't falsely match after a rewrite.
+    time.sleep(0.02)
+
+    tier = share_tokens.resolve(plaintext)
+    assert tier == "recruiter"
+
+    after_bytes = identity.read_bytes()
+    assert hashlib.sha256(after_bytes).hexdigest() == before_hash
+    assert identity.stat().st_mtime_ns == before_mtime
+    assert after_bytes == before_bytes
+
+    stats_path = Path(wiki_root) / ".share-token-stats.json"
+    assert stats_path.exists()
+    stats = json.loads(stats_path.read_text(encoding="utf-8"))
+    assert token_id in stats
+    assert stats[token_id]["hits"] == 1
+    assert stats[token_id]["last_used_at"]
+
+    # Owner list merges sidecar hits into the public view.
+    listed = share_tokens.list_tokens()
+    matching = [t for t in listed if t["id"] == token_id]
+    assert len(matching) == 1
+    assert matching[0]["hits"] == 1
+    assert matching[0]["last_used_at"]
+
+
+def test_resolve_increments_sidecar_hits(client, owner_headers, wiki_root):
+    """Repeated resolves accumulate hits only in the sidecar."""
+    import json
+    from pathlib import Path
+
+    from app import share_tokens
+
+    minted = _mint(client, owner_headers, "hit counter", "friend")
+    plaintext = minted["token"]
+    token_id = minted["id"]
+
+    assert share_tokens.resolve(plaintext) == "friend"
+    assert share_tokens.resolve(plaintext) == "friend"
+    assert share_tokens.resolve(plaintext) == "friend"
+
+    stats = json.loads(
+        (Path(wiki_root) / ".share-token-stats.json").read_text(encoding="utf-8")
+    )
+    assert stats[token_id]["hits"] == 3
+    listed = [t for t in share_tokens.list_tokens() if t["id"] == token_id][0]
+    assert listed["hits"] == 3
+
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------

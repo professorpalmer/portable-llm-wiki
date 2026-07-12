@@ -228,10 +228,13 @@ def owner_headers(owner_token: str) -> dict[str, str]:
 
 @pytest.fixture(autouse=True)
 def _reset_share_tokens(wiki_root: Path):
-    """Each test starts with a clean share-token store."""
+    """Each test starts with a clean share-token store + stats sidecar."""
     store = wiki_root / ".share-tokens.json"
-    if store.exists():
-        store.unlink()
+    stats = wiki_root / ".share-token-stats.json"
+    for path in (store, stats):
+        if path.exists():
+            path.unlink()
     yield
-    if store.exists():
-        store.unlink()
+    for path in (store, stats):
+        if path.exists():
+            path.unlink()

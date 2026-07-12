@@ -25,6 +25,7 @@ backend/.lint-swarms.json
 
 # Wiki runtime state (when WIKI_ROOT points inside the repo, e.g. wiki-demo/)
 **/.share-tokens.json
+**/.share-token-stats.json
 **/.lint/
 
 # Node

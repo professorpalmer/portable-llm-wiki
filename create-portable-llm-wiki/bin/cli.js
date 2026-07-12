@@ -100,6 +100,7 @@ Thumbs.db
 .jobs.json
 .job-logs/
 .share-tokens.json
+.share-token-stats.json
 .persistence-state.json
 
 # Local secrets (if you ever drop a .env in here by mistake)
