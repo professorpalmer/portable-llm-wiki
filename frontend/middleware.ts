@@ -58,6 +58,14 @@ export function middleware(req: NextRequest) {
   const first = segments[0];
   if (!RESERVED_PAGE_SLUGS.has(first)) return NextResponse.next();
 
+  // Marionette handshake is intentionally bare: /connect/marionette?return=…
+  // &nonce=… (loopback handoff). Prefixing the Avery demo turns it into
+  // /avery/connect/marionette which has no page and 404s — breaking Connect
+  // from Marionette on Windows.
+  if (first === "connect" && (segments[1] || "") === "marionette") {
+    return NextResponse.next();
+  }
+
   // Bare reserved route → prefix with the demo tenant.
   const url = req.nextUrl.clone();
   url.pathname = `/${DEMO_TENANT}${pathname}`;
