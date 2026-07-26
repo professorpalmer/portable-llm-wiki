@@ -8,6 +8,12 @@ ordered newest-first.
 
 ## Unreleased
 
+- **Hosted Render OOM fix.** The background tenant-pull poller no longer
+  calls ``reload_index()`` (which warmed every connected wiki into RAM);
+  it ``invalidate_index()``s instead. Per-tenant WikiIndex objects are
+  now LRU-capped (`WIKI_INDEX_CACHE_MAX`, default 8; demo tenants pinned).
+  `/healthz` reports `rss_mb` + warm index counts. Hosted blueprint plan
+  bumped Starter → Standard (2 GB) after a 512 MiB OOM on 2026-07-26.
 - **Share-token hit counters no longer block GitHub smart-pull.**
   `resolve()` used to rewrite tracked `.share-tokens.json` on every
   successful use (bumping `hits` / `last_used_at` without a flush),

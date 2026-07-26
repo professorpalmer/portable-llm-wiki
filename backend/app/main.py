@@ -512,13 +512,42 @@ class PageReplaceRequest(BaseModel):
 # ---------- public, LLM-facing endpoints ----------
 
 
+def _rss_mb() -> float | None:
+    """Current process RSS in MiB, or None if unreadable.
+
+    Prefers ``/proc/self/status`` (Linux/Render containers). Falls back to
+    ``resource.getrusage`` which reports KB on Linux and bytes on macOS —
+    we only trust the Linux /proc path for the hosted memory signal.
+    """
+    try:
+        with open("/proc/self/status", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    kb = int(line.split()[1])
+                    return round(kb / 1024.0, 1)
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
 @app.get("/healthz")
 def healthz() -> dict:
-    return {
+    payload: dict = {
         "status": "ok",
         "wiki_root": str(settings.wiki_root),
         "page_count": len(index.all_pages()),
     }
+    rss = _rss_mb()
+    if rss is not None:
+        payload["rss_mb"] = rss
+    if not settings.single_tenant_mode:
+        try:
+            warm = _tenants.manager().indexed_tenant_ids()
+            payload["indexed_tenants"] = len(warm)
+            payload["indexed_tenant_ids"] = warm[:20]
+        except Exception:  # noqa: BLE001 — healthz must never 500
+            pass
+    return payload
 
 
 def _api_base_url() -> str:

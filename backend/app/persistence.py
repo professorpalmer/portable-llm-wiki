@@ -1688,9 +1688,12 @@ def smart_pull_all_tenants() -> dict:
     tenants is safe by construction — diverged / dirty tenants are left
     untouched for the owner to resolve.
 
-    Reloads the in-memory index for any tenant we actually moved on disk
-    so freshly-pulled pages are reachable on the very next request. Never
-    raises; returns a summary the caller can log.
+    Invalidates (does NOT reload) the in-memory index for any tenant we
+    actually moved on disk. The next real request rescans fresh pages.
+    We deliberately avoid ``reload_index()`` here: the background poller
+    runs across every connected tenant, and warming each corpus into RAM
+    is what pushed the hosted Render service past its memory limit.
+    Never raises; returns a summary the caller can log.
     """
     from . import tenants as _tenants
 
@@ -1723,8 +1726,7 @@ def smart_pull_all_tenants() -> dict:
             summary["pulled"] += 1
             summary["pulled_tenants"].append(tenant.id)
             try:
-                with _tenants.set_current_tenant(tenant):
-                    tenant.reload_index()
+                tenant.invalidate_index()
             except Exception:  # noqa: BLE001
                 pass
         elif res.get("ok") and action == "up_to_date":

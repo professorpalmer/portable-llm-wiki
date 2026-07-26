@@ -2305,6 +2305,78 @@ def test_smart_pull_all_tenants_skips_unconnected(multi_tenant_app, monkeypatch)
     assert "bob" not in summary.get("pulled_tenants", [])
 
 
+def test_smart_pull_all_tenants_invalidates_not_reloads(multi_tenant_app, monkeypatch):
+    """Background pull must NOT warm indexes into RAM.
+
+    ``reload_index`` after every poller fast-forward is what pinned every
+    connected tenant's corpus in memory until Render OOM-killed the
+    hosted service at 512 MiB. The poller should only invalidate.
+    """
+    from app import persistence
+
+    tenant = _setup_connected_tenant("alice")
+    _stub_pull_run_git(monkeypatch, behind=2, ahead=0, dirty=False)
+
+    # Warm the index first so we can prove invalidate clears it.
+    _ = tenant.index
+    assert tenant._index is not None
+
+    reload_count = {"n": 0}
+    invalidate_count = {"n": 0}
+    monkeypatch.setattr(
+        tenant, "reload_index", lambda: reload_count.__setitem__("n", reload_count["n"] + 1)
+    )
+    original_invalidate = tenant.invalidate_index
+
+    def spy_invalidate():
+        invalidate_count["n"] += 1
+        return original_invalidate()
+
+    monkeypatch.setattr(tenant, "invalidate_index", spy_invalidate)
+
+    summary = persistence.smart_pull_all_tenants()
+    assert summary["pulled"] >= 1
+    assert invalidate_count["n"] >= 1
+    assert reload_count["n"] == 0
+    assert tenant._index is None
+
+
+def test_index_cache_lru_evicts_cold_tenants(multi_tenant_app, monkeypatch):
+    """Only WIKI_INDEX_CACHE_MAX warm indexes stay resident; demos pin."""
+    from app import tenants as _tenants
+
+    monkeypatch.setenv("WIKI_INDEX_CACHE_MAX", "1")
+    mgr = _tenants.manager()
+    alice = mgr.require("alice")  # fixture marks alice is_demo=True
+    bob = mgr.require("bob")
+
+    # Cap=1 with alice (demo) already warm: loading bob reserves the
+    # only slot for the in-flight tenant after pinned demos → bob is
+    # protected during load, but a subsequent third-party eviction with
+    # no protect (or loading bob when alice fills the pin budget) drops
+    # non-demo cold entries. Warm alice first, then bob: bob stays
+    # (protected as the touch), alice stays (demo). Force a tight
+    # eviction that does not protect bob to prove non-demos drop.
+    _ = alice.index
+    _ = bob.index
+    assert alice._index is not None
+    # Explicit eviction with no protect: cap=1, alice pinned → bob gone.
+    dropped = mgr.evict_cold_indexes()
+    assert bob._index is None
+    assert alice._index is not None  # demo pinned
+    assert dropped >= 1
+
+
+def test_invalidate_index_drops_cache(multi_tenant_app):
+    from app import tenants as _tenants
+
+    alice = _tenants.manager().require("alice")
+    _ = alice.index
+    assert alice._index is not None
+    alice.invalidate_index()
+    assert alice._index is None
+
+
 # ---------------------------------------------------------------------------
 # POST /hooks/github — instant local→hosted propagation webhook
 # ---------------------------------------------------------------------------

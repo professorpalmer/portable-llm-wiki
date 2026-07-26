@@ -19,8 +19,9 @@
 #
 # A) HOSTED MULTI-TENANT (this is what powers portablellm.wiki).
 #    SINGLE_TENANT_MODE=0. Many users, each with their own wiki under
-#    TENANTS_ROOT=/app/tenants. This shape REQUIRES the Starter plan +
-#    the persistent Disk configured below, because every tenant's wiki
+#    TENANTS_ROOT=/app/tenants. This shape REQUIRES the Standard plan
+#    (2 GB RAM — Starter's 512 MiB OOMs under multi-tenant index load)
+#    + the persistent Disk configured below, because every tenant's wiki
 #    (and the registry that maps a GitHub login → its content) lives on
 #    that disk. Without the disk, a cold start / redeploy wipes every
 #    tenant and each user has to re-log-in to re-hydrate from GitHub.
@@ -47,11 +48,13 @@ services:
   - type: web
     name: portable-llm-wiki-backend
     runtime: docker
-    # Starter ($7/mo) is REQUIRED for the hosted multi-tenant shape (A)
-    # because Render Disks (below) are unavailable on the free plan.
+    # Standard ($25/mo, 2 GB RAM) is REQUIRED for the hosted multi-tenant
+    # shape (A): every tenant wiki index holds page bodies in RAM, and
+    # Starter's 512 MiB ceiling OOM-killed portablellm.wiki in production
+    # (2026-07-26). Render Disks are also unavailable on the free plan.
     # Single-tenant OSS self-hosters: change to `free` and delete the
     # `disk:` block — see "TWO DEPLOY SHAPES" in the header above.
-    plan: starter
+    plan: standard
     region: oregon
     dockerfilePath: ./backend/Dockerfile
     dockerContext: .

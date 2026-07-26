@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -42,6 +43,19 @@ from .config import settings
 
 if TYPE_CHECKING:
     from .wiki import WikiIndex
+
+
+# Cap how many per-tenant WikiIndex objects we keep warm. Each index holds
+# every page body in RAM; on a 512 MiB Render Starter box, loading every
+# tenant that ever got a request (or a background pull) eventually OOMs
+# the service. Demo tenants are pinned; everyone else is LRU-evicted.
+# Override via WIKI_INDEX_CACHE_MAX (0 = unlimited, for local debugging).
+def _index_cache_max() -> int:
+    raw = (os.environ.get("WIKI_INDEX_CACHE_MAX") or "8").strip()
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 8
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +99,8 @@ class Tenant:
     _index_lock: threading.RLock = field(
         default_factory=threading.RLock, repr=False, compare=False
     )
+    # Monotonic timestamp of last index access; drives LRU eviction.
+    _index_accessed_at: float = field(default=0.0, repr=False, compare=False)
 
     @property
     def wiki_dir(self) -> Path:
@@ -104,6 +120,13 @@ class Tenant:
         if self._index is None:
             with self._index_lock:
                 if self._index is None:
+                    # Make room before loading so a cold miss can't push
+                    # RSS over the edge, and so eviction never drops the
+                    # index we are about to return.
+                    try:
+                        _manager.evict_cold_indexes(protect=self.id)
+                    except Exception:  # noqa: BLE001
+                        pass
                     from .wiki import WikiIndex
 
                     idx = WikiIndex()
@@ -115,6 +138,13 @@ class Tenant:
                     finally:
                         current_tenant_var.reset(token)
                     self._index = idx
+        self._index_accessed_at = time.monotonic()
+        # Touch path: drop someone colder than us if we're over the cap.
+        try:
+            _manager.evict_cold_indexes(protect=self.id)
+        except Exception:  # noqa: BLE001 — never fail a read on LRU bookkeeping
+            pass
+        assert self._index is not None
         return self._index
 
     def reload_index(self) -> None:
@@ -125,6 +155,20 @@ class Tenant:
             idx.reload()
         finally:
             current_tenant_var.reset(token)
+
+    def invalidate_index(self) -> None:
+        """Drop the cached WikiIndex so the next access rescans disk.
+
+        Prefer this over :meth:`reload_index` on background sync paths
+        (poller, bulk pull). ``reload_index`` warms the full corpus into
+        RAM and — without eviction — every connected tenant eventually
+        stays resident, which is what OOM-killed the hosted Render
+        service at 512 MiB. Invalidating keeps disk fresh without
+        pinning memory until a real request needs the pages.
+        """
+        with self._index_lock:
+            self._index = None
+            self._index_accessed_at = 0.0
 
     def to_dict(self) -> dict:
         """Serializable summary (no token, no internal state).
@@ -317,6 +361,57 @@ class TenantManager:
         if not self._loaded:
             self.load_from_disk()
         return [t for tid, t in self._tenants.items() if tid != self._default_tenant_id]
+
+    def indexed_tenant_ids(self) -> list[str]:
+        """Ids of tenants that currently hold a warm WikiIndex in RAM.
+
+        Used by ``/healthz`` memory diagnostics. Does not trigger loads.
+        """
+        if not self._loaded:
+            return []
+        return sorted(
+            tid
+            for tid, t in self._tenants.items()
+            if t._index is not None and tid != self._default_tenant_id
+        )
+
+    def evict_cold_indexes(self, *, protect: Optional[str] = None) -> int:
+        """Drop the least-recently-used warm indexes above the cache cap.
+
+        Demo tenants (``is_demo``) are never evicted — Avery is the public
+        landing-page wiki and must stay hot. ``protect`` is the tenant id
+        currently being loaded/touched and is also never dropped mid-
+        request. Returns the number of indexes dropped. No-op when
+        ``WIKI_INDEX_CACHE_MAX=0`` (unlimited).
+        """
+        cap = _index_cache_max()
+        if cap <= 0:
+            return 0
+        with self._lock:
+            loaded = [
+                t
+                for tid, t in self._tenants.items()
+                if t._index is not None and tid != self._default_tenant_id
+            ]
+            # Reserve a slot for a protect id that is about to load cold,
+            # so eviction runs *before* assignment still makes room.
+            reserve = 1 if protect and not any(t.id == protect for t in loaded) else 0
+            if len(loaded) + reserve <= cap:
+                return 0
+            # Pin demos + the in-flight tenant; among the rest, keep MRU.
+            pinned = [t for t in loaded if t.is_demo or t.id == protect]
+            evictable = [t for t in loaded if not t.is_demo and t.id != protect]
+            keep_n = max(0, cap - len(pinned) - reserve)
+            evictable.sort(key=lambda t: t._index_accessed_at, reverse=True)
+            victims = evictable[keep_n:]
+            dropped = 0
+            for t in victims:
+                with t._index_lock:
+                    if t._index is not None:
+                        t._index = None
+                        t._index_accessed_at = 0.0
+                        dropped += 1
+            return dropped
 
     # ---------- mutation ----------
 
