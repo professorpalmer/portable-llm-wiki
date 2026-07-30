@@ -8,6 +8,14 @@ ordered newest-first.
 
 ## Unreleased
 
+- **Hosted personal-LLM tokens are headless owner credentials.** Private-tier
+  tokens minted from Owner → Personal LLM URL (`/<tenant>/llm?t=…`) now
+  resolve to `viewer_is_owner=true`, so Cursor/Marionette MCP can
+  `ingest_source` / capture without the platform `OWNER_TOKEN` env var
+  (which only the site operator has). Recruiter/friend share tokens stay
+  read-only. Frontend also proxies `/:tenant/owner/*` to the API so MCP
+  clients using `WIKI_BASE_URL=https://portablellm.wiki/<tenant>` no
+  longer get Next.js HTML 404s on write routes. Connect docs updated.
 - **Hosted Render OOM fix.** The background tenant-pull poller no longer
   calls ``reload_index()`` (which warmed every connected wiki into RAM);
   it ``invalidate_index()``s instead. Per-tenant WikiIndex objects are

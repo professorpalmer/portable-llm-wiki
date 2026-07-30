@@ -46,6 +46,15 @@ const nextConfig = {
         source: "/:tenant/wiki/:path*",
         destination: `${backend}/t/:tenant/wiki/:path*`,
       },
+      // Owner write/API paths (ingest, capture, reload, share-tokens).
+      // MCP clients set WIKI_BASE_URL=https://portablellm.wiki/<tenant>
+      // and POST /owner/* — without this rewrite those hit Next.js HTML
+      // 404s. App-router pages under /[tenant]/owner (exact) still win
+      // for the Owner console UI; /owner/<subpath> has no page match.
+      {
+        source: "/:tenant/owner/:path*",
+        destination: `${backend}/t/:tenant/owner/:path*`,
+      },
       {
         source: "/:tenant/.well-known/:path*",
         destination: `${backend}/t/:tenant/.well-known/:path*`,

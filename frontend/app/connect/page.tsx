@@ -144,13 +144,17 @@ export default function ConnectPage() {
 // ---------------------------------------------------------------------------
 
 function MCPInstallSteps({ clientName, url }: { clientName: string; url: string }) {
+  // Hosted users never hold the platform OWNER_TOKEN. The credential they
+  // paste is the Personal LLM URL token from Owner → Personal LLM URL
+  // (…/llm?t=<token>). That private-tier token is the headless owner key.
   const config = `{
   "mcpServers": {
     "portable-llm-wiki": {
       "command": "npx",
       "args": ["-y", "portable-llm-wiki-mcp"],
       "env": {
-        "WIKI_BASE_URL": "${url}"
+        "WIKI_BASE_URL": "${url}",
+        "WIKI_OWNER_TOKEN": "<paste token from Owner → Personal LLM URL>"
       }
     }
   }
@@ -191,7 +195,12 @@ function MCPInstallSteps({ clientName, url }: { clientName: string; url: string 
             <CodeBlock code={config} />
             <div className="mt-2 text-xs">
               <code>npx</code> downloads the MCP server from npm on first run
-              and caches it. No <code>npm install</code> needed.
+              and caches it. No <code>npm install</code> needed. For{" "}
+              <strong>private reads + ingest</strong>, mint a Personal LLM URL
+              under Owner console and paste only the <code>?t=</code> token
+              into <code>WIKI_OWNER_TOKEN</code> (not a recruiter/friend share
+              link). Self-hosters can paste the backend{" "}
+              <code>OWNER_TOKEN</code> env var instead.
             </div>
           </>
         }

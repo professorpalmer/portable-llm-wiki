@@ -23,6 +23,10 @@
 // goes into 1Password (or wherever), gets pasted into each LLM tool
 // once, and persists across sessions until revoked.
 //
+// Auth: private-tier tokens resolve to is_owner=True so MCP ingest /
+// capture work for hosted users without the platform OWNER_TOKEN
+// (Render env — operator-only). Recruiter/friend stay read-only.
+//
 // Why this panel is separate from ShareTokensPanel:
 //   * Different INTENT. Share tokens are "give a stranger a slice of
 //     my wiki"; personal tokens are "give MYSELF the master key for

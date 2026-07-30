@@ -112,6 +112,27 @@ def _session_owner_viewer(request: Request | None) -> Optional[Viewer]:
     return Viewer(tier="private", is_owner=True, label=f"@{login}")
 
 
+def _viewer_from_share_tier(tier: str) -> Viewer:
+    """Map a resolved share-token tier to a Viewer.
+
+    ``private`` share tokens are the hosted **Personal LLM URL** credential
+    (minted only from PersonalLlmUrlPanel — the Share Tokens UI does not
+    offer private). Hosted users paste that ``?t=`` token into Cursor /
+    ChatGPT / Marionette; it is the headless owner key for their tenant.
+    Recruiter/friend tokens stay read-only at their tier.
+
+    The static OSS ``OWNER_TOKEN`` env var is a separate path (label
+    ``"owner"``) and is unaffected.
+    """
+    if tier == "private":
+        return Viewer(
+            tier="private",
+            is_owner=True,
+            label="private (personal LLM)",
+        )
+    return Viewer(tier=tier, is_owner=False, label=f"{tier} (share)")
+
+
 def viewer_from_header(authorization: str | None) -> Viewer:
     if not authorization:
         return PUBLIC_VIEWER
@@ -124,7 +145,7 @@ def viewer_from_header(authorization: str | None) -> Viewer:
     # Static SHARE_TOKENS env var (legacy v0 mechanism)
     tiers = _share_tokens()
     if token in tiers:
-        return Viewer(tier=tiers[token], is_owner=False, label=f"{tiers[token]} (share)")
+        return _viewer_from_share_tier(tiers[token])
     # Persistent mintable share tokens
     try:
         from .share_tokens import resolve as resolve_persistent
@@ -133,11 +154,7 @@ def viewer_from_header(authorization: str | None) -> Viewer:
     except Exception:  # noqa: BLE001 — never let auth fail closed on store errors
         persistent_tier = None
     if persistent_tier:
-        return Viewer(
-            tier=persistent_tier,
-            is_owner=False,
-            label=f"{persistent_tier} (share)",
-        )
+        return _viewer_from_share_tier(persistent_tier)
     return PUBLIC_VIEWER
 
 
@@ -158,7 +175,9 @@ def current_viewer(
          an owner audit their wiki from inside a logged-in browser).
       3. ``X-Share-Token: <token>`` — fallback for clients/proxies
          that strip or rewrite the Authorization header. Resolved the
-         same way as a bearer share token; can never grant owner-tier.
+         same way as a bearer share token. Private personal-LLM tokens
+         elevate to owner; the static OSS ``OWNER_TOKEN`` does not via
+         this header.
 
     Supports ``X-Preview-As: public|recruiter|friend`` for audit
     preview — honored only when the resolved viewer is the actual owner.
@@ -175,10 +194,13 @@ def current_viewer(
             real = session_owner
 
     # X-Share-Token fallback: only consult if NO non-public viewer
-    # resolved above. Share tokens can never escalate to owner.
+    # resolved above. Personal-LLM private tokens (is_owner via share
+    # tier) are allowed — that is the headless hosted write path.
+    # The static OSS OWNER_TOKEN (label ``"owner"``) is still rejected
+    # on this header so a misconfigured proxy cannot smuggle it.
     if real.tier == "public" and not real.is_owner and x_share_token:
         candidate = viewer_from_header(f"Bearer {x_share_token.strip()}")
-        if not candidate.is_owner:
+        if candidate.label != "owner":
             real = candidate
 
     if not real.is_owner or not x_preview_as:
@@ -201,15 +223,19 @@ def require_owner(
 ) -> Viewer:
     """Gate for write operations.
 
-    Owner-only routes accept two auth signals, checked in order:
+    Owner-only routes accept these auth signals, checked in order:
 
       1. ``Authorization: Bearer <OWNER_TOKEN>`` — the OSS / self-host
-         path. Anyone with the static env-var token is the owner.
-      2. Session cookie pointing at this tenant — the hosted multi-
-         tenant path. GitHub-authenticated users are owners of their
-         own tenant; no bearer token in localStorage required.
+         path (static env-var token).
+      2. ``Authorization: Bearer <private personal-LLM token>`` — the
+         hosted headless path. Tokens minted from PersonalLlmUrlPanel
+         (``?t=`` on ``/<tenant>/llm``) resolve to owner so Cursor /
+         ChatGPT / Marionette can ingest without the platform env var.
+      3. Session cookie pointing at this tenant — the hosted browser
+         path. GitHub-authenticated users are owners of their own
+         tenant; no bearer token in localStorage required.
 
-    Either path produces an owner ``Viewer``. ``X-Preview-As`` is
+    Any of these produces an owner ``Viewer``. ``X-Preview-As`` is
     ignored — preview never grants write access, and it never blocks
     a real owner from doing owner-only operations.
     """

@@ -914,14 +914,14 @@ def _viewer_for_url_token(
     """Resolve a viewer for the LLM-handshake endpoints, where the share
     token may be carried in a ``?t=`` query parameter instead of a header.
 
-    Order of precedence (most-privileged wins, but share token CANNOT
-    escalate to owner):
-      1. Authorization: Bearer <owner-token>
-      2. X-Share-Token: <token>
-      3. ?t=<token>
+    Order of precedence:
+      1. Authorization: Bearer <owner-token or personal-LLM token>
+      2. X-Share-Token / ``?t=`` — recruiter/friend read tiers, OR a
+         private personal-LLM token (hosted headless owner). The static
+         OSS ``OWNER_TOKEN`` is rejected on URL/header-share transports
+         so it cannot be smuggled via ``?t=``.
 
-    Mirrors the same rule as ``auth.current_viewer`` — the URL-borne token
-    is treated equivalently to the header form.
+    Mirrors ``auth.current_viewer``'s share-token rules.
     """
     from .auth import viewer_from_header
 
@@ -935,7 +935,9 @@ def _viewer_for_url_token(
         candidate_token = t.strip()
     if candidate_token:
         candidate = viewer_from_header(f"Bearer {candidate_token}")
-        if not candidate.is_owner:
+        # Allow personal-LLM private tokens (is_owner). Reject the
+        # static OSS OWNER_TOKEN (label ``"owner"``) on this transport.
+        if candidate.label != "owner":
             return candidate
     return real
 
@@ -1060,12 +1062,30 @@ def llm_handshake(
     # presented — if they came in with a token, echo it back so the LLM
     # uses the SAME token for subsequent calls (saves a round-trip).
     if viewer.is_owner:
-        auth_block = (
-            "## Auth\n\n"
-            "**You are connected as the wiki owner.** Use header\n"
-            "`Authorization: Bearer <OWNER_TOKEN>` on all requests. You have\n"
-            "read-write access to every tier and every endpoint.\n"
-        )
+        if viewer.label == "private (personal LLM)" or (
+            t and t.strip() and viewer.tier == "private"
+        ):
+            # Hosted Personal LLM URL (?t=) — tell the model to reuse that
+            # token, not a platform OWNER_TOKEN the user never sees.
+            auth_block = (
+                "## Auth\n\n"
+                "**You are connected as the wiki owner** via a Personal LLM\n"
+                "URL token. Reuse the same token from the URL you fetched\n"
+                "(`?t=<token>`) on all subsequent requests:\n\n"
+                "```\n"
+                "Authorization: Bearer <the token from the URL you just fetched>\n"
+                "```\n\n"
+                "You have read-write access to every tier and every endpoint\n"
+                "(including `/owner/ingest` and capture). Do not share this\n"
+                "token outside this conversation.\n"
+            )
+        else:
+            auth_block = (
+                "## Auth\n\n"
+                "**You are connected as the wiki owner.** Use header\n"
+                "`Authorization: Bearer <OWNER_TOKEN>` on all requests. You have\n"
+                "read-write access to every tier and every endpoint.\n"
+            )
     elif (t and t.strip()) or (x_share_token and x_share_token.strip()):
         # Share-token holder. Don't include the literal token in the response
         # (which gets logged everywhere); tell the LLM to reuse the same

@@ -126,10 +126,12 @@ def test_mint_private_tier_succeeds_and_grants_full_read(client, owner_headers):
     assert r.status_code == 200
     data = r.json()
     assert data["viewer_tier"] == "private"
-    # The viewer is_owner stays False — a private-tier share token
-    # grants full READ but never WRITE. This is intentional: a leaked
-    # personal LLM URL should not let the holder mutate the wiki.
-    assert data["viewer_is_owner"] is False
+    # Hosted personal-LLM tokens ARE the headless owner credential.
+    # Users paste /<tenant>/llm?t=… into Cursor/Marionette; they must
+    # be able to ingest without the platform OWNER_TOKEN env var
+    # (which only the site operator has). Recruiter/friend stay
+    # read-only at their tier.
+    assert data["viewer_is_owner"] is True
     slugs = {p["slug"] for p in data["pages"]}
     assert {
         "public-entity",
@@ -149,34 +151,46 @@ def test_private_share_token_via_query_param_on_llm_endpoint(client, owner_heade
     r = client.get(f"/llm?t={plaintext}")
     assert r.status_code == 200
     body = r.text
-    # The handshake's Auth block names the resolved viewer tier
-    # verbatim; this is the deterministic place to assert tier
-    # resolution succeeded. Checking for slugs in the markdown body is
-    # brittle because the handshake intentionally lists titles (not
-    # slugs) and only ~4 per type, so a low-prominence private page
-    # might not appear.
-    assert "**private** tier" in body
+    # Personal LLM tokens are headless owner — handshake must say so and
+    # tell the model to reuse the ?t= token (not a platform OWNER_TOKEN).
+    assert "connected as the wiki owner" in body.lower()
+    assert "Personal LLM" in body or "?t=" in body
     # Cross-check via the manifest endpoint: same token via header
-    # form must also see the private-tier page.
+    # form must also see the private-tier page and be owner.
     r2 = client.get(
         "/wiki/manifest.json",
         headers={"Authorization": f"Bearer {plaintext}"},
     )
-    slugs = {p["slug"] for p in r2.json()["pages"]}
+    data = r2.json()
+    assert data["viewer_is_owner"] is True
+    slugs = {p["slug"] for p in data["pages"]}
     assert "private-entity" in slugs
 
 
-def test_private_share_token_cannot_write(client, owner_headers):
-    """Hardening: a leaked personal-LLM-URL token must not be able to
-    mutate the wiki even though it can read everything. The viewer it
-    resolves to has tier='private' but is_owner=False — owner-gated
-    routes (require_owner) must reject it."""
+def test_private_share_token_can_write(client, owner_headers):
+    """Personal-LLM private tokens must satisfy require_owner.
+
+    Hosted users never see the Render OWNER_TOKEN — they mint a
+    private ``?t=`` URL and paste it into MCP. That token is the
+    write credential for their tenant. Recruiter/friend tokens must
+    still fail this path (covered elsewhere).
+    """
     plaintext = _mint(client, owner_headers, "Claude mobile", "private")["token"]
-    # Mint another share-token using the private token as auth — would
-    # be a privilege escalation if it succeeded.
     r = client.post(
         "/owner/share-tokens",
-        json={"label": "should fail", "tier": "recruiter"},
+        json={"label": "via-personal-llm", "tier": "recruiter"},
+        headers={"Authorization": f"Bearer {plaintext}"},
+    )
+    assert r.status_code in (200, 201), r.text
+    assert r.json()["tier"] == "recruiter"
+
+
+def test_recruiter_share_token_still_cannot_write(client, owner_headers):
+    """Recruiter/friend share tokens remain read-only."""
+    plaintext = _mint(client, owner_headers, "Acme recruiter", "recruiter")["token"]
+    r = client.post(
+        "/owner/share-tokens",
+        json={"label": "should fail", "tier": "friend"},
         headers={"Authorization": f"Bearer {plaintext}"},
     )
     assert r.status_code in (401, 403)
