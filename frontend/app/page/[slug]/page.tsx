@@ -246,7 +246,7 @@ export default function PageView() {
             />
             {showPreview && (
               <div className="min-h-[60vh] border border-paper-soft rounded p-3 bg-paper-soft/40 overflow-y-auto">
-                <Markdown>{stripFrontmatter(editMarkdown)}</Markdown>
+                <Markdown tenant={tenant}>{stripFrontmatter(editMarkdown)}</Markdown>
               </div>
             )}
           </div>
@@ -256,7 +256,7 @@ export default function PageView() {
           </div>
         </section>
       ) : (
-        <Markdown>{page.rendered_body || page.body}</Markdown>
+        <Markdown tenant={tenant}>{page.rendered_body || page.body}</Markdown>
       )}
 
       {(page.links_out_resolved.length > 0 || page.links_in_resolved.length > 0) && (

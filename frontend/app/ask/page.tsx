@@ -326,7 +326,7 @@ function TurnBubble({ turn, tenant }: { turn: Turn; tenant?: string }) {
     <div className="flex justify-start">
       <div className="max-w-full sm:max-w-[92%] w-full">
         <div className="bg-white border border-paper-soft rounded-2xl rounded-bl-md px-4 py-3">
-          <Markdown>{turn.content}</Markdown>
+          <Markdown tenant={tenant}>{turn.content}</Markdown>
         </div>
 
         <div className="mt-1.5 px-1 flex items-center gap-3 text-[11px] text-ink-muted">

@@ -1,3 +1,5 @@
+import { buildHostedRewrites } from "./lib/hostedRewrites.mjs";
+
 /** @type {import('next').NextConfig} */
 const backend = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 const hosted = process.env.NEXT_PUBLIC_HOSTED_MODE === "1";
@@ -36,30 +38,7 @@ const nextConfig = {
     //
     // The /[tenant]/llm and /[tenant]/llms.txt paths don't have
     // corresponding app-router pages, so rewrites win and proxy them.
-    const hostedRewrites = [
-      { source: "/:tenant/llm", destination: `${backend}/t/:tenant/llm` },
-      { source: "/:tenant/llms.txt", destination: `${backend}/t/:tenant/llms.txt` },
-      // Per-tenant manifests + chat APIs that LLMs may follow up with
-      // after reading the handshake. Keep the same shape so the
-      // handshake markdown points to "real" URLs that work.
-      {
-        source: "/:tenant/wiki/:path*",
-        destination: `${backend}/t/:tenant/wiki/:path*`,
-      },
-      // Owner write/API paths (ingest, capture, reload, share-tokens).
-      // MCP clients set WIKI_BASE_URL=https://portablellm.wiki/<tenant>
-      // and POST /owner/* — without this rewrite those hit Next.js HTML
-      // 404s. App-router pages under /[tenant]/owner (exact) still win
-      // for the Owner console UI; /owner/<subpath> has no page match.
-      {
-        source: "/:tenant/owner/:path*",
-        destination: `${backend}/t/:tenant/owner/:path*`,
-      },
-      {
-        source: "/:tenant/.well-known/:path*",
-        destination: `${backend}/t/:tenant/.well-known/:path*`,
-      },
-    ];
+    const hostedRewrites = buildHostedRewrites(backend);
 
     return [...baseRewrites, ...(hosted ? hostedRewrites : singleTenantRewrites)];
   },
