@@ -162,6 +162,9 @@ def test_clone_into_repo_with_existing_gitignore_appends_tenant_rule(
     assert any(
         line.strip() == "tenant.json" for line in gi_text.splitlines()
     ), f"tenant.json must be gitignored after bootstrap; got:\n{gi_text}"
+    assert any(
+        line.strip() == ".share-token-stats.json" for line in gi_text.splitlines()
+    ), f"share-token stats must be gitignored after bootstrap; got:\n{gi_text}"
 
 
 def test_clone_already_has_tenant_json_rule_no_duplicate_append(
@@ -195,6 +198,15 @@ def test_clone_already_has_tenant_json_rule_no_duplicate_append(
     assert len(matches) == 1, (
         f"tenant.json rule should appear exactly once, found {len(matches)} "
         f"in:\n{gi_text}"
+    )
+    stats_matches = [
+        line
+        for line in gi_text.splitlines()
+        if line.strip() == ".share-token-stats.json"
+    ]
+    assert len(stats_matches) == 1, (
+        "share-token stats rule should appear exactly once, "
+        f"found {len(stats_matches)} in:\n{gi_text}"
     )
 
 
@@ -520,6 +532,83 @@ def test_pull_share_tokens_hits_only_dirt_fast_forwards(
     assert result.get("action") == "pulled", result
     assert result.get("discarded_share_token_hits") is True, result
     assert (wiki_root / "remote-page.md").exists()
+
+
+def test_pull_share_token_stats_sidecar_fast_forwards(
+    tmp_path: Path, monkeypatch
+):
+    """Tracked ``.share-token-stats.json`` with newer local counters must not block smart-pull.
+
+    Regression for hosted mirrors where a legacy tracked stats sidecar left
+    permanent ``[M]`` dirt while the tenant was behind GitHub. Classification
+    must treat it as disposable bookkeeping, the pull must fast-forward without
+    force, local hit counters must survive, and no staged index change may
+    remain for the sidecar path.
+    """
+    import json
+
+    bare = tmp_path / "remote.git"
+    bare.mkdir()
+    _init_bare(bare)
+
+    token_id = "abcd1234efgh"
+    stats_head = {
+        token_id: {"hits": 1, "last_used_at": "2026-05-23T22:00:00+00:00"}
+    }
+    work = tmp_path / "_seed_stats"
+    _git(["clone", str(bare), str(work)], cwd=tmp_path)
+    _git(["config", "user.email", "seed@test.local"], cwd=work)
+    _git(["config", "user.name", "seed"], cwd=work)
+    (work / "README.md").write_text("seed\n", encoding="utf-8")
+    (work / ".share-token-stats.json").write_text(
+        json.dumps(stats_head, indent=2),
+        encoding="utf-8",
+    )
+    _git(["add", "-A"], cwd=work)
+    _git(["commit", "-m", "seed with tracked stats sidecar"], cwd=work)
+    _git(["push", "origin", "main"], cwd=work)
+    _rmtree_best_effort(work)
+
+    from app import persistence as _persistence
+
+    _patch_remote_url(monkeypatch, bare)
+    wiki_root = tmp_path / "tenant-prof"
+    tenant = _make_tenant("prof", wiki_root, bare)
+    _persistence.bootstrap_tenant(tenant)
+
+    _commit_remote_change(
+        bare, tmp_path, "remote-page.md", "# Remote\n\nNew content.\n"
+    )
+
+    stats_local = {
+        token_id: {"hits": 42, "last_used_at": "2026-07-12T08:00:00+00:00"}
+    }
+    stats_path = wiki_root / ".share-token-stats.json"
+    stats_path.write_text(json.dumps(stats_local, indent=2), encoding="utf-8")
+
+    classification = _persistence.classify_pull_safety(tenant)
+    assert classification.get("ok") is True, classification
+    assert classification.get("auto_ff") is True, classification
+    assert classification.get("tracked_modified") == [], classification
+
+    result = _persistence.pull_tenant_now(tenant)
+    assert result.get("ok") is True, result
+    assert result.get("action") == "pulled", result
+    assert result.get("discarded_share_token_hits") is True, result
+    assert (wiki_root / "remote-page.md").exists()
+
+    saved = json.loads(stats_path.read_text(encoding="utf-8"))
+    assert saved[token_id]["hits"] == 42
+    assert saved[token_id]["last_used_at"] == "2026-07-12T08:00:00+00:00"
+
+    rc, porcelain = _persistence._run_git(["status", "--porcelain"], cwd=wiki_root)
+    assert rc == 0
+    assert ".share-token-stats.json" not in porcelain
+    rc_cached, cached_diff = _persistence._run_git(
+        ["diff", "--cached", "--", ".share-token-stats.json"], cwd=wiki_root
+    )
+    assert rc_cached == 0
+    assert not cached_diff.strip()
 
 
 def test_pull_share_tokens_substantive_mint_still_blocks(
