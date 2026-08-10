@@ -111,6 +111,51 @@ def _require_session_user(request: Request) -> dict:
     return u
 
 
+def _owner_viewer_from_headers(request: Request):
+    """Resolve a personal-LLM / OSS owner Viewer from Bearer or X-Share-Token.
+
+    Session cookies are handled separately by ``_session_user``. This path
+    exists so headless clients (Marionette, Cursor with a Personal LLM URL
+    token) can drive destructive sync recovery without a browser session.
+    """
+    from . import auth as _auth
+
+    authorization = request.headers.get("authorization")
+    viewer = _auth.viewer_from_header(authorization)
+    if viewer.is_owner:
+        return viewer
+    x_share = request.headers.get("x-share-token")
+    if x_share:
+        viewer = _auth.viewer_from_header(f"Bearer {x_share}")
+        if viewer.is_owner:
+            return viewer
+    return None
+
+
+def _require_sync_tenant(request: Request) -> tenants.Tenant:
+    """Tenant the caller is allowed to sync — session owner OR personal LLM token.
+
+    Sync endpoints historically required a GitHub OAuth session cookie. That
+    blocked recovery when history diverged and the only credential on hand
+    was a Personal LLM URL (private share token). Accept either:
+
+    1. Signed-in session whose ``tenant_id`` matches the caller's wiki.
+    2. Owner-elevating token (private personal-LLM share token, scoped by
+       ``TenantPrefixMiddleware`` to the URL tenant via ``settings.wiki_root``).
+    """
+    user = _session_user(request)
+    if user is not None:
+        return tenants.manager().require(user["tenant_id"])
+
+    if _owner_viewer_from_headers(request) is None:
+        raise HTTPException(status_code=401, detail="not signed in")
+
+    current = tenants.current_tenant_or_none()
+    if current is None:
+        raise HTTPException(status_code=401, detail="not signed in")
+    return current
+
+
 def _default_return_to() -> str:
     """Where to send the user when ``return_to`` is missing or rejected.
 
@@ -1639,8 +1684,7 @@ async def _register_push_webhook_best_effort(
 def owner_sync_status(request: Request) -> dict:
     """Read-only snapshot of the tenant's sync state for the owner panel."""
     _require_hosted_mode()
-    user = _require_session_user(request)
-    tenant = tenants.manager().require(user["tenant_id"])
+    tenant = _require_sync_tenant(request)
     return persistence.get_tenant_status(tenant)
 
 
@@ -1653,8 +1697,7 @@ def owner_sync_now(request: Request) -> dict:
     instead of waiting for the debounce window.
     """
     _require_hosted_mode()
-    user = _require_session_user(request)
-    tenant = tenants.manager().require(user["tenant_id"])
+    tenant = _require_sync_tenant(request)
     if not tenant.gh_repo:
         raise HTTPException(
             status_code=409,
@@ -1684,8 +1727,7 @@ def owner_sync_preview_force_reset(request: Request) -> dict:
     the preview live as the user types.
     """
     _require_hosted_mode()
-    user = _require_session_user(request)
-    tenant = tenants.manager().require(user["tenant_id"])
+    tenant = _require_sync_tenant(request)
     if not tenant.gh_repo:
         raise HTTPException(
             status_code=409,
@@ -1720,8 +1762,7 @@ def owner_sync_pull(request: Request, payload: Optional[dict] = None) -> dict:
     "click the refresh button N times" dance.
     """
     _require_hosted_mode()
-    user = _require_session_user(request)
-    tenant = tenants.manager().require(user["tenant_id"])
+    tenant = _require_sync_tenant(request)
     if not tenant.gh_repo:
         raise HTTPException(
             status_code=409,
@@ -1768,8 +1809,7 @@ def owner_sync_check(request: Request) -> dict:
     every request.
     """
     _require_hosted_mode()
-    user = _require_session_user(request)
-    tenant = tenants.manager().require(user["tenant_id"])
+    tenant = _require_sync_tenant(request)
     if not tenant.gh_repo:
         raise HTTPException(
             status_code=409,

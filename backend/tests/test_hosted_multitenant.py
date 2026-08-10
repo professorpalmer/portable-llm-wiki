@@ -1841,6 +1841,45 @@ def test_sync_now_requires_connection(multi_tenant_app):
     assert r.status_code == 409
 
 
+def test_sync_status_accepts_personal_llm_token(multi_tenant_app):
+    """Personal LLM private tokens unlock sync without a browser session.
+
+    Diverged-host recovery otherwise gets stuck behind GitHub OAuth when
+    the only credential on hand is the headless Personal LLM URL token.
+    """
+    from app import share_tokens, tenants
+
+    alice = tenants.manager().require("alice")
+    with tenants.set_current_tenant(alice):
+        minted = share_tokens.mint_token("headless sync", "private")
+    plaintext = minted["token"]
+
+    multi_tenant_app.cookies.clear()
+    r = multi_tenant_app.get(
+        "/t/alice/owner/sync/status",
+        headers={"Authorization": f"Bearer {plaintext}"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["connected"] is False
+
+
+def test_sync_status_rejects_recruiter_share_token(multi_tenant_app):
+    """Recruiter/friend share tokens must not drive owner sync."""
+    from app import share_tokens, tenants
+
+    alice = tenants.manager().require("alice")
+    with tenants.set_current_tenant(alice):
+        minted = share_tokens.mint_token("recruiter view", "recruiter")
+    plaintext = minted["token"]
+
+    multi_tenant_app.cookies.clear()
+    r = multi_tenant_app.get(
+        "/t/alice/owner/sync/status",
+        headers={"Authorization": f"Bearer {plaintext}"},
+    )
+    assert r.status_code == 401
+
+
 def test_sync_now_does_not_grant_cross_tenant_access(
     multi_tenant_app, monkeypatch
 ):
