@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { forwardRef, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   fetchGraph,
@@ -13,29 +13,18 @@ import { useTenant } from "@/lib/useTenant";
 
 // react-force-graph-2d is canvas-based, so it must be loaded client-side
 // only. ``next/dynamic`` returns a ``LoadableComponent`` HOC that does
-// NOT forward refs to the wrapped component by default — which silently
-// breaks the "recenter" / "relax" buttons (the ref points at the HOC
-// wrapper, ``zoomToFit`` doesn't exist on it, optional-chaining swallows
-// the call). We wrap the dynamic import in ``forwardRef`` so the ref
-// makes it through to the actual ForceGraph2D instance.
+// NOT forward refs to the wrapped component — which silently breaks the
+// "recenter" / "relax" buttons (``fgRef.current`` never gets
+// ``zoomToFit`` / ``d3ReheatSimulation``). Wrapping the dynamic import in
+// ``forwardRef`` does not help because the ref still lands on the
+// LoadableComponent wrapper. Instead we dynamically import
+// ``ForceGraphCanvas``, a thin client component that statically imports
+// ForceGraph2D and accepts ``graphRef`` as a regular prop.
 //
 // See https://nextjs.org/docs/app/api-reference/functions/dynamic-imports
 // — "ref attribute" caveat.
-//
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const ForceGraph2D = dynamic<any>(
-  () =>
-    import("react-force-graph-2d").then((mod) => {
-      const Inner = mod.default;
-      const Forwarded = forwardRef<unknown, Record<string, unknown>>(
-        function ForceGraph2DForwarded(props, ref) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          return <Inner ref={ref as any} {...(props as any)} />;
-        },
-      );
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return Forwarded as any;
-    }),
+const ForceGraphCanvas = dynamic(
+  () => import("@/components/ForceGraphCanvas"),
   {
     ssr: false,
     loading: () => (
@@ -348,8 +337,8 @@ export default function GraphPage() {
               {graph ? "no pages match the current filter" : "loading…"}
             </div>
           ) : (
-            <ForceGraph2D
-              ref={fgRef}
+            <ForceGraphCanvas
+              graphRef={fgRef}
               width={size.w}
               height={size.h}
               graphData={data}
