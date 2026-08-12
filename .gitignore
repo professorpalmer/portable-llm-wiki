@@ -74,3 +74,6 @@ tenants/
 
 # Personal branding assets — owner-specific, not part of the OSS distribution.
 assets/branding/professorpalmer/
+
+# Local session artifacts (LinkedIn packs, round plans) — never commit.
+artifacts/
