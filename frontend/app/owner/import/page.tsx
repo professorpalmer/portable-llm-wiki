@@ -178,7 +178,7 @@ function OwnerImportPageInner({ tenant }: { tenant?: string }) {
         if (cancelled) return;
         if (job.status === "done") {
           // job finished — diff manifest to find new pages
-          const manifest = await fetchManifest(tenant);
+          const manifest = await fetchManifest(tenant, { asOwner: true });
           if (cancelled) return;
           const newPages: PageDelta[] = manifest.pages
             .filter((p) => !stage.pagesBefore.has(p.slug))

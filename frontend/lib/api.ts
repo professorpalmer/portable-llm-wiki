@@ -190,13 +190,32 @@ export function wikiBase(tenantId?: string): string {
   return `${apiBase()}${tenantPrefix(tenantId)}`;
 }
 
-function headers(extra?: HeadersInit): HeadersInit {
+/**
+ * Owner-console / owner-route headers.
+ *
+ * Never attaches ``X-Preview-As``. Preview-as is a browse/audit lens;
+ * sending it on owner bootstrap makes ``viewer_is_owner: false`` and
+ * traps owners out of ``/owner`` (they can't reach the panel that
+ * clears the preview). Writes and owner reads must see the real owner.
+ */
+function ownerHeaders(extra?: HeadersInit): HeadersInit {
   const h: Record<string, string> = { "Content-Type": "application/json" };
   const tok = getOwnerToken();
   if (tok) h["Authorization"] = `Bearer ${tok}`;
+  return { ...h, ...(extra as Record<string, string> | undefined) };
+}
+
+/**
+ * Browse/ask/graph headers — may include ``X-Preview-As`` from
+ * ``wiki.preview_as`` so owners can audit the wiki as public /
+ * recruiter / friend. Do not use for owner-console verify or
+ * ``/owner/*`` endpoints.
+ */
+function browseHeaders(extra?: HeadersInit): HeadersInit {
+  const h = { ...(ownerHeaders(extra) as Record<string, string>) };
   const preview = getPreviewAs();
   if (preview !== "owner") h["X-Preview-As"] = preview;
-  return { ...h, ...(extra as Record<string, string> | undefined) };
+  return h;
 }
 
 /**
@@ -213,9 +232,9 @@ function headers(extra?: HeadersInit): HeadersInit {
  * In single-tenant (OSS) mode there's no cross-origin issue and no
  * session cookie to send — this is a no-op for those installs.
  *
- * Owner-route ``authedFetch`` calls additionally include the legacy
- * ``Authorization: Bearer <OWNER_TOKEN>`` header via ``headers()`` so
- * OSS self-hosters using a localStorage token still work unchanged.
+ * Owner-route calls additionally include the legacy
+ * ``Authorization: Bearer <OWNER_TOKEN>`` header via ``ownerHeaders()``
+ * so OSS self-hosters using a localStorage token still work unchanged.
  */
 async function apiFetch(
   input: string | URL,
@@ -238,10 +257,20 @@ async function asJson<T>(res: Response): Promise<T> {
   return (await res.json()) as T;
 }
 
-export async function fetchManifest(tenant?: string): Promise<Manifest> {
+/**
+ * Fetch the wiki manifest.
+ *
+ * By default this is a browse call and may send ``X-Preview-As``.
+ * Pass ``{ asOwner: true }`` for owner-console bootstrap / verify —
+ * preview must not defeat ownership checks.
+ */
+export async function fetchManifest(
+  tenant?: string,
+  opts?: { asOwner?: boolean },
+): Promise<Manifest> {
   return asJson<Manifest>(
     await apiFetch(`${wikiBase(tenant)}/wiki/manifest.json`, {
-      headers: headers(),
+      headers: opts?.asOwner ? ownerHeaders() : browseHeaders(),
       cache: "no-store",
     })
   );
@@ -251,7 +280,7 @@ export async function fetchPage(slug: string, tenant?: string): Promise<PageFull
   return asJson<PageFull>(
     await apiFetch(
       `${wikiBase(tenant)}/wiki/page/${encodeURIComponent(slug)}`,
-      { headers: headers(), cache: "no-store" }
+      { headers: browseHeaders(), cache: "no-store" }
     )
   );
 }
@@ -260,7 +289,7 @@ export async function searchWiki(q: string, tenant?: string): Promise<SearchResp
   return asJson<SearchResponse>(
     await apiFetch(
       `${wikiBase(tenant)}/wiki/search?q=${encodeURIComponent(q)}`,
-      { headers: headers(), cache: "no-store" }
+      { headers: browseHeaders(), cache: "no-store" }
     )
   );
 }
@@ -269,7 +298,7 @@ export async function askWiki(question: string, tenant?: string): Promise<QueryR
   return asJson<QueryResponse>(
     await apiFetch(`${wikiBase(tenant)}/wiki/query`, {
       method: "POST",
-      headers: headers(),
+      headers: browseHeaders(),
       body: JSON.stringify({ question }),
     })
   );
@@ -277,13 +306,13 @@ export async function askWiki(question: string, tenant?: string): Promise<QueryR
 
 export async function ownerReload(tenant?: string) {
   return asJson<{ ok: boolean; page_count: number }>(
-    await apiFetch(`${wikiBase(tenant)}/owner/reload`, { method: "POST", headers: headers() })
+    await apiFetch(`${wikiBase(tenant)}/owner/reload`, { method: "POST", headers: ownerHeaders() })
   );
 }
 
 export async function ownerLint(tenant?: string): Promise<LintReport> {
   return asJson<LintReport>(
-    await apiFetch(`${wikiBase(tenant)}/owner/lint`, { method: "POST", headers: headers() })
+    await apiFetch(`${wikiBase(tenant)}/owner/lint`, { method: "POST", headers: ownerHeaders() })
   );
 }
 
@@ -291,7 +320,7 @@ export async function ownerSetTier(slug: string, tier: PageSummary["tier"], tena
   return asJson<{ ok: boolean; slug: string; tier: string; sync?: SyncVerdict }>(
     await apiFetch(`${wikiBase(tenant)}/owner/page/${encodeURIComponent(slug)}/tier`, {
       method: "PATCH",
-      headers: headers(),
+      headers: ownerHeaders(),
       body: JSON.stringify({ tier }),
     })
   );
@@ -321,7 +350,7 @@ export async function ownerIngest(input: {
   return asJson<IngestResult>(
     await apiFetch(`${wikiBase(tenant)}/owner/ingest`, {
       method: "POST",
-      headers: headers(),
+      headers: ownerHeaders(),
       body: JSON.stringify({
         ...input,
         subdir: input.subdir ?? "conversations",
@@ -403,7 +432,7 @@ export async function ownerImport(input: {
   return asJson<ImportResult>(
     await apiFetch(`${wikiBase(tenant)}/owner/import`, {
       method: "POST",
-      headers: headers(),
+      headers: ownerHeaders(),
       body: JSON.stringify(input),
     }),
   );
@@ -440,7 +469,7 @@ export type PersistenceFlushResult = {
 export async function ownerPersistenceStatus(tenant?: string): Promise<PersistenceStatus> {
   return asJson<PersistenceStatus>(
     await apiFetch(`${wikiBase(tenant)}/owner/persistence`, {
-      headers: headers(),
+      headers: ownerHeaders(),
       cache: "no-store",
     }),
   );
@@ -450,7 +479,7 @@ export async function ownerPersistenceFlush(tenant?: string): Promise<Persistenc
   return asJson<PersistenceFlushResult>(
     await apiFetch(`${wikiBase(tenant)}/owner/persistence/flush`, {
       method: "POST",
-      headers: headers(),
+      headers: ownerHeaders(),
     }),
   );
 }
@@ -515,7 +544,7 @@ export type MintedShareToken = ShareTokenInfo & {
 export async function ownerListShareTokens(tenant?: string): Promise<{ tokens: ShareTokenInfo[] }> {
   return asJson<{ tokens: ShareTokenInfo[] }>(
     await apiFetch(`${wikiBase(tenant)}/owner/share-tokens`, {
-      headers: headers(),
+      headers: ownerHeaders(),
       cache: "no-store",
     })
   );
@@ -529,7 +558,7 @@ export async function ownerMintShareToken(input: {
   return asJson<MintedShareToken>(
     await apiFetch(`${wikiBase(tenant)}/owner/share-tokens`, {
       method: "POST",
-      headers: headers(),
+      headers: ownerHeaders(),
       body: JSON.stringify(input),
     })
   );
@@ -539,7 +568,7 @@ export async function ownerRevokeShareToken(id: string, tenant?: string) {
   return asJson<{ ok: boolean; id: string }>(
     await apiFetch(`${wikiBase(tenant)}/owner/share-tokens/${encodeURIComponent(id)}`, {
       method: "DELETE",
-      headers: headers(),
+      headers: ownerHeaders(),
     })
   );
 }
@@ -547,7 +576,7 @@ export async function ownerRevokeShareToken(id: string, tenant?: string) {
 export async function ownerCaptureConfig(tenant?: string): Promise<CaptureConfig> {
   return asJson<CaptureConfig>(
     await apiFetch(`${wikiBase(tenant)}/owner/capture/config`, {
-      headers: headers(),
+      headers: ownerHeaders(),
       cache: "no-store",
     })
   );
@@ -562,7 +591,7 @@ export async function ownerCapturePaste(input: {
   return asJson<CaptureResult>(
     await apiFetch(`${wikiBase(tenant)}/owner/capture/paste`, {
       method: "POST",
-      headers: headers(),
+      headers: ownerHeaders(),
       body: JSON.stringify({
         content: input.content,
         label: input.label,
@@ -626,7 +655,7 @@ export async function ownerCaptureStructured(
   return asJson<WritebackResult>(
     await apiFetch(`${wikiBase(tenant)}/owner/capture/structured`, {
       method: "POST",
-      headers: headers(),
+      headers: ownerHeaders(),
       body: JSON.stringify({
         session_label: input.session_label,
         pages: input.pages,
@@ -707,7 +736,7 @@ export async function ownerCaptureVerbatim(
   return asJson<VerbatimCaptureResult>(
     await apiFetch(`${wikiBase(tenant)}/owner/capture/verbatim`, {
       method: "POST",
-      headers: headers(),
+      headers: ownerHeaders(),
       body: JSON.stringify({
         content: input.content,
         slug: input.slug,
@@ -787,7 +816,7 @@ export type TrackedJob = {
 
 export async function ownerListJobs(tenant?: string) {
   return asJson<{ jobs: TrackedJob[] }>(
-    await apiFetch(`${wikiBase(tenant)}/owner/jobs`, { headers: headers(), cache: "no-store" })
+    await apiFetch(`${wikiBase(tenant)}/owner/jobs`, { headers: ownerHeaders(), cache: "no-store" })
   );
 }
 
@@ -821,7 +850,7 @@ export async function chatWithWiki(
   return asJson<ChatResponse>(
     await apiFetch(`${wikiBase(tenant)}/wiki/chat`, {
       method: "POST",
-      headers: { ...headers(), "Content-Type": "application/json" },
+      headers: { ...browseHeaders(), "Content-Type": "application/json" },
       body: JSON.stringify({ message, history }),
     }),
   );
@@ -865,7 +894,7 @@ export async function streamChatWithWiki(
   const r = await apiFetch(`${wikiBase(tenant)}/wiki/chat/stream`, {
     method: "POST",
     headers: {
-      ...headers(),
+      ...browseHeaders(),
       "Content-Type": "application/json",
       Accept: "text/event-stream",
     },
@@ -947,7 +976,7 @@ export async function ownerRawBulk(
   return asJson<BulkRawResult>(
     await apiFetch(`${wikiBase(tenant)}/owner/raw/bulk`, {
       method: "POST",
-      headers: { ...headers(), "Content-Type": "application/json" },
+      headers: { ...ownerHeaders(), "Content-Type": "application/json" },
       body: JSON.stringify({ action, rel_paths: relPaths }),
     }),
   );
@@ -964,7 +993,7 @@ export type RawFile = {
 export async function ownerListRaw(excerptChars = 0, tenant?: string): Promise<RawFile[]> {
   const q = excerptChars > 0 ? `?excerpt_chars=${excerptChars}` : "";
   const r = await apiFetch(`${wikiBase(tenant)}/owner/raw${q}`, {
-    headers: headers(),
+    headers: ownerHeaders(),
     cache: "no-store",
   });
   const data = await asJson<{ files: RawFile[] }>(r);
@@ -975,7 +1004,7 @@ export async function ownerReadRaw(relPath: string, tenant?: string): Promise<st
   const stripped = relPath.startsWith("raw/") ? relPath.slice(4) : relPath;
   const r = await apiFetch(
     `${wikiBase(tenant)}/owner/raw/${encodeRawPath(stripped)}`,
-    { headers: headers(), cache: "no-store" }
+    { headers: ownerHeaders(), cache: "no-store" }
   );
   const data = await asJson<{ rel_path: string; content: string }>(r);
   return data.content;
@@ -988,7 +1017,7 @@ export async function ownerDeleteRaw(
   const stripped = relPath.startsWith("raw/") ? relPath.slice(4) : relPath;
   const r = await apiFetch(
     `${wikiBase(tenant)}/owner/raw/${encodeRawPath(stripped)}`,
-    { method: "DELETE", headers: headers() }
+    { method: "DELETE", headers: ownerHeaders() }
   );
   if (!r.ok) {
     let detail = `${r.status}`;
@@ -1011,7 +1040,7 @@ export async function ownerReingestRaw(relPath: string, tenant?: string): Promis
   const stripped = relPath.startsWith("raw/") ? relPath.slice(4) : relPath;
   const r = await apiFetch(
     `${wikiBase(tenant)}/owner/raw/${encodeRawPath(stripped)}/reingest`,
-    { method: "POST", headers: headers() }
+    { method: "POST", headers: ownerHeaders() }
   );
   return asJson(r);
 }
@@ -1030,7 +1059,7 @@ export async function ownerGetJob(trackingId: string, tenant?: string) {
     puppetmaster_show?: { summary?: string; error?: string };
   }>(
     await apiFetch(`${wikiBase(tenant)}/owner/jobs/${encodeURIComponent(trackingId)}`, {
-      headers: headers(),
+      headers: ownerHeaders(),
       cache: "no-store",
     })
   );
@@ -1058,7 +1087,7 @@ export type GraphResponse = {
 
 export async function fetchGraph(tenant?: string): Promise<GraphResponse> {
   return asJson<GraphResponse>(
-    await apiFetch(`${wikiBase(tenant)}/wiki/graph`, { headers: headers(), cache: "no-store" })
+    await apiFetch(`${wikiBase(tenant)}/wiki/graph`, { headers: browseHeaders(), cache: "no-store" })
   );
 }
 
@@ -1066,7 +1095,7 @@ export async function fetchSubgraph(slug: string, hops = 1, tenant?: string): Pr
   return asJson<GraphResponse>(
     await apiFetch(
       `${wikiBase(tenant)}/wiki/graph/${encodeURIComponent(slug)}?hops=${hops}`,
-      { headers: headers(), cache: "no-store" }
+      { headers: browseHeaders(), cache: "no-store" }
     )
   );
 }
@@ -1164,7 +1193,7 @@ export async function ownerStartLintSwarm(workers?: string[], tenant?: string) {
   return asJson<LintSwarmStartResponse>(
     await apiFetch(`${wikiBase(tenant)}/owner/lint/swarm`, {
       method: "POST",
-      headers: headers(),
+      headers: ownerHeaders(),
       body: JSON.stringify({ workers: workers ?? null }),
     })
   );
@@ -1174,7 +1203,7 @@ export async function ownerGetLintSwarm(swarmId: string, tenant?: string) {
   return asJson<LintSwarmStatus>(
     await apiFetch(
       `${wikiBase(tenant)}/owner/lint/swarm/${encodeURIComponent(swarmId)}`,
-      { headers: headers(), cache: "no-store" }
+      { headers: ownerHeaders(), cache: "no-store" }
     )
   );
 }
@@ -1196,7 +1225,7 @@ export async function ownerDraftMissingPage(input: {
   return asJson<DraftJobResponse>(
     await apiFetch(`${wikiBase(tenant)}/owner/lint/draft/missing-page`, {
       method: "POST",
-      headers: headers(),
+      headers: ownerHeaders(),
       body: JSON.stringify(input),
     })
   );
@@ -1215,7 +1244,7 @@ export async function ownerDraftContradiction(input: {
   return asJson<DraftJobResponse>(
     await apiFetch(`${wikiBase(tenant)}/owner/lint/draft/contradiction`, {
       method: "POST",
-      headers: headers(),
+      headers: ownerHeaders(),
       body: JSON.stringify(input),
     })
   );
@@ -1234,7 +1263,7 @@ export async function ownerListLintSwarms(tenant?: string) {
     }>;
   }>(
     await apiFetch(`${wikiBase(tenant)}/owner/lint/swarm`, {
-      headers: headers(),
+      headers: ownerHeaders(),
       cache: "no-store",
     })
   );
@@ -1251,7 +1280,7 @@ export async function ownerWritePage(input: {
   return asJson<{ ok: boolean; slug: string; rel_path: string }>(
     await apiFetch(`${wikiBase(tenant)}/owner/page`, {
       method: "POST",
-      headers: headers(),
+      headers: ownerHeaders(),
       body: JSON.stringify({ ...input, sources: input.sources ?? [] }),
     })
   );
@@ -1269,7 +1298,7 @@ export type OwnerPageRaw = {
 export async function ownerGetPageRaw(slug: string, tenant?: string): Promise<OwnerPageRaw> {
   return asJson<OwnerPageRaw>(
     await apiFetch(`${wikiBase(tenant)}/owner/page/${encodeURIComponent(slug)}/raw`, {
-      headers: headers(),
+      headers: ownerHeaders(),
       cache: "no-store",
     })
   );
@@ -1286,7 +1315,7 @@ export async function ownerReplacePage(slug: string, markdown: string, tenant?: 
   }>(
     await apiFetch(`${wikiBase(tenant)}/owner/page/${encodeURIComponent(slug)}`, {
       method: "PUT",
-      headers: headers(),
+      headers: ownerHeaders(),
       body: JSON.stringify({ markdown }),
     })
   );

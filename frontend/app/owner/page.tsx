@@ -84,6 +84,16 @@ function OwnerPageInner({ tenant }: { tenant?: string }) {
   // identity instead of a token-paste UI.
   const hosted = isHostedMode();
   const [hostedLogin, setHostedLogin] = useState<string | null>(null);
+  // Preview-as is a browse/audit lens stored in localStorage. Track it
+  // here so /owner can show an exit affordance even before panels load.
+  const [previewAsTier, setPreviewAsTier] = useState<PreviewAs>("owner");
+
+  useEffect(() => {
+    setPreviewAsTier(getPreviewAs());
+    const onPreviewChange = () => setPreviewAsTier(getPreviewAs());
+    window.addEventListener("wiki:preview-as-change", onPreviewChange);
+    return () => window.removeEventListener("wiki:preview-as-change", onPreviewChange);
+  }, []);
 
   useEffect(() => {
     fetchPublicConfig()
@@ -198,7 +208,11 @@ function OwnerPageInner({ tenant }: { tenant?: string }) {
   async function verify() {
     setError(null);
     try {
-      const m = await fetchManifest(tenant);
+      // Owner bootstrap must ignore Preview-as. Sending X-Preview-As
+      // makes the backend return viewer_is_owner: false (correct for
+      // the audit lens) which this page used to treat as auth failure,
+      // hiding the Preview-as panel so owners could not exit.
+      const m = await fetchManifest(tenant, { asOwner: true });
       setManifest(m);
       setAuthed(m.viewer_is_owner);
       if (!m.viewer_is_owner) {
@@ -211,6 +225,13 @@ function OwnerPageInner({ tenant }: { tenant?: string }) {
     } catch (e) {
       setError((e as Error).message);
     }
+  }
+
+  function exitPreview() {
+    setPreviewAs("owner");
+    setPreviewAsTier("owner");
+    // Refresh owner-tier page count after leaving the audit lens.
+    verify();
   }
 
   function save() {
@@ -391,6 +412,23 @@ function OwnerPageInner({ tenant }: { tenant?: string }) {
       <p className="mt-1 text-sm text-ink-muted">
         Authenticated operations: ingest sources, set tiers, reload the index, run lint.
       </p>
+
+      {previewAsTier !== "owner" && (
+        <div className="mt-4 p-3 rounded border border-amber-300 bg-amber-50 text-amber-950 text-sm flex flex-wrap items-center gap-3">
+          <span>
+            You&apos;re previewing as <span className="font-medium">{previewAsTier}</span>
+            {" "}— browse/ask/graph use that lens. Owner console auth ignores it.
+          </span>
+          <button
+            type="button"
+            onClick={exitPreview}
+            className="px-3 py-1.5 rounded border border-amber-400 bg-white text-amber-950 hover:bg-amber-100 text-xs font-medium"
+          >
+            Exit preview
+          </button>
+        </div>
+      )}
+
       {authed && (
         <div className="mt-4 flex flex-wrap items-center gap-2 text-sm">
           <Link
@@ -1330,7 +1368,10 @@ function PreviewAsPanel({
   const [current, setCurrent] = useState<PreviewAs>("owner");
 
   useEffect(() => {
-    setCurrent(getPreviewAs());
+    const sync = () => setCurrent(getPreviewAs());
+    sync();
+    window.addEventListener("wiki:preview-as-change", sync);
+    return () => window.removeEventListener("wiki:preview-as-change", sync);
   }, []);
 
   function pick(next: PreviewAs) {
