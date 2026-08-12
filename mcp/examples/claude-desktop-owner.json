@@ -1,11 +1,11 @@
 {
-  "_comment": "Merge into ~/Library/Application Support/Claude/claude_desktop_config.json (macOS). Fully quit + relaunch Claude Desktop after edits.",
+  "_comment": "Merge into ~/Library/Application Support/Claude/claude_desktop_config.json (macOS). Fully quit + relaunch Claude Desktop after edits. Prefer WIKI_BASE_URL; WIKI_API_BASE remains a legacy alias.",
   "mcpServers": {
     "portable-llm-wiki": {
       "command": "node",
       "args": ["/absolute/path/to/portable-llm-wiki/mcp/dist/server.js"],
       "env": {
-        "WIKI_API_BASE": "http://localhost:8000",
+        "WIKI_BASE_URL": "http://localhost:8000",
         "WIKI_OWNER_TOKEN": "<paste OWNER_TOKEN from backend/.env>"
       }
     }

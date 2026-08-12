@@ -5,8 +5,9 @@
  * Exposes typed tools so Cursor, Claude Desktop, and any MCP-aware LLM client
  * can interact with a Portable LLM Wiki without prompting tricks or URL pasting.
  *
- * Talks to the FastAPI backend over HTTP, passing the owner token from env on
- * every request so tier filtering and ownership decisions live in one place.
+ * Stdio is transport only. Talks to the FastAPI backend over HTTP, passing
+ * an optional bearer from env. Ownership is never inferred from token
+ * presence alone — tools probe `/wiki/manifest.json` for real capability.
  *
  * Configure in Cursor (~/.cursor/mcp.json) or Claude Desktop:
  *
@@ -23,107 +24,79 @@
  *     }
  *   }
  *
- * The OWNER_TOKEN is optional. Without it, the client only sees public-tier
+ * The bearer is optional. Without it, the client only sees public-tier
  * pages — fine for sharing a read-only wiki with someone else's LLM.
+ * Browser OAuth cookies never reach this process.
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { resolve } from "node:path";
+import { WikiClient, startupAuthLabel } from "./wikiClient.js";
 
-// Accept either env var name — WIKI_BASE_URL is what the Connect page and
-// README document. WIKI_API_BASE is kept for back-compat with v0.1.0 configs.
-const API_BASE = (
-  process.env.WIKI_BASE_URL ??
-  process.env.WIKI_API_BASE ??
-  "http://localhost:8000"
-).replace(/\/$/, "");
-const OWNER_TOKEN = process.env.WIKI_OWNER_TOKEN ?? "";
-
-function authHeaders(): Record<string, string> {
-  const h: Record<string, string> = { "Content-Type": "application/json" };
-  if (OWNER_TOKEN) h["Authorization"] = `Bearer ${OWNER_TOKEN}`;
-  return h;
-}
-
-async function apiGet(path: string): Promise<unknown> {
-  const res = await fetch(`${API_BASE}${path}`, { headers: authHeaders() });
-  if (!res.ok) {
-    const detail = await res.text();
-    throw new Error(`GET ${path} → ${res.status}: ${detail.slice(0, 400)}`);
-  }
-  return res.json();
-}
-
-async function apiPost(path: string, body: unknown): Promise<unknown> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const detail = await res.text();
-    throw new Error(`POST ${path} → ${res.status}: ${detail.slice(0, 400)}`);
-  }
-  return res.json();
-}
+const wiki = WikiClient.fromEnv();
 
 function asText(data: unknown): { content: { type: "text"; text: string }[] } {
   const text = typeof data === "string" ? data : JSON.stringify(data, null, 2);
   return { content: [{ type: "text", text }] };
 }
 
-function asError(err: unknown): { content: { type: "text"; text: string }[]; isError: true } {
+function asError(err: unknown): {
+  content: { type: "text"; text: string }[];
+  isError: true;
+} {
   const message = err instanceof Error ? err.message : String(err);
   return { content: [{ type: "text", text: `Error: ${message}` }], isError: true };
-}
-
-/**
- * The backend stamps every content-mutating response with a `sync` verdict
- * describing whether the write will actually reach a git remote (and the
- * hosted site). We surface it verbatim so an agent never reports a durable
- * success for a write that only landed on local disk.
- */
-interface SyncVerdict {
-  will_sync: boolean;
-  mode: "global" | "tenant" | "local_only";
-  remote: string | null;
-  branch?: string;
-  reason?: string;
-  detail: string;
-}
-
-function syncNote(sync?: SyncVerdict): string {
-  if (!sync) return "";
-  if (sync.will_sync) {
-    return `\nSync: ${sync.detail}`;
-  }
-  // Loud, actionable warning — this is the trap we never want users to hit.
-  return `\n\nWARNING — NOT SYNCED: ${sync.detail}`;
 }
 
 const server = new McpServer(
   {
     name: "portable-llm-wiki",
-    version: "0.1.3",
+    version: "0.1.4",
   },
   {
-    instructions: `You are connected to a Portable LLM Wiki — a structured personal-context wiki for ${
-      OWNER_TOKEN ? "the wiki owner" : "the public tier"
-    } at ${API_BASE}.
+    instructions: `You are connected to a Portable LLM Wiki via stdio MCP at ${wiki.baseUrl}.
 
-When the user asks anything about themselves, their projects, decisions, or career: prefer wiki tools over guessing.
+Stdio is transport only: browser OAuth cookies are not available here. Capability
+depends on the optional WIKI_OWNER_TOKEN bearer (or public reads with no token).
+
+At session start, call \`connection_status\` to learn auth_mode (public /
+share_read_only / owner / token_not_elevated), page_count, and read/write/lint
+capability. Never assume write access from a configured token alone.
 
 Typical flow:
-1. Call \`list_pages\` once at the start of a session to learn what's there.
-2. For specific questions, call \`query_wiki\` — it does graph-aware retrieval and returns a sourced answer.
+1. Call \`connection_status\` (or \`list_pages\`) once at the start of a session.
+2. For specific questions, call \`query_wiki\` — graph-aware retrieval with sources.
 3. For exploration, use \`search_wiki\` (keyword) or \`get_neighbors\` (graph walk).
 4. \`read_page\` returns the full body of a single page when you need quotes.
+5. Owner-only: \`ingest_source\` saves a raw file and may start an orchestrator job;
+   it does NOT mean wiki graph pages are updated. Use \`ingest_job_status\` to verify.
 
-Every page has a tier (\`public\`/\`recruiter\`/\`friend\`/\`private\`). Pages above your tier are invisible — don't synthesize claims about them.`,
+Every page has a tier (\`public\`/\`recruiter\`/\`friend\`/\`private\`). Pages above
+your tier are invisible — don't synthesize claims about them.`,
   }
 );
 
 // ----------------- TOOLS -----------------
+
+server.registerTool(
+  "connection_status",
+  {
+    title: "Diagnose MCP ↔ wiki connection and capabilities",
+    description:
+      "Non-secret diagnostic: probes the backend manifest and reports base URL, whether a bearer token is configured (never the token value), viewer tier, page count, auth_mode (public / share_read_only / owner / token_not_elevated), and read/write/lint capability. Call this before owner-only writes.",
+    inputSchema: {},
+  },
+  async () => {
+    try {
+      const status = await wiki.connectionStatus();
+      return asText(status);
+    } catch (err) {
+      return asError(err);
+    }
+  }
+);
 
 server.registerTool(
   "list_pages",
@@ -135,7 +108,7 @@ server.registerTool(
   },
   async () => {
     try {
-      const m = (await apiGet("/wiki/manifest.json")) as {
+      const m = (await wiki.apiGet("/wiki/manifest.json")) as {
         page_count: number;
         sections: Record<string, number>;
         viewer_tier: string;
@@ -152,7 +125,9 @@ server.registerTool(
       };
       const summary = `Wiki has ${m.page_count} page(s) visible at tier=${m.viewer_tier}${
         m.viewer_is_owner ? " (owner)" : ""
-      }. Sections: ${Object.entries(m.sections).map(([k, v]) => `${k}=${v}`).join(", ")}.`;
+      }. Sections: ${Object.entries(m.sections)
+        .map(([k, v]) => `${k}=${v}`)
+        .join(", ")}.`;
       const pages = m.pages
         .map(
           (p) =>
@@ -175,12 +150,15 @@ server.registerTool(
     description:
       "Returns the full markdown body + frontmatter + cross-references for one page, identified by its slug. Use when you need to quote from a page or follow its `[[wikilinks]]` to other pages.",
     inputSchema: {
-      slug: z.string().min(1).describe("Page slug — the filename stem, e.g. 'calibrated-honesty'."),
+      slug: z
+        .string()
+        .min(1)
+        .describe("Page slug — the filename stem, e.g. 'calibrated-honesty'."),
     },
   },
   async ({ slug }) => {
     try {
-      const p = (await apiGet(`/wiki/page/${encodeURIComponent(slug)}`)) as {
+      const p = (await wiki.apiGet(`/wiki/page/${encodeURIComponent(slug)}`)) as {
         title: string;
         section: string;
         tier: string;
@@ -199,10 +177,14 @@ server.registerTool(
         `${p.updated ? ` · updated: ${p.updated}` : ""}` +
         `${p.tags.length ? ` · tags: ${p.tags.join(", ")}` : ""}_\n\n`;
       const linksOut = p.links_out_resolved.length
-        ? `\n\n---\n**Links out:** ${p.links_out_resolved.map((l) => `[[${l.title}]] (slug: ${l.slug})`).join(", ")}`
+        ? `\n\n---\n**Links out:** ${p.links_out_resolved
+            .map((l) => `[[${l.title}]] (slug: ${l.slug})`)
+            .join(", ")}`
         : "";
       const linksIn = p.links_in_resolved.length
-        ? `\n**Links in:** ${p.links_in_resolved.map((l) => `[[${l.title}]] (slug: ${l.slug})`).join(", ")}`
+        ? `\n**Links in:** ${p.links_in_resolved
+            .map((l) => `[[${l.title}]] (slug: ${l.slug})`)
+            .join(", ")}`
         : "";
       const sources = p.sources.length
         ? `\n**Sources:** ${p.sources.join(", ")}`
@@ -222,12 +204,18 @@ server.registerTool(
       "Fast keyword search across page titles, tags, and bodies. Returns ranked matches. Good for exploration. For natural-language questions with synthesis, use `query_wiki` instead.",
     inputSchema: {
       query: z.string().min(1).describe("Keyword(s) to search for."),
-      limit: z.number().int().min(1).max(50).optional().describe("Max results to return (default 10)."),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(50)
+        .optional()
+        .describe("Max results to return (default 10)."),
     },
   },
   async ({ query, limit }) => {
     try {
-      const r = (await apiGet(
+      const r = (await wiki.apiGet(
         `/wiki/search?q=${encodeURIComponent(query)}`
       )) as {
         results: Array<{
@@ -261,12 +249,15 @@ server.registerTool(
     description:
       "The primary tool. Does graph-aware retrieval (keyword anchors + 1-hop wikilink expansion) and returns a synthesized answer grounded in wiki pages, with citations. Prefer this over `search_wiki` + manual stitching.",
     inputSchema: {
-      question: z.string().min(2).describe("The user's question in natural language."),
+      question: z
+        .string()
+        .min(2)
+        .describe("The user's question in natural language."),
     },
   },
   async ({ question }) => {
     try {
-      const r = (await apiPost("/wiki/query", { question })) as {
+      const r = (await wiki.apiPost("/wiki/query", { question })) as {
         answer: string;
         citations: Array<{ slug: string; title: string }>;
         backend: string;
@@ -282,7 +273,9 @@ server.registerTool(
       const retrieval = r.retrieval
         ? `\n\n_Retrieval: ${r.retrieval.strategy}. Anchors: ${r.retrieval.anchors
             .map((a) => a.title)
-            .join(", ")}. Expanded: ${r.retrieval.expanded.map((e) => e.title).join(", ") || "(none)"}._`
+            .join(", ")}. Expanded: ${
+            r.retrieval.expanded.map((e) => e.title).join(", ") || "(none)"
+          }._`
         : "";
       return asText(r.answer + cites + retrieval);
     } catch (err) {
@@ -299,22 +292,35 @@ server.registerTool(
       "Returns all pages within N hops of a given slug along the `[[wikilink]]` graph. Use to discover what's related to a page without reading the full body.",
     inputSchema: {
       slug: z.string().min(1),
-      hops: z.number().int().min(0).max(4).optional().describe("Number of hops to expand (default 1)."),
+      hops: z
+        .number()
+        .int()
+        .min(0)
+        .max(4)
+        .optional()
+        .describe("Number of hops to expand (default 1)."),
     },
   },
   async ({ slug, hops }) => {
     try {
-      const r = (await apiGet(
+      const r = (await wiki.apiGet(
         `/wiki/graph/${encodeURIComponent(slug)}?hops=${hops ?? 1}`
       )) as {
-        nodes: Array<{ slug: string; title: string; section: string; tier: string; is_anchor: boolean; degree: number }>;
+        nodes: Array<{
+          slug: string;
+          title: string;
+          section: string;
+          tier: string;
+          is_anchor: boolean;
+          degree: number;
+        }>;
         edges: Array<{ source: string; target: string }>;
         anchors: string[];
       };
       const nodes = r.nodes
         .map(
           (n) =>
-            `${n.is_anchor ? "★" : "·"} ${n.title} (slug: ${n.slug}, ${n.section}/${n.tier}, degree ${n.degree})`
+            `${n.is_anchor ? "*" : "-"} ${n.title} (slug: ${n.slug}, ${n.section}/${n.tier}, degree ${n.degree})`
         )
         .join("\n");
       return asText(
@@ -331,7 +337,7 @@ server.registerTool(
   {
     title: "Ingest a new source into the wiki (owner-only)",
     description:
-      "Saves raw content under raw/<subdir>/YYYY-MM-DD-<slug>.md and (optionally) fires the Puppetmaster Cursor agent to perform the full ingest pass — entity/concept/decision pages, cross-references, index + log updates. Requires WIKI_OWNER_TOKEN.",
+      "Owner-only. Probes owner capability BEFORE sending content (stdio has no browser cookies). Saves raw content under raw/<subdir>/YYYY-MM-DD-<slug>.md and optionally starts the ingest orchestrator. Reports raw_file vs orchestrator vs durable_sync separately — never claims graph pages are updated merely because a raw file was saved. Use ingest_job_status with the returned tracking_id to verify orchestrator progress.",
     inputSchema: {
       slug: z
         .string()
@@ -347,35 +353,56 @@ server.registerTool(
       run_orchestrator: z
         .boolean()
         .optional()
-        .describe("If true, kick off the Puppetmaster ingest agent (costs LLM tokens). Default false."),
+        .describe(
+          "If true, kick off the ingest orchestrator (costs LLM tokens). Default false. Graph updates only happen if/when that job completes."
+        ),
     },
   },
   async (args) => {
     try {
-      if (!OWNER_TOKEN) {
-        return asError(
-          "No WIKI_OWNER_TOKEN configured for this MCP server. Ingest is owner-only."
-        );
-      }
-      const r = (await apiPost("/owner/ingest", {
-        slug: args.slug,
-        content: args.content,
-        subdir: args.subdir ?? "conversations",
-        note: args.note ?? null,
-        run_orchestrator: args.run_orchestrator ?? false,
-      })) as {
-        ok: boolean;
-        rel_path: string;
-        size: number;
-        orchestrator: { tracking_id?: string; status?: string; error?: string } | null;
-        sync?: SyncVerdict;
-      };
-      const orch = r.orchestrator?.tracking_id
-        ? `\nPuppetmaster ingest job started: tracking_id=${r.orchestrator.tracking_id}.`
-        : r.orchestrator?.error
-        ? `\nOrchestrator skipped: ${r.orchestrator.error}`
-        : "";
-      return asText(`Saved ${r.rel_path} (${r.size} bytes).${orch}${syncNote(r.sync)}`);
+      const { report } = await wiki.ingestSource(args);
+      return asText(report);
+    } catch (err) {
+      return asError(err);
+    }
+  }
+);
+
+server.registerTool(
+  "ingest_job_status",
+  {
+    title: "Verify an ingest orchestrator job (owner-only, read-only)",
+    description:
+      "Owner-only status/verification for a prior ingest_source orchestrator job. Reuses GET /owner/jobs/{tracking_id} (and optionally /owner/persistence). Supports bounded polling (poll_attempts ≤ 20, poll_interval_ms ≤ 5000) — never blocks indefinitely. Distinguishes pending/running/failed/completed; does not invent graph-page updates.",
+    inputSchema: {
+      tracking_id: z
+        .string()
+        .min(1)
+        .describe("tracking_id returned by ingest_source when run_orchestrator=true."),
+      poll_attempts: z
+        .number()
+        .int()
+        .min(1)
+        .max(20)
+        .optional()
+        .describe("How many times to poll (default 1 = single check)."),
+      poll_interval_ms: z
+        .number()
+        .int()
+        .min(0)
+        .max(5000)
+        .optional()
+        .describe("Delay between polls in ms (default 500, max 5000)."),
+      include_persistence: z
+        .boolean()
+        .optional()
+        .describe("If true, also fetch GET /owner/persistence for durable sync state."),
+    },
+  },
+  async (args) => {
+    try {
+      const report = await wiki.ingestJobStatus(args);
+      return asText(report);
     } catch (err) {
       return asError(err);
     }
@@ -387,16 +414,18 @@ server.registerTool(
   {
     title: "Run the wiki lint (owner-only)",
     description:
-      "Reports structural issues: orphan pages, stale pages, broken provenance, missing pages mentioned 3+ times, pages absent from index.md. Requires WIKI_OWNER_TOKEN.",
+      "Owner-only. Probes owner capability first, then reports structural issues: orphan pages, stale pages, broken provenance, missing pages mentioned 3+ times, pages absent from index.md.",
     inputSchema: {},
   },
   async () => {
     try {
-      if (!OWNER_TOKEN) {
-        return asError("Lint is owner-only. Set WIKI_OWNER_TOKEN.");
-      }
-      const r = (await apiPost("/owner/lint", {})) as {
-        totals: { pages: number; by_section: Record<string, number>; by_tier: Record<string, number> };
+      await wiki.requireOwnerCapability();
+      const r = (await wiki.apiPost("/owner/lint", {})) as {
+        totals: {
+          pages: number;
+          by_section: Record<string, number>;
+          by_tier: Record<string, number>;
+        };
         orphans: Array<{ title: string; section: string }>;
         stale: Array<{ title: string; age_days: number }>;
         missing_pages: Array<{ title: string; mentions: number }>;
@@ -406,10 +435,14 @@ server.registerTool(
       const lines: string[] = [];
       lines.push(`# Lint report — ${r.totals.pages} pages`);
       lines.push(
-        `Sections: ${Object.entries(r.totals.by_section).map(([k, v]) => `${k}=${v}`).join(", ")}`
+        `Sections: ${Object.entries(r.totals.by_section)
+          .map(([k, v]) => `${k}=${v}`)
+          .join(", ")}`
       );
       lines.push(
-        `Tiers: ${Object.entries(r.totals.by_tier).map(([k, v]) => `${k}=${v}`).join(", ")}`
+        `Tiers: ${Object.entries(r.totals.by_tier)
+          .map(([k, v]) => `${k}=${v}`)
+          .join(", ")}`
       );
       if (r.orphans.length) {
         lines.push(`\n## Orphans (no inbound wikilinks): ${r.orphans.length}`);
@@ -420,13 +453,19 @@ server.registerTool(
         lines.push(r.stale.map((s) => `- ${s.title} — ${s.age_days}d`).join("\n"));
       }
       if (r.missing_pages.length) {
-        lines.push(`\n## Missing pages (referenced ≥3 times, not present): ${r.missing_pages.length}`);
-        lines.push(r.missing_pages.map((m) => `- ${m.title} (${m.mentions} mentions)`).join("\n"));
+        lines.push(
+          `\n## Missing pages (referenced ≥3 times, not present): ${r.missing_pages.length}`
+        );
+        lines.push(
+          r.missing_pages.map((m) => `- ${m.title} (${m.mentions} mentions)`).join("\n")
+        );
       }
       if (r.broken_provenance.length) {
         lines.push(`\n## Broken provenance: ${r.broken_provenance.length}`);
         lines.push(
-          r.broken_provenance.map((b) => `- ${b.title} → missing ${b.missing_source}`).join("\n")
+          r.broken_provenance
+            .map((b) => `- ${b.title} → missing ${b.missing_source}`)
+            .join("\n")
         );
       }
       if (r.missing_index_entries.length) {
@@ -447,22 +486,19 @@ server.registerTool(
 // ----------------- BOOT -----------------
 
 async function main() {
-  // Sanity check: can we reach the backend at all?
+  // Sanity check: reach backend and classify auth from the manifest — never
+  // log "owner" merely because WIKI_OWNER_TOKEN is set.
   try {
-    const health = (await apiGet("/healthz")) as { status: string; page_count: number };
+    const status = await wiki.connectionStatus();
     process.stderr.write(
-      `[portable-llm-wiki-mcp] connected to ${API_BASE} — ${health.page_count} pages indexed${
-        OWNER_TOKEN ? " (owner)" : " (public)"
-      }\n`
+      `[portable-llm-wiki-mcp] connected to ${status.base_url} — ${status.page_count} pages indexed (${startupAuthLabel(status)}; token_configured=${status.token_configured})\n`
     );
   } catch (err) {
-    // Truncate noisy upstream errors (e.g. HTML 404 bodies from a Vercel
-    // proxy when the URL is wrong) so the warning is one readable line.
     const raw = err instanceof Error ? err.message : String(err);
     const message = raw.length > 200 ? `${raw.slice(0, 200)}…` : raw;
     process.stderr.write(
-      `[portable-llm-wiki-mcp] WARNING: backend at ${API_BASE} is not reachable (${message}).\n` +
-        `[portable-llm-wiki-mcp] Hint: verify with 'curl ${API_BASE}/healthz'. Tools will fail until the backend responds.\n`,
+      `[portable-llm-wiki-mcp] WARNING: backend at ${wiki.baseUrl} is not reachable (${message}).\n` +
+        `[portable-llm-wiki-mcp] Hint: verify with 'curl ${wiki.baseUrl}/healthz'. Tools will fail until the backend responds.\n`
     );
   }
 
@@ -470,7 +506,35 @@ async function main() {
   await server.connect(transport);
 }
 
-main().catch((err) => {
-  process.stderr.write(`[portable-llm-wiki-mcp] fatal: ${err}\n`);
-  process.exit(1);
-});
+function isExecutedAsMain(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return import.meta.url === pathToFileURL(resolve(entry)).href;
+  } catch {
+    // Fallback: compare filesystem paths (handles some symlink/argv shapes).
+    try {
+      return fileURLToPath(import.meta.url) === resolve(entry);
+    } catch {
+      return false;
+    }
+  }
+}
+
+if (isExecutedAsMain()) {
+  main().catch((err) => {
+    process.stderr.write(`[portable-llm-wiki-mcp] fatal: ${err}\n`);
+    process.exit(1);
+  });
+}
+
+// Re-export client helpers for tests / programmatic use.
+export { wiki, server, main };
+export {
+  WikiClient,
+  classifyAuthMode,
+  buildConnectionStatus,
+  formatIngestReport,
+  ownerPreflightError,
+  resolveApiBase,
+} from "./wikiClient.js";

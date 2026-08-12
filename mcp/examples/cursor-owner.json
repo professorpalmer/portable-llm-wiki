@@ -1,11 +1,11 @@
 {
-  "_comment": "Drop the 'portable-llm-wiki' entry into ~/.cursor/mcp.json. Owner tier sees every page.",
+  "_comment": "Drop the 'portable-llm-wiki' entry into ~/.cursor/mcp.json. Owner capability is verified via the backend manifest — not assumed from token presence. Call connection_status first.",
   "mcpServers": {
     "portable-llm-wiki": {
       "command": "node",
       "args": ["/absolute/path/to/portable-llm-wiki/mcp/dist/server.js"],
       "env": {
-        "WIKI_API_BASE": "http://localhost:8000",
+        "WIKI_BASE_URL": "http://localhost:8000",
         "WIKI_OWNER_TOKEN": "<paste OWNER_TOKEN from backend/.env>"
       }
     }

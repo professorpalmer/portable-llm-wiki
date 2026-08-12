@@ -1,6 +1,6 @@
 {
   "name": "portable-llm-wiki-mcp",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "MCP server that exposes a Portable LLM Wiki to Cursor, Claude Desktop, or any MCP-aware LLM client.",
   "type": "module",
   "main": "dist/server.js",
@@ -41,7 +41,8 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "dev": "tsx src/server.ts",
-    "smoke": "node smoke-test.mjs",
+    "test": "npm run build && node --test test/reliability.test.mjs",
+    "smoke": "npm run build && node smoke-test.mjs",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {

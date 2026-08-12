@@ -1,11 +1,11 @@
 {
-  "_comment": "Hand this snippet to someone you want to share your public-tier wiki with. They paste it into THEIR ~/.cursor/mcp.json. No owner token, no private content.",
+  "_comment": "Hand this snippet to someone you want to share your public-tier wiki with. They paste it into THEIR ~/.cursor/mcp.json. No owner token, no private content. Stdio cannot use browser OAuth cookies.",
   "mcpServers": {
     "shared-wiki": {
       "command": "node",
       "args": ["/absolute/path/to/portable-llm-wiki/mcp/dist/server.js"],
       "env": {
-        "WIKI_API_BASE": "https://your-public-tunnel.example.com"
+        "WIKI_BASE_URL": "https://your-public-tunnel.example.com"
       }
     }
   }
