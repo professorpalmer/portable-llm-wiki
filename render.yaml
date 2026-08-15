@@ -67,7 +67,11 @@ services:
     # would shadow the baked-in application code at /app/backend) or at
     # `/app/wiki` (that's just the unused default-tenant fallback, which
     # the image re-seeds from wiki-demo/ on every boot). 1 GB is the
-    # smallest tier and is ~3000x our current content footprint.
+    # current dashboard size — not a markdown-era "3000x footprint".
+    # Connect-repo does a full tenant git clone onto this volume; leftover
+    # ``*.preexisting`` stash dirs used to register as extra tenants.
+    # Grow the live disk in the Render dashboard first, then bump
+    # ``sizeGB`` so Blueprint does not drift. Do not claim a grow here.
     # Single-tenant OSS self-hosters on free tier: delete this whole
     # block (see the header).
     disk:

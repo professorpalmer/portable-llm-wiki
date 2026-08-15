@@ -675,3 +675,31 @@ def test_pull_share_tokens_substantive_mint_still_blocks(
     assert result.get("ok") is False, result
     assert result.get("action") == "dirty", result
     assert not (wiki_root / "remote-page.md").exists()
+
+
+def test_bootstrap_tenant_clone_is_shallow(tmp_path: Path, monkeypatch):
+    """connect-repo must shallow-clone onto the tenant volume."""
+    bare = tmp_path / "remote.git"
+    bare.mkdir()
+    _init_bare(bare)
+    _seed_remote(bare, tmp_path)
+
+    from app import persistence as _persistence
+
+    recorded = []
+    real_run = _persistence._run_git
+
+    def _capture(args, **kwargs):
+        recorded.append(list(args))
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(_persistence, "_run_git", _capture)
+    _patch_remote_url(monkeypatch, bare)
+    wiki_root = tmp_path / "tenant-shallow"
+    tenant = _make_tenant("shallow", wiki_root, bare)
+
+    result = _persistence.bootstrap_tenant(tenant)
+    assert result["ok"] is True, result
+    clones = [args for args in recorded if args and args[0] == "clone"]
+    assert clones, recorded
+    assert clones[0][:3] == ["clone", "--depth", "1"]

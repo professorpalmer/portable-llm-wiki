@@ -596,8 +596,8 @@ def bootstrap_tenant(tenant: "Tenant") -> dict:
       * If wiki_root is already a git repo with matching remote: fetch +
         fast-forward, no destructive ops.
       * If wiki_root exists but isn't a git repo (user has un-synced local
-        content): move it aside to ``<wiki_root>.preexisting`` and clone.
-        Always non-destructive — local content is preserved.
+        content): move it aside to ``<wiki_root>.preexisting`` and clone
+        ``--depth 1``. Always non-destructive — local content is preserved.
       * If clone returns an empty repo: initialize the working tree as a
         fresh git repo, write .gitignore, commit any existing wiki/raw
         content, push to seed the remote.
@@ -651,7 +651,7 @@ def bootstrap_tenant(tenant: "Tenant") -> dict:
     # Try to clone. If the remote is empty, this returns 0 with a warning,
     # and we still end up with an initialized .git dir.
     rc, out = _run_git(
-        ["clone", "--branch", branch, remote_url, str(root)],
+        ["clone", "--depth", "1", "--branch", branch, remote_url, str(root)],
         cwd=Path("/tmp"),
         timeout=120,
     )
@@ -660,7 +660,7 @@ def bootstrap_tenant(tenant: "Tenant") -> dict:
         # specifying a branch (lets git init the working tree from HEAD,
         # which on empty remotes just makes an empty .git).
         rc2, out2 = _run_git(
-            ["clone", remote_url, str(root)],
+            ["clone", "--depth", "1", remote_url, str(root)],
             cwd=Path("/tmp"),
             timeout=120,
         )

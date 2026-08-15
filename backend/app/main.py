@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -123,6 +124,9 @@ async def _lifespan(_app: FastAPI):
         print(f"[avery-seed] {seed_result}", flush=True)
 
         _tenants.manager().load_from_disk()
+        prune = _tenants.prune_preexisting_tenant_dirs(settings._base.tenants_root)
+        if prune.get("removed") or prune.get("errors"):
+            print(f"[tenants] prune preexisting {prune}", flush=True)
         loaded = _tenants.manager().all_tenants()
         print(
             f"[tenants] loaded {len(loaded)} tenants: "
@@ -530,6 +534,46 @@ def _rss_mb() -> float | None:
     return None
 
 
+def _volume_stats() -> dict:
+    """Used/free bytes for the tenant volume (or wiki root in OSS mode).
+
+    ``shutil.disk_usage`` reports the backing filesystem. On Render that
+    is the ``wiki-tenants`` mount when ``TENANTS_ROOT=/app/tenants``.
+    Locally it is the whole disk — still better than a silent 1 GB ceiling.
+    """
+    root = (
+        settings._base.tenants_root
+        if not settings.single_tenant_mode
+        else settings.wiki_root
+    )
+    probe = root if root.exists() else root.parent
+    try:
+        usage = shutil.disk_usage(probe)
+    except OSError:
+        return {}
+    stats: dict = {
+        "disk_total_bytes": usage.total,
+        "disk_used_bytes": usage.used,
+        "disk_free_bytes": usage.free,
+    }
+    if settings.single_tenant_mode or not settings._base.tenants_root.exists():
+        return stats
+    dirs = [
+        entry
+        for entry in settings._base.tenants_root.iterdir()
+        if entry.is_dir() and not entry.name.startswith(".")
+    ]
+    stats["tenant_dir_count"] = len(dirs)
+    stats["preexisting_dir_count"] = sum(
+        1 for entry in dirs if _tenants.is_preexisting_tenant_id(entry.name)
+    )
+    try:
+        stats["tenant_count"] = len(_tenants.manager().all_tenants())
+    except Exception:  # noqa: BLE001 — healthz must never 500
+        pass
+    return stats
+
+
 @app.get("/healthz")
 def healthz() -> dict:
     payload: dict = {
@@ -540,6 +584,7 @@ def healthz() -> dict:
     rss = _rss_mb()
     if rss is not None:
         payload["rss_mb"] = rss
+    payload.update(_volume_stats())
     if not settings.single_tenant_mode:
         try:
             warm = _tenants.manager().indexed_tenant_ids()
