@@ -89,7 +89,7 @@ services:
       - key: WIKI_ROOT
         value: /app/wiki
       - key: DEFAULT_TIER
-        value: public
+        value: private
       - key: OWNER_TOKEN
         generateValue: true  # Render auto-generates a strong value
 

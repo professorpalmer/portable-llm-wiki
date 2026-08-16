@@ -551,47 +551,24 @@ def _volume_stats() -> dict:
         usage = shutil.disk_usage(probe)
     except OSError:
         return {}
-    stats: dict = {
+    return {
         "disk_total_bytes": usage.total,
         "disk_used_bytes": usage.used,
         "disk_free_bytes": usage.free,
     }
-    if settings.single_tenant_mode or not settings._base.tenants_root.exists():
-        return stats
-    dirs = [
-        entry
-        for entry in settings._base.tenants_root.iterdir()
-        if entry.is_dir() and not entry.name.startswith(".")
-    ]
-    stats["tenant_dir_count"] = len(dirs)
-    stats["preexisting_dir_count"] = sum(
-        1 for entry in dirs if _tenants.is_preexisting_tenant_id(entry.name)
-    )
-    try:
-        stats["tenant_count"] = len(_tenants.manager().all_tenants())
-    except Exception:  # noqa: BLE001 — healthz must never 500
-        pass
-    return stats
 
 
 @app.get("/healthz")
 def healthz() -> dict:
+    """Public liveness. No tenant identities, wiki_root, or tenant counts."""
     payload: dict = {
         "status": "ok",
-        "wiki_root": str(settings.wiki_root),
         "page_count": len(index.all_pages()),
     }
     rss = _rss_mb()
     if rss is not None:
         payload["rss_mb"] = rss
     payload.update(_volume_stats())
-    if not settings.single_tenant_mode:
-        try:
-            warm = _tenants.manager().indexed_tenant_ids()
-            payload["indexed_tenants"] = len(warm)
-            payload["indexed_tenant_ids"] = warm[:20]
-        except Exception:  # noqa: BLE001 — healthz must never 500
-            pass
     return payload
 
 

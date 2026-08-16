@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { apiBase, authMe } from "@/lib/api";
+import { loginReturnTo } from "@/lib/safeReturnTo";
 import {
   buildOwnerConnectPath,
   rememberMarionetteClientFromLocation,
@@ -27,12 +28,10 @@ export default function ConnectMarionettePage() {
       /* ignore */
     }
 
-    const here =
-      typeof window !== "undefined"
-        ? window.location.href
-        : "/connect/marionette?client=marionette";
     setSignInHref(
-      `${apiBase()}/auth/github/login?return_to=${encodeURIComponent(here)}`,
+      `${apiBase()}/auth/github/login?return_to=${encodeURIComponent(
+        loginReturnTo("/connect/marionette"),
+      )}`,
     );
 
     let cancelled = false;
@@ -95,13 +94,8 @@ export default function ConnectMarionettePage() {
                 try {
                   const u = new URL("/welcome", "https://portablellm.wiki");
                   u.searchParams.set("client", "marionette");
-                  if (typeof window !== "undefined") {
-                    const cur = new URLSearchParams(window.location.search);
-                    const ret = cur.get("return");
-                    const nonce = cur.get("nonce");
-                    if (ret) u.searchParams.set("return", ret);
-                    if (nonce) u.searchParams.set("nonce", nonce);
-                  }
+                  // client=marionette is the only query we forward. share/t/return/nonce
+                  // stay out of login and onboarding URLs.
                   return `${u.pathname}?${u.searchParams.toString()}`;
                 } catch {
                   return "/welcome?client=marionette";

@@ -126,10 +126,11 @@ export function buildLlmUrlForTier(opts: {
  *
  *  Recruiter / friend → /<tenant>?share=<token>. ShareTokenCatcher
  *  (mounted globally in app/layout.tsx) pulls the token out of the URL
- *  on first paint, stores it in localStorage, and strips ?share= from
- *  the address bar so the user doesn't accidentally leak the token via
- *  reload / clipboard. Subsequent page navigation respects the
- *  elevated tier.
+ *  on first paint, stores it in a tenant-scoped share-token key (never
+ *  llmwiki:ownerToken), and strips ?share= from the address bar so the
+ *  user doesn't accidentally leak the token via reload / clipboard.
+ *  Browse reads send X-Share-Token. Subsequent page navigation respects
+ *  the elevated tier.
  *
  *  Why a SEPARATE helper from buildLlmUrlForTier: the two URLs have
  *  different audiences (humans vs LLMs), different query-param shapes

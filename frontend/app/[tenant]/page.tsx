@@ -17,11 +17,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import {
   apiBase,
+  askWiki,
   fetchManifest,
-  getOwnerToken,
   type Manifest,
-  type PageSummary,
 } from "@/lib/api";
+import { HandshakeCallout } from "@/components/HandshakeCallout";
 import { Markdown } from "@/components/Markdown";
 import { PageList } from "@/components/TenantPageList";
 
@@ -46,12 +46,6 @@ type TenantMeta = {
 type AuthMeResponse = {
   authenticated: boolean;
   user?: { tenant_id: string; login: string; name: string; avatar_url: string };
-};
-
-type QueryResponse = {
-  question: string;
-  answer: string;
-  citations: { slug: string; title: string }[];
 };
 
 // ---------- Page ----------------------------------------------------------
@@ -262,116 +256,6 @@ function TenantHeader({
   );
 }
 
-// ---------- LLM handshake callout -----------------------------------------
-
-function HandshakeCallout({
-  tenant,
-  isOwnerView,
-}: {
-  tenant: string;
-  /** True when /auth/me resolved a session belonging to this tenant.
-   *  When true we add a footnote explaining that this visible URL is
-   *  public-tier — and link the owner to /owner where they can mint
-   *  a personal URL that includes their private content. Without this
-   *  affordance owners would assume copying the URL they see here is
-   *  what gives them LLM portability, and they'd be missing their
-   *  private notes from every LLM conversation. */
-  isOwnerView: boolean;
-}) {
-  // Vanity URL — Next.js rewrites /<tenant>/llm to /t/<tenant>/llm on
-  // the backend (see frontend/next.config.mjs). Short + memorable for
-  // the "paste this URL into ChatGPT" pitch.
-  //
-  // If the visitor arrived via a tier-elevated share link
-  // (`?share=<token>`), ShareTokenCatcher has already stashed the
-  // token in localStorage by the time this component renders. We
-  // append it as `?t=<token>` here so the URL we hand out from the
-  // callout grants the SAME tier the visitor is currently browsing.
-  // Without this the QR-scan recipient would land at recruiter tier
-  // (correct) but the "Paste this URL into ChatGPT" widget would hand
-  // them a public-only URL (wrong) — silently downgrading them when
-  // they pivot from human-browsing to LLM-chatting.
-  const baseLlmUrl = `https://portablellm.wiki/${tenant}/llm`;
-  const [shareToken, setShareToken] = useState<string | null>(null);
-  useEffect(() => {
-    // Read once on mount AND whenever ShareTokenCatcher emits its
-    // post-capture event so we re-resolve in time for the visitor's
-    // first interaction with the callout.
-    const sync = () => setShareToken(getOwnerToken());
-    sync();
-    if (typeof window === "undefined") return;
-    window.addEventListener("wiki:preview-as-change", sync);
-    return () => window.removeEventListener("wiki:preview-as-change", sync);
-  }, []);
-  const llmUrl = shareToken
-    ? `${baseLlmUrl}?t=${encodeURIComponent(shareToken)}`
-    : baseLlmUrl;
-  const [copied, setCopied] = useState(false);
-  const copy = () => {
-    if (typeof navigator !== "undefined" && navigator.clipboard) {
-      navigator.clipboard.writeText(llmUrl);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    }
-  };
-  return (
-    <section className="border-2 border-ink rounded-2xl bg-white p-5 sm:p-6 shadow-[0_1px_0_rgba(0,0,0,0.02),0_20px_60px_-30px_rgba(14,14,16,0.18)]">
-      <div className="text-[11px] uppercase tracking-[0.22em] font-semibold text-accent">
-        Paste this URL into any LLM
-      </div>
-      <div className="mt-1.5 text-lg sm:text-xl font-semibold tracking-tight text-ink">
-        One URL. Any model. Full context.
-      </div>
-      <p className="mt-1.5 text-sm text-ink-muted leading-relaxed">
-        Any LLM that can fetch URLs can now read this wiki — try Claude,
-        ChatGPT, Cursor, Gemini.
-      </p>
-
-      <div className="mt-4 flex items-center gap-2 bg-paper-soft/70 rounded-lg p-2 pr-2.5">
-        <code className="flex-1 font-mono text-sm text-ink truncate px-2 py-1.5">
-          {llmUrl}
-        </code>
-        <button
-          onClick={copy}
-          className="shrink-0 px-3 py-1.5 rounded-md bg-ink text-paper text-xs font-medium hover:bg-ink-soft inline-flex items-center gap-1.5 whitespace-nowrap"
-        >
-          {copied ? "Copied ✓" : "Copy ↗"}
-        </button>
-      </div>
-
-      <div className="mt-3 text-xs flex items-center gap-3 flex-wrap">
-        <a
-          href={llmUrl}
-          target="_blank"
-          rel="noreferrer"
-          className="text-accent hover:underline"
-        >
-          preview what an LLM sees →
-        </a>
-        {isOwnerView && !shareToken && (
-          // The URL above is the PUBLIC-tier link — the same artifact a
-          // stranger gets when they scan the QR. Pasting it into YOUR
-          // ChatGPT gives ChatGPT only your public pages, which silently
-          // strips out exactly the private context that would make its
-          // answers about you actually useful. The fix lives in /owner
-          // (PersonalLlmUrlPanel) — a one-time mint that produces a
-          // tokenized URL revealing your full wiki. This footnote is
-          // owner-only, and suppressed when a share token is active
-          // (because then the displayed URL already includes ?t=…
-          // elevating to that tier).
-          <Link
-            href={`/${tenant}/owner#personal-llm-url`}
-            className="text-red-700 hover:text-red-900 hover:underline"
-            title="Mint a private-tier URL for your own LLMs — they'll see your full wiki including private notes."
-          >
-            this URL is public-tier · get your personal LLM URL →
-          </Link>
-        )}
-      </div>
-    </section>
-  );
-}
-
 // ---------- Inline ask form -----------------------------------------------
 
 type ChatMessage =
@@ -404,25 +288,7 @@ function AskInline({ tenant }: { tenant: string }) {
     setDraft("");
     setPending(true);
     try {
-      const r = await fetch(
-        `${apiBase()}/t/${encodeURIComponent(tenant)}/wiki/query`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ question: q }),
-        },
-      );
-      if (!r.ok) {
-        let detail = `HTTP ${r.status}`;
-        try {
-          const j = (await r.json()) as { detail?: string };
-          if (j?.detail) detail = j.detail;
-        } catch {
-          /* ignore */
-        }
-        throw new Error(detail);
-      }
-      const data = (await r.json()) as QueryResponse;
+      const data = await askWiki(q, tenant);
       setMessages((m) => [
         ...m,
         {

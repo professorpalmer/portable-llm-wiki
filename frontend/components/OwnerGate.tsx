@@ -22,6 +22,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { apiBase, authMe, isHostedMode, type AuthMeResponse } from "@/lib/api";
+import { loginReturnTo } from "@/lib/safeReturnTo";
 
 type GateState =
   | { kind: "loading" }
@@ -103,10 +104,9 @@ export function OwnerGate({
     );
   }
   if (state.kind === "anonymous") {
-    const signInUrl =
-      typeof window !== "undefined"
-        ? `${apiBase()}/auth/github/login?return_to=${encodeURIComponent(window.location.href)}`
-        : `${apiBase()}/auth/github/login`;
+    const signInUrl = `${apiBase()}/auth/github/login?return_to=${encodeURIComponent(
+      loginReturnTo(),
+    )}`;
     return (
       <PanelMessage
         eyebrow="owner only"
@@ -132,10 +132,9 @@ export function OwnerGate({
     );
   }
   if (state.kind === "tenant-missing") {
-    const signInUrl =
-      typeof window !== "undefined"
-        ? `${apiBase()}/auth/github/login?return_to=${encodeURIComponent(window.location.href)}`
-        : `${apiBase()}/auth/github/login`;
+    const signInUrl = `${apiBase()}/auth/github/login?return_to=${encodeURIComponent(
+      loginReturnTo(),
+    )}`;
     return (
       <PanelMessage
         eyebrow="wiki not on server"

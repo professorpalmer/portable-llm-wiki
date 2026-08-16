@@ -67,7 +67,7 @@ In the Render dashboard for the FastAPI service, set:
 ```bash
 # Multi-tenant mode
 SINGLE_TENANT_MODE=0
-TENANTS_ROOT=/var/data/tenants         # persistent disk path
+TENANTS_ROOT=/app/tenants              # must match render.yaml disk mountPath
 
 # Session cookie
 SESSION_SECRET=<openssl rand -hex 32>
@@ -82,23 +82,26 @@ GITHUB_OAUTH_REDIRECT_URL=https://api.portablellm.wiki/auth/github/callback
 PUBLIC_BASE_URL=https://portablellm.wiki
 CORS_ORIGINS=https://portablellm.wiki
 
-# Default tier for new pages (private is safer; public makes onboarding
-# feel snappier because newly-drafted pages show up to anonymous viewers
-# right away)
-DEFAULT_TIER=public
+# Default tier for new pages. Private so nothing is public until the
+# owner promotes it. Avery demo pages stay public via the seeder.
+DEFAULT_TIER=private
 
 # Anthropic + OpenAI keys: still shared in v1.0. v1.1 adds per-tenant
 # BYO LLM keys.
 ANTHROPIC_API_KEY=<key>
 ```
 
-`OWNER_TOKEN` is **not used** in hosted mode — each tenant is "the
-owner" of their own wiki by virtue of a valid session for their
-`tenant_id`. You can leave it unset.
+`OWNER_TOKEN` is **not a master key** in hosted mode — it must not
+unlock another tenant's `/owner/*` routes. Each tenant is owned by a
+matching session cookie or that tenant's private personal-LLM share
+token. You can leave `OWNER_TOKEN` unset.
 
-Make sure the Render disk is mounted at `/var/data` (the default for
-Render persistent disks) so `TENANTS_ROOT=/var/data/tenants` survives
-restarts.
+Make sure the Render disk `mountPath` is `/app/tenants` so
+`TENANTS_ROOT=/app/tenants` survives restarts (see `render.yaml`).
+
+Sign-out and switch-account in the nav must **POST** (`POST /auth/logout`,
+`POST /auth/switch-account`). GET on those paths does not clear the
+session.
 
 ### 4. Vercel: frontend env vars
 

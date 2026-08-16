@@ -27,7 +27,7 @@ services:
       # wiki. Generate with: `openssl rand -hex 32`
       OWNER_TOKEN: ${OWNER_TOKEN:?set OWNER_TOKEN in your environment or .env file}
       WIKI_ROOT: /app/wiki
-      DEFAULT_TIER: public
+      DEFAULT_TIER: private
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8000}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
       # Optional — uncomment + set for LLM-backed answers. Without these

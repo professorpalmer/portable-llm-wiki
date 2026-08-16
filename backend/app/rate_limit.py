@@ -236,6 +236,9 @@ def _is_llm_targeted_path(path: str) -> bool:
 _LLM_SYNTHESIS_PREFIXES: tuple[str, ...] = (
     "/wiki/query",
     "/wiki/chat",  # covers /wiki/chat and /wiki/chat/stream
+    "/onboarding/import-url",
+    "/onboarding/import-text",
+    "/onboarding/assemble",
 )
 
 

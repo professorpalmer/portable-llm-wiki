@@ -609,6 +609,7 @@ async def draft_starter_pages(
         prompt=prompt,
         source_label=source_label,
         tenant=tenant,
+        force_tier="private",
     )
 
 

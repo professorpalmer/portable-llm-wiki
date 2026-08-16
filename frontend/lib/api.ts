@@ -1,6 +1,8 @@
 // Browser-side API client. All requests proxy through Next.js /api/backend/*
 // (configured in next.config.mjs) so we don't fight CORS during local dev.
 
+import { getShareToken } from "./shareToken";
+
 /**
  * Durability verdict the backend stamps on every content-create response so
  * the UI can warn when a write won't actually reach a git remote / hosted
@@ -208,13 +210,16 @@ function ownerHeaders(extra?: HeadersInit): HeadersInit {
 /**
  * Browse/ask/graph headers — may include ``X-Preview-As`` from
  * ``wiki.preview_as`` so owners can audit the wiki as public /
- * recruiter / friend. Do not use for owner-console verify or
- * ``/owner/*`` endpoints.
+ * recruiter / friend, and ``X-Share-Token`` from the tenant-scoped
+ * share-token store (never the owner-token key). Do not use for
+ * owner-console verify or ``/owner/*`` endpoints.
  */
-function browseHeaders(extra?: HeadersInit): HeadersInit {
+function browseHeaders(extra?: HeadersInit, tenant?: string): HeadersInit {
   const h = { ...(ownerHeaders(extra) as Record<string, string>) };
   const preview = getPreviewAs();
   if (preview !== "owner") h["X-Preview-As"] = preview;
+  const share = getShareToken(tenant);
+  if (share) h["X-Share-Token"] = share;
   return h;
 }
 
@@ -270,7 +275,7 @@ export async function fetchManifest(
 ): Promise<Manifest> {
   return asJson<Manifest>(
     await apiFetch(`${wikiBase(tenant)}/wiki/manifest.json`, {
-      headers: opts?.asOwner ? ownerHeaders() : browseHeaders(),
+      headers: opts?.asOwner ? ownerHeaders() : browseHeaders(undefined, tenant),
       cache: "no-store",
     })
   );
@@ -280,7 +285,7 @@ export async function fetchPage(slug: string, tenant?: string): Promise<PageFull
   return asJson<PageFull>(
     await apiFetch(
       `${wikiBase(tenant)}/wiki/page/${encodeURIComponent(slug)}`,
-      { headers: browseHeaders(), cache: "no-store" }
+      { headers: browseHeaders(undefined, tenant), cache: "no-store" }
     )
   );
 }
@@ -289,7 +294,7 @@ export async function searchWiki(q: string, tenant?: string): Promise<SearchResp
   return asJson<SearchResponse>(
     await apiFetch(
       `${wikiBase(tenant)}/wiki/search?q=${encodeURIComponent(q)}`,
-      { headers: browseHeaders(), cache: "no-store" }
+      { headers: browseHeaders(undefined, tenant), cache: "no-store" }
     )
   );
 }
@@ -298,7 +303,7 @@ export async function askWiki(question: string, tenant?: string): Promise<QueryR
   return asJson<QueryResponse>(
     await apiFetch(`${wikiBase(tenant)}/wiki/query`, {
       method: "POST",
-      headers: browseHeaders(),
+      headers: browseHeaders(undefined, tenant),
       body: JSON.stringify({ question }),
     })
   );
@@ -850,7 +855,7 @@ export async function chatWithWiki(
   return asJson<ChatResponse>(
     await apiFetch(`${wikiBase(tenant)}/wiki/chat`, {
       method: "POST",
-      headers: { ...browseHeaders(), "Content-Type": "application/json" },
+      headers: { ...browseHeaders(undefined, tenant), "Content-Type": "application/json" },
       body: JSON.stringify({ message, history }),
     }),
   );
@@ -894,7 +899,7 @@ export async function streamChatWithWiki(
   const r = await apiFetch(`${wikiBase(tenant)}/wiki/chat/stream`, {
     method: "POST",
     headers: {
-      ...browseHeaders(),
+      ...browseHeaders(undefined, tenant),
       "Content-Type": "application/json",
       Accept: "text/event-stream",
     },
@@ -1087,7 +1092,7 @@ export type GraphResponse = {
 
 export async function fetchGraph(tenant?: string): Promise<GraphResponse> {
   return asJson<GraphResponse>(
-    await apiFetch(`${wikiBase(tenant)}/wiki/graph`, { headers: browseHeaders(), cache: "no-store" })
+    await apiFetch(`${wikiBase(tenant)}/wiki/graph`, { headers: browseHeaders(undefined, tenant), cache: "no-store" })
   );
 }
 
@@ -1095,7 +1100,7 @@ export async function fetchSubgraph(slug: string, hops = 1, tenant?: string): Pr
   return asJson<GraphResponse>(
     await apiFetch(
       `${wikiBase(tenant)}/wiki/graph/${encodeURIComponent(slug)}?hops=${hops}`,
-      { headers: browseHeaders(), cache: "no-store" }
+      { headers: browseHeaders(undefined, tenant), cache: "no-store" }
     )
   );
 }
@@ -1333,6 +1338,8 @@ export async function ownerReplacePage(slug: string, markdown: string, tenant?: 
 // All requests use `credentials: "include"` so the session cookie set
 // by the GitHub OAuth callback is sent back to the backend.
 
+export type TenantVisibility = "public" | "unlisted" | "private";
+
 export type AuthTenant = {
   id: string;
   github_login: string;
@@ -1340,6 +1347,7 @@ export type AuthTenant = {
   avatar_url: string | null;
   created_at: string;
   is_public: boolean;
+  visibility?: TenantVisibility;
 };
 
 export type AuthUser = {
@@ -1668,6 +1676,20 @@ export async function ownerDeleteAccount(): Promise<DeleteAccountResponse> {
   return backendFetch<DeleteAccountResponse>("/owner/account", {
     method: "DELETE",
   });
+}
+
+/** Hosted-only: list this wiki on the public directory, keep it URL-only, or hide it. */
+export async function ownerSetTenantVisibility(
+  visibility: TenantVisibility,
+  tenant?: string,
+): Promise<{ ok: boolean; id: string; visibility: TenantVisibility }> {
+  return asJson(
+    await apiFetch(`${wikiBase(tenant)}/owner/tenant/visibility`, {
+      method: "POST",
+      headers: ownerHeaders(),
+      body: JSON.stringify({ visibility }),
+    }),
+  );
 }
 
 /**
