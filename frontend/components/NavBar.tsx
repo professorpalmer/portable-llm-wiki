@@ -4,7 +4,8 @@ import Link from "next/link";
 import { usePathname, useParams } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { apiBase, authMe, isHostedMode, type AuthUser } from "@/lib/api";
+import { apiBase, authLogout, authMe, isHostedMode, type AuthUser } from "@/lib/api";
+import { loginReturnTo } from "@/lib/safeReturnTo";
 
 import { ViewerBadge } from "./ViewerBadge";
 
@@ -272,10 +273,8 @@ function HostedIdentityBadge({
     return <span className="text-xs text-ink-muted">…</span>;
   }
   if (!viewer) {
-    const returnTo =
-      typeof window !== "undefined" ? window.location.href : "/";
     const signInUrl = `${apiBase()}/auth/github/login?return_to=${encodeURIComponent(
-      returnTo,
+      loginReturnTo(),
     )}`;
     return (
       <a
@@ -287,15 +286,28 @@ function HostedIdentityBadge({
     );
   }
 
-  const homeUrl =
-    typeof window !== "undefined" ? window.location.origin : "/";
-  const signOutUrl = `${apiBase()}/auth/logout?return_to=${encodeURIComponent(homeUrl)}`;
-  // "Switch account" = clear our session AND kick off GitHub OAuth in
-  // one server-side hop. Backend endpoint /auth/switch-account does
-  // both — needed because /auth/logout's return_to is restricted to
-  // the frontend origin (correctly), so a client-side chain wouldn't
-  // make it to /auth/github/login.
-  const switchAccountUrl = `${apiBase()}/auth/switch-account?return_to=${encodeURIComponent(homeUrl)}`;
+  const signOut = async () => {
+    try {
+      await authLogout();
+    } catch {
+      /* still leave the page */
+    }
+    window.location.assign("/");
+  };
+
+  // GET /auth/switch-account no longer clears the session (CSRF).
+  // POST logout, then send the user through GitHub login ourselves.
+  const switchAccount = async () => {
+    try {
+      await authLogout();
+    } catch {
+      /* still offer a fresh login */
+    }
+    const returnTo = loginReturnTo();
+    window.location.assign(
+      `${apiBase()}/auth/github/login?return_to=${encodeURIComponent(returnTo)}`,
+    );
+  };
 
   return (
     <div ref={wrapRef} className="relative">
@@ -359,15 +371,13 @@ function HostedIdentityBadge({
           {/* Account management */}
           <div className="border-t border-paper-soft py-1">
             <MenuLink
-              href={switchAccountUrl}
               label="Switch GitHub account"
-              external
+              onAction={switchAccount}
               hint="Uses whichever account you're currently signed into on github.com. Open incognito to use a different one."
             />
             <MenuLink
-              href={signOutUrl}
               label="Sign out"
-              external
+              onAction={signOut}
               danger
             />
           </div>
@@ -380,37 +390,42 @@ function HostedIdentityBadge({
 function MenuLink({
   href,
   label,
-  external,
   danger,
   hint,
   onClick,
+  onAction,
 }: {
-  href: string;
+  href?: string;
   label: string;
-  external?: boolean;
   danger?: boolean;
   hint?: string;
   onClick?: () => void;
+  onAction?: () => void | Promise<void>;
 }) {
   const className = `block w-full text-left px-4 py-2 text-sm hover:bg-paper-soft/60 ${
     danger ? "text-red-700 hover:text-red-800" : "text-ink"
   }`;
-  // External (= /auth/logout etc.) needs a full navigation, not Next
-  // client-side routing — the cookie clear happens server-side.
-  if (external) {
+  if (onAction) {
     return (
-      <a href={href} className={className} onClick={onClick}>
+      <button
+        type="button"
+        className={className}
+        onClick={() => {
+          onClick?.();
+          void onAction();
+        }}
+      >
         <div>{label}</div>
         {hint && (
           <div className="mt-0.5 text-[11px] text-ink-muted font-normal leading-snug">
             {hint}
           </div>
         )}
-      </a>
+      </button>
     );
   }
   return (
-    <Link href={href} className={className} onClick={onClick}>
+    <Link href={href || "/"} className={className} onClick={onClick}>
       <div>{label}</div>
       {hint && (
         <div className="mt-0.5 text-[11px] text-ink-muted font-normal leading-snug">

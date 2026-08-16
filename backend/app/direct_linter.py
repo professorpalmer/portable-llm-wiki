@@ -69,6 +69,7 @@ from .orchestrator import (
     _load_jobs,
     _lock,
     _save_jobs,
+    stamp_tenant_id,
 )
 
 
@@ -349,6 +350,7 @@ def _create_running_job(worker_name: str, swarm_id: str, log_path: Path) -> Trac
         artifacts_path=str(
             settings.wiki_root / ".lint" / swarm_id / f"{worker_name}.json"
         ),
+        tenant_id=stamp_tenant_id(),
     )
     job.status = "running"
     with _lock:

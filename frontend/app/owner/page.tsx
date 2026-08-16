@@ -10,6 +10,7 @@ import { ShareTokensPanel } from "@/components/ShareTokensPanel";
 import { SwitchRepoModal } from "@/components/SwitchRepoModal";
 import {
   apiBase,
+  authLogout,
   authMe,
   fetchManifest,
   fetchPublicConfig,
@@ -27,6 +28,7 @@ import {
   ownerGetLintSwarm,
   ownerDraftMissingPage,
   ownerDraftContradiction,
+  ownerSetTenantVisibility,
   ownerSyncNow,
   ownerSyncPull,
   ownerSyncStatus,
@@ -43,6 +45,7 @@ import {
   type PreviewAs,
   type SyncNowResponse,
   type SyncPullResponse,
+  type TenantVisibility,
   type TrackedJob,
 } from "@/lib/api";
 import { useTenant } from "@/lib/useTenant";
@@ -531,14 +534,20 @@ function OwnerPageInner({ tenant }: { tenant?: string }) {
               {manifest.page_count} page{manifest.page_count === 1 ? "" : "s"} indexed
             </span>
           )}
-          <a
-            href={`${apiBase()}/auth/logout?return_to=${encodeURIComponent(
-              typeof window !== "undefined" ? window.location.origin : "/",
-            )}`}
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                await authLogout();
+              } catch {
+                /* still leave */
+              }
+              window.location.assign("/");
+            }}
             className="text-xs text-ink-muted hover:text-ink underline ml-auto sm:ml-3"
           >
             Sign out
-          </a>
+          </button>
         </section>
       )}
 
@@ -573,6 +582,7 @@ function OwnerPageInner({ tenant }: { tenant?: string }) {
        * stored OAuth token. Same persistence machinery, keyed to the
        * user's repo instead of an ops-owned one. Tracked, not built. */}
       {authed && !hosted && <PersistencePanel tenant={tenant} />}
+      {authed && hosted && <WikiVisibilityPanel tenantId={tenant} />}
       {authed && hosted && <GitHubSyncPanel tenantId={tenant} />}
 
       {/* PersonalLlmUrlPanel sits ABOVE ShareTokensPanel because it
@@ -1443,6 +1453,97 @@ function PreviewAsPanel({
           </button>
         ))}
       </div>
+    </section>
+  );
+}
+
+const VISIBILITY_OPTIONS: {
+  value: TenantVisibility;
+  label: string;
+  hint: string;
+}[] = [
+  {
+    value: "unlisted",
+    label: "Unlisted",
+    hint: "Reachable at your URL. Not shown on the public directory.",
+  },
+  {
+    value: "public",
+    label: "Public",
+    hint: "Listed on portablellm.wiki for anyone to discover.",
+  },
+  {
+    value: "private",
+    label: "Private",
+    hint: "Hidden from the directory and from /tenants/{id}. Direct URL 404s for anonymous viewers.",
+  },
+];
+
+/** Hosted-mode directory listing. New signups default to unlisted. */
+export function WikiVisibilityPanel({ tenantId }: { tenantId?: string }) {
+  const [visibility, setVisibility] = useState<TenantVisibility>("unlisted");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    authMe()
+      .then((me) => {
+        const next = me.tenant?.visibility;
+        if (next === "public" || next === "unlisted" || next === "private") {
+          setVisibility(next);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  async function save(next: TenantVisibility) {
+    setSaving(true);
+    setError(null);
+    try {
+      const out = await ownerSetTenantVisibility(next, tenantId);
+      setVisibility(out.visibility);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="mt-6 bg-white border border-paper-soft rounded-xl p-4 sm:p-5">
+      <div className="text-sm font-medium text-ink">Wiki visibility</div>
+      <p className="text-xs text-ink-muted mt-1 mb-3">
+        New wikis start unlisted. Public puts your GitHub login on the
+        landing directory. Private hides the wiki from anonymous visitors.
+      </p>
+      <div className="flex flex-col gap-2">
+        {VISIBILITY_OPTIONS.map((opt) => (
+          <label
+            key={opt.value}
+            className="flex items-start gap-2 text-sm text-ink cursor-pointer"
+          >
+            <input
+              type="radio"
+              name="wiki-visibility"
+              value={opt.value}
+              checked={visibility === opt.value}
+              disabled={saving}
+              onChange={() => {
+                void save(opt.value);
+              }}
+            />
+            <span>
+              <span className="font-medium">{opt.label}</span>
+              <span className="block text-xs text-ink-muted">{opt.hint}</span>
+            </span>
+          </label>
+        ))}
+      </div>
+      {error && (
+        <p className="text-xs text-red-700 mt-2" role="alert">
+          {error}
+        </p>
+      )}
     </section>
   );
 }

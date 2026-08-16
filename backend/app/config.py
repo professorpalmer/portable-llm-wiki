@@ -107,6 +107,20 @@ class Settings:
         raise AttributeError(name)
 
 
+_PLACEHOLDER_OWNER_TOKENS = frozenset({"change-me-to-a-long-random-string"})
+
+
+def _load_owner_token(single_tenant_mode: bool) -> str:
+    """Read OWNER_TOKEN. Refuse the documented example placeholder in OSS."""
+    token = os.environ.get("OWNER_TOKEN", "").strip()
+    if single_tenant_mode and token in _PLACEHOLDER_OWNER_TOKENS:
+        raise RuntimeError(
+            "OWNER_TOKEN is still the example placeholder. Generate a real "
+            "token with: openssl rand -hex 32"
+        )
+    return token
+
+
 def _load_settings() -> Settings:
     raw_root = os.environ.get("WIKI_ROOT", "").strip()
     if not raw_root:
@@ -161,7 +175,7 @@ def _load_settings() -> Settings:
         default_wiki_root=root,
         tenants_root=tenants_root,
         single_tenant_mode=single_tenant_mode,
-        owner_token=os.environ.get("OWNER_TOKEN", "").strip(),
+        owner_token=_load_owner_token(single_tenant_mode),
         default_tier=default_tier,
         anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY") or None,
         # Default to the top of ANTHROPIC_FALLBACK_CHAIN in llm.py. If this

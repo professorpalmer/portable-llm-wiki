@@ -56,6 +56,7 @@ class LintSwarmRecord:
     worker_kinds: dict[str, str] = field(default_factory=dict)  # tracking_id -> kind
     status: str = "running"  # running | done | error
     ended_at: Optional[str] = None
+    tenant_id: Optional[str] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -345,6 +346,7 @@ def _spawn_worker(
         cwd=cwd,
         log_path=str(log_path),
         artifacts_path=output_file,
+        tenant_id=orchestrator.stamp_tenant_id(),
     )
 
     proc = subprocess.Popen(
@@ -403,6 +405,7 @@ def start_lint_swarm(workers: Optional[list[str]] = None) -> LintSwarmRecord:
         artifacts_dir=str(artifacts_dir),
         worker_tracking_ids=[],
         worker_kinds={},
+        tenant_id=orchestrator.stamp_tenant_id(),
     )
 
     use_direct_fallback = False
@@ -477,16 +480,32 @@ def start_lint_swarm(workers: Optional[list[str]] = None) -> LintSwarmRecord:
 # ---------------------------------------------------------------------------
 
 
+def _swarm_visible(rec: LintSwarmRecord) -> bool:
+    if rec.tenant_id:
+        return orchestrator.job_visible_to_current(rec.tenant_id, rec.artifacts_dir)
+    # Legacy records: visible only when artifacts live under this tenant's wiki.
+    root = Path(orchestrator._scope_wiki_root()).resolve()
+    try:
+        Path(rec.artifacts_dir).resolve().relative_to(root)
+        return True
+    except (ValueError, OSError):
+        return False
+
+
 def get_swarm(swarm_id: str) -> Optional[LintSwarmRecord]:
     with _swarm_lock:
-        return _load_swarms().get(swarm_id)
+        rec = _load_swarms().get(swarm_id)
+    if rec is None or not _swarm_visible(rec):
+        return None
+    return rec
 
 
 def list_swarms(limit: int = 25) -> list[LintSwarmRecord]:
     with _swarm_lock:
         recs = list(_load_swarms().values())
-    recs.sort(key=lambda r: r.started_at, reverse=True)
-    return recs[:limit]
+    visible = [r for r in recs if _swarm_visible(r)]
+    visible.sort(key=lambda r: r.started_at, reverse=True)
+    return visible[:limit]
 
 
 def _read_worker_artifact(artifacts_dir: Path, worker_name: str) -> dict:

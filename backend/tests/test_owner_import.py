@@ -186,3 +186,28 @@ def test_import_uses_starter_prompt_not_capture_prompt():
     # starter prompt — that asymmetry is what keeps the page-count
     # behavior different.
     assert "extending an existing wiki" not in _dd._SYSTEM_PROMPT
+
+
+def test_draft_starter_pages_forces_private(monkeypatch):
+    """Starter drafts clamp to private, same as capture-context pages."""
+    captured = {}
+
+    async def fake_draft(**kwargs):
+        captured.update(kwargs)
+        return _dd.DraftResult(backend="test", model="x")
+
+    monkeypatch.setattr(_dd, "_draft_with_prompt", fake_draft)
+
+    import asyncio
+
+    from app.tenants import Tenant
+
+    tenant = Tenant(id="t", wiki_root=__import__("pathlib").Path("/tmp/unused"))
+    asyncio.run(
+        _dd.draft_starter_pages(
+            source_label="bio",
+            source_content="hello world",
+            tenant=tenant,
+        )
+    )
+    assert captured.get("force_tier") == "private"

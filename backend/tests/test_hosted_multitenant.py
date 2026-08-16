@@ -43,14 +43,21 @@ def multi_tenant_app(tmp_path, monkeypatch):
     # Seed two tenants on disk. Pages are explicitly public so the
     # anonymous viewer in the test client can see them, with explicit titles.
     tenants_root = tmp_path / "tenants"
-    for tid, body in (
+    for tid, body, is_demo in (
         (
             "alice",
             "---\ntitle: Alice Index\ntier: public\n---\n# Alice\n\nAlice loves portable wikis.\n",
+            False,
         ),
         (
             "bob",
             "---\ntitle: Bob Index\ntier: public\n---\n# Bob\n\nBob runs a homelab.\n",
+            False,
+        ),
+        (
+            "avery",
+            "---\ntitle: Avery Index\ntier: public\n---\n# Avery\n\nPublic demo wiki.\n",
+            True,
         ),
     ):
         wiki = tenants_root / tid / "wiki"
@@ -70,7 +77,7 @@ def multi_tenant_app(tmp_path, monkeypatch):
                     "gh_default_branch": "main",
                     "created_at": "2026-05-24T00:00:00Z",
                     "updated_at": "2026-05-24T00:00:00Z",
-                    "is_demo": tid == "alice",
+                    "is_demo": is_demo,
                     "visibility": "public",
                 }
             ),
@@ -107,6 +114,7 @@ def multi_tenant_app(tmp_path, monkeypatch):
     import app.tenants as _tenants
     import app.wiki as _wiki
     import app.auth as _auth
+    import app.hosted_routes as _hosted
     import app.main as _main
 
     importlib.reload(_config)
@@ -116,6 +124,7 @@ def multi_tenant_app(tmp_path, monkeypatch):
     # tenants ``current_tenant_var`` for session-cookie ownership. Reload
     # it AFTER config + tenants so it picks up the fresh references.
     importlib.reload(_auth)
+    importlib.reload(_hosted)
     importlib.reload(_main)
 
     from fastapi.testclient import TestClient
@@ -162,6 +171,7 @@ def multi_tenant_app(tmp_path, monkeypatch):
         importlib.reload(_tenants)
         importlib.reload(_wiki)
         importlib.reload(_auth)
+        importlib.reload(_hosted)
         importlib.reload(_main)
 
 
@@ -304,11 +314,19 @@ def test_healthz_reports_tenant_volume(multi_tenant_app):
     r = multi_tenant_app.get("/healthz")
     assert r.status_code == 200
     data = r.json()
-    assert data["tenant_count"] == 2
-    assert data["tenant_dir_count"] == 2
-    assert data["preexisting_dir_count"] == 0
+    assert data["status"] == "ok"
     assert data["disk_total_bytes"] > 0
     assert data["disk_free_bytes"] >= 0
+    assert data["disk_used_bytes"] >= 0
+    for leaked in (
+        "wiki_root",
+        "indexed_tenant_ids",
+        "indexed_tenants",
+        "tenant_count",
+        "tenant_dir_count",
+        "preexisting_dir_count",
+    ):
+        assert leaked not in data, leaked
 
 
 def test_tenant_metadata_endpoint(multi_tenant_app):
@@ -317,7 +335,7 @@ def test_tenant_metadata_endpoint(multi_tenant_app):
     payload = r.json()
     assert payload["id"] == "alice"
     assert payload["display_name"] == "Alice"
-    assert payload["is_demo"] is True
+    assert payload["is_demo"] is False
 
 
 def test_oauth_login_redirects_to_github(multi_tenant_app):
@@ -516,15 +534,12 @@ def test_owner_routes_still_require_some_auth(multi_tenant_app):
     assert r.status_code == 401, r.text
 
 
-def test_logout_get_clears_session_and_redirects(multi_tenant_app):
-    """GET /auth/logout must clear the session AND 302 to a safe target.
+def test_logout_get_does_not_clear_session(multi_tenant_app):
+    """GET /auth/logout must not clear the session (logout CSRF).
 
-    Reachable from the nav menu's "Sign out" link, so the redirect has
-    to land on the frontend origin and the session has to actually be
-    gone (i.e. a follow-up /auth/me reports unauthenticated).
+    Nav must POST. GET returns 405 and leaves the cookie intact.
     """
     _set_session_user(multi_tenant_app, "alice", login="alice")
-    # Sanity: we're authenticated before logout.
     r = multi_tenant_app.get("/auth/me")
     assert r.status_code == 200
     assert r.json().get("authenticated") is True
@@ -532,30 +547,31 @@ def test_logout_get_clears_session_and_redirects(multi_tenant_app):
     r = multi_tenant_app.get(
         "/auth/logout?return_to=/welcome", follow_redirects=False
     )
-    assert r.status_code == 302
-    # Returned target should reanchor onto the frontend origin if
-    # PUBLIC_BASE_URL is set, OR keep the relative path if not. We
-    # don't pin a literal here — the redirect just must not 500.
-    assert "Location" in r.headers
+    assert r.status_code == 405
+    assert "POST" in r.json().get("detail", "")
+
+    r = multi_tenant_app.get("/auth/me")
+    assert r.json().get("authenticated") is True
 
 
-def test_switch_account_clears_session_then_kicks_oauth(multi_tenant_app):
-    """GET /auth/switch-account is the "sign in as a different GitHub
-    account" affordance from the nav menu. It must clear the current
-    session AND 302 into /auth/github/login (which itself 302s out to
-    github.com). Pinning this end-to-end stops a regression where one
-    half (logout) silently happens but the next hop (OAuth kickoff)
-    breaks, leaving the user signed out with no path back in.
-    """
+def test_switch_account_get_does_not_clear_session(multi_tenant_app):
+    """GET /auth/switch-account must not clear the session. Nav must POST."""
     _set_session_user(multi_tenant_app, "alice", login="alice")
     r = multi_tenant_app.get("/auth/switch-account", follow_redirects=False)
+    assert r.status_code == 405
+    assert "POST" in r.json().get("detail", "")
+    r = multi_tenant_app.get("/auth/me")
+    assert r.json().get("authenticated") is True
+
+
+def test_switch_account_post_clears_session_then_kicks_oauth(multi_tenant_app):
+    """POST /auth/switch-account clears the session and 302s into OAuth."""
+    _set_session_user(multi_tenant_app, "alice", login="alice")
+    r = multi_tenant_app.post("/auth/switch-account", follow_redirects=False)
     assert r.status_code == 302
     location = r.headers.get("Location", "")
     assert "/auth/github/login" in location, location
 
-    # Following one more hop should land on github.com — but we don't
-    # want the test to actually hit github. Just confirm the next
-    # response is also a 302 (to github.com/login/oauth/authorize).
     r = multi_tenant_app.get(location, follow_redirects=False)
     assert r.status_code == 302
     assert "github.com/login/oauth/authorize" in r.headers.get("Location", "")
@@ -1321,77 +1337,24 @@ def test_safe_redirect_when_public_base_is_www_accepts_apex_too(monkeypatch):
     )
 
 
-def test_logout_with_www_return_to_lands_on_frontend_not_welcome(monkeypatch):
-    """The exact failure mode from the user-reported bug:
+def test_logout_get_with_www_return_to_does_not_clear_session(multi_tenant_app):
+    """GET /auth/logout is a no-op even with a frontend return_to.
 
-      1. User on www.portablellm.wiki clicks "Sign out".
-      2. NavBar sends ``return_to=https://www.portablellm.wiki``.
-      3. PUBLIC_BASE_URL is configured as the apex (``https://portablellm.wiki``).
-      4. Old _safe_redirect rejected the www variant.
-      5. Logout fell back to _default_return_to() = ``<base>/welcome``.
-      6. The welcome page sees authenticated=false and renders
-         "We can't finish signing you in" with the cookie-warning copy.
-
-    Post-fix the redirect must land on the public-frontend ROOT, not
-    /welcome, regardless of which apex/www variant the user is on.
+    Nav must POST. This used to 302-clear the session (logout CSRF).
     """
-    monkeypatch.setenv("PUBLIC_BASE_URL", "https://portablellm.wiki")
-    monkeypatch.setenv("SINGLE_TENANT_MODE", "0")
-    monkeypatch.setenv("SESSION_SECRET", "test-secret-must-be-long-enough")
-    import app.config
-    import app.hosted_routes
-    import app.main as app_main
-
-    importlib.reload(app.config)
-    importlib.reload(app.hosted_routes)
-    importlib.reload(app_main)
-
-    from fastapi.testclient import TestClient
-
-    client = TestClient(app_main.app)
-    r = client.get(
+    r = multi_tenant_app.get(
         "/auth/logout?return_to=https://www.portablellm.wiki",
         follow_redirects=False,
     )
-    assert r.status_code == 302
-    location = r.headers.get("Location", "")
-    # The whole point: NOT /welcome.
-    assert "/welcome" not in location, (
-        f"post-logout redirect must not land on /welcome (anon visit "
-        f"renders a 'sign-in problem' error); got: {location!r}"
-    )
-    # Should land on a frontend origin (either apex or www variant).
-    assert location.startswith("https://portablellm.wiki") or location.startswith(
-        "https://www.portablellm.wiki"
-    ), f"unexpected logout landing: {location!r}"
+    assert r.status_code == 405
+    assert "POST" in r.json().get("detail", "")
 
 
-def test_logout_with_no_return_to_lands_on_frontend_root(monkeypatch):
-    """Defensive: a sign-out link without return_to (legacy clients,
-    direct curl, etc.) must still land on the public root rather than
-    the /welcome onboarding page."""
-    monkeypatch.setenv("PUBLIC_BASE_URL", "https://portablellm.wiki")
-    monkeypatch.setenv("SINGLE_TENANT_MODE", "0")
-    monkeypatch.setenv("SESSION_SECRET", "test-secret-must-be-long-enough")
-    import app.config
-    import app.hosted_routes
-    import app.main as app_main
-
-    importlib.reload(app.config)
-    importlib.reload(app.hosted_routes)
-    importlib.reload(app_main)
-
-    from fastapi.testclient import TestClient
-
-    client = TestClient(app_main.app)
-    r = client.get("/auth/logout", follow_redirects=False)
-    assert r.status_code == 302
-    location = r.headers.get("Location", "")
-    assert "/welcome" not in location, location
-    assert location.rstrip("/") in (
-        "https://portablellm.wiki",
-        "https://www.portablellm.wiki",
-    ), f"unexpected logout landing: {location!r}"
+def test_logout_with_no_return_to_does_not_clear_session(multi_tenant_app):
+    """GET /auth/logout without return_to still does not clear the session."""
+    r = multi_tenant_app.get("/auth/logout", follow_redirects=False)
+    assert r.status_code == 405
+    assert "POST" in r.json().get("detail", "")
 
 
 # ---------------------------------------------------------------------------
@@ -2397,23 +2360,22 @@ def test_index_cache_lru_evicts_cold_tenants(multi_tenant_app, monkeypatch):
 
     monkeypatch.setenv("WIKI_INDEX_CACHE_MAX", "1")
     mgr = _tenants.manager()
-    alice = mgr.require("alice")  # fixture marks alice is_demo=True
+    avery = mgr.require("avery")  # fixture marks avery is_demo=True
     bob = mgr.require("bob")
 
-    # Cap=1 with alice (demo) already warm: loading bob reserves the
+    # Cap=1 with avery (demo) already warm: loading bob reserves the
     # only slot for the in-flight tenant after pinned demos → bob is
     # protected during load, but a subsequent third-party eviction with
-    # no protect (or loading bob when alice fills the pin budget) drops
-    # non-demo cold entries. Warm alice first, then bob: bob stays
-    # (protected as the touch), alice stays (demo). Force a tight
-    # eviction that does not protect bob to prove non-demos drop.
-    _ = alice.index
+    # no protect drops non-demo cold entries. Warm avery first, then bob:
+    # avery stays (demo). Force a tight eviction that does not protect
+    # bob to prove non-demos drop.
+    _ = avery.index
     _ = bob.index
-    assert alice._index is not None
-    # Explicit eviction with no protect: cap=1, alice pinned → bob gone.
+    assert avery._index is not None
+    # Explicit eviction with no protect: cap=1, avery pinned → bob gone.
     dropped = mgr.evict_cold_indexes()
     assert bob._index is None
-    assert alice._index is not None  # demo pinned
+    assert avery._index is not None  # demo pinned
     assert dropped >= 1
 
 
@@ -2506,8 +2468,8 @@ def test_webhook_bad_signature_rejected(multi_tenant_app, monkeypatch):
     assert pulled["n"] == 0
 
 
-def test_webhook_unknown_repo_404(multi_tenant_app):
-    """A push for a repo no tenant owns is unrouted (404), not a silent OK."""
+def test_webhook_unknown_repo_401(multi_tenant_app):
+    """Unknown repo and bad HMAC share 401 so existence is not an oracle."""
     body = json.dumps(
         {"ref": "refs/heads/main", "repository": {"full_name": "nobody/ghost-repo"}}
     ).encode()
@@ -2520,7 +2482,8 @@ def test_webhook_unknown_repo_404(multi_tenant_app):
             "Content-Type": "application/json",
         },
     )
-    assert r.status_code == 404
+    assert r.status_code == 401
+    assert r.json()["detail"] == "unauthorized"
 
 
 # ---------------------------------------------------------------------------
@@ -3682,3 +3645,176 @@ def test_convention_auto_bind_skips_product_fork_at_legacy_name(
     # Critical: must NOT have bound to the product fork.
     assert refreshed.gh_repo == ""
     assert bootstrap_called == []
+
+
+# ---------------------------------------------------------------------------
+# Red-team hardening: visibility, owner token, Avery bind, assemble caps
+# ---------------------------------------------------------------------------
+
+
+def test_provision_defaults_to_unlisted(multi_tenant_app):
+    from app import tenants as _tenants
+
+    tenant = _tenants.manager().provision_local("carol", display_name="Carol")
+    assert tenant.visibility == "unlisted"
+    assert tenant.is_demo is False
+
+
+def test_tenants_list_excludes_unlisted(multi_tenant_app):
+    from app import tenants as _tenants
+
+    carol = _tenants.manager().provision_local("carol", display_name="Carol")
+    assert carol.visibility == "unlisted"
+
+    r = multi_tenant_app.get("/tenants")
+    ids = {t["id"] for t in r.json()["tenants"]}
+    assert "alice" in ids
+    assert "carol" not in ids
+
+    r = multi_tenant_app.get("/tenants/carol")
+    assert r.status_code == 200
+    assert r.json()["visibility"] == "unlisted"
+
+    carol.visibility = "private"
+    _tenants.manager().upsert(carol)
+    assert _tenants.manager().get("carol").visibility == "private"
+    r = multi_tenant_app.get("/tenants/carol")
+    assert r.status_code == 404
+
+
+def test_owner_sets_tenant_visibility(multi_tenant_app):
+    _set_session_user(multi_tenant_app, "alice", login="alice")
+    r = multi_tenant_app.post(
+        "/t/alice/owner/tenant/visibility",
+        json={"visibility": "private"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["visibility"] == "private"
+
+    r = multi_tenant_app.get("/tenants/alice")
+    assert r.status_code == 404
+
+    r = multi_tenant_app.post(
+        "/t/alice/owner/tenant/visibility",
+        json={"visibility": "unlisted"},
+    )
+    assert r.status_code == 200
+    r = multi_tenant_app.get("/tenants/alice")
+    assert r.status_code == 200
+    assert r.json()["visibility"] == "unlisted"
+
+    listed = {t["id"] for t in multi_tenant_app.get("/tenants").json()["tenants"]}
+    assert "alice" not in listed
+
+
+def test_hosted_env_owner_token_is_not_master_key(multi_tenant_app, monkeypatch):
+    """Process-wide OWNER_TOKEN must not write another tenant in hosted mode."""
+    import app.auth as _auth
+    import app.config as _config
+
+    monkeypatch.setattr(_config.settings, "owner_token", "hosted-env-token")
+    monkeypatch.setattr(_auth.settings, "owner_token", "hosted-env-token")
+
+    r = multi_tenant_app.post(
+        "/t/bob/owner/reload",
+        headers={"Authorization": "Bearer hosted-env-token"},
+    )
+    assert r.status_code == 401, r.text
+
+    _set_session_user(multi_tenant_app, "bob", login="bob")
+    r = multi_tenant_app.post("/t/bob/owner/reload")
+    assert r.status_code == 200, r.text
+
+
+def test_demo_tenant_writes_rejected(multi_tenant_app):
+    _set_session_user(multi_tenant_app, "avery", login="avery")
+    r = multi_tenant_app.post("/t/avery/owner/reload")
+    assert r.status_code == 403
+    assert "demo" in r.json()["detail"].lower()
+
+
+def test_github_callback_refuses_reserved_and_demo(multi_tenant_app, monkeypatch):
+    from app import github_api
+    from app.github_api import GitHubUser
+
+    async def fake_exchange(**_kwargs):
+        return "tok"
+
+    def _user(login: str) -> GitHubUser:
+        return GitHubUser(
+            id=99,
+            login=login,
+            name=login,
+            avatar_url="",
+            bio="",
+            email="",
+            company="",
+            blog="",
+            location="",
+            twitter_username="",
+            html_url="",
+        )
+
+    monkeypatch.setattr(github_api, "exchange_oauth_code", fake_exchange)
+
+    async def fake_avery(_token):
+        return _user("avery")
+
+    monkeypatch.setattr(github_api, "get_user", fake_avery)
+
+    import json as _json
+    import base64
+    import itsdangerous
+
+    payload = {"oauth_state": "state-avery"}
+    data = base64.b64encode(_json.dumps(payload).encode("utf-8"))
+    signer = itsdangerous.TimestampSigner("test-secret-do-not-use-in-prod")
+    multi_tenant_app.cookies.set("plw_session", signer.sign(data).decode("utf-8"))
+
+    r = multi_tenant_app.get(
+        "/auth/github/callback?code=abc&state=state-avery",
+        follow_redirects=False,
+    )
+    assert r.status_code == 403, r.text
+
+
+def test_assemble_rejects_over_cap(multi_tenant_app):
+    _set_session_user(multi_tenant_app, "alice", login="alice")
+    r = multi_tenant_app.post(
+        "/onboarding/assemble",
+        json={
+            "urls": [{"url": f"https://example.com/{i}"} for i in range(6)],
+        },
+    )
+    assert r.status_code == 422
+
+    r = multi_tenant_app.post(
+        "/onboarding/assemble",
+        json={
+            "answers": [
+                {"question": f"Q{i}", "answer": f"A{i}"} for i in range(9)
+            ],
+        },
+    )
+    assert r.status_code == 422
+
+    r = multi_tenant_app.post(
+        "/onboarding/assemble",
+        json={
+            "text_sources": [
+                {"content": f"text {i}"} for i in range(9)
+            ],
+        },
+    )
+    assert r.status_code == 422
+
+
+def test_logout_post_clears_session(multi_tenant_app):
+    _set_session_user(multi_tenant_app, "alice", login="alice")
+    r = multi_tenant_app.post("/auth/logout")
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    # Drop the planted cookie so the client only keeps what Set-Cookie wrote.
+    multi_tenant_app.cookies.delete("plw_session")
+    r = multi_tenant_app.get("/auth/me")
+    assert r.json().get("authenticated") is False

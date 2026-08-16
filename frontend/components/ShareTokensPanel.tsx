@@ -8,6 +8,7 @@ import {
   type MintedShareToken,
   type ShareTokenInfo,
 } from "@/lib/api";
+import { redactTokenizedUrl } from "@/lib/shareToken";
 
 type Tier = "public" | "recruiter" | "friend";
 
@@ -217,9 +218,8 @@ export function ShareTokensPanel({
               <div className="flex gap-2">
                 <input
                   readOnly
-                  value={llmShareUrl(newlyMinted.token)}
+                  value={redactTokenizedUrl(llmShareUrl(newlyMinted.token))}
                   className="flex-1 border border-amber-300 rounded px-2 py-1.5 text-xs font-mono bg-white"
-                  onFocus={(e) => e.currentTarget.select()}
                 />
                 <button
                   onClick={() => copyShare(newlyMinted.token, "llm")}
@@ -240,9 +240,8 @@ export function ShareTokensPanel({
               <div className="flex gap-2">
                 <input
                   readOnly
-                  value={humanShareUrl(newlyMinted.token)}
+                  value={redactTokenizedUrl(humanShareUrl(newlyMinted.token))}
                   className="flex-1 border border-amber-300 rounded px-2 py-1.5 text-xs font-mono bg-white"
-                  onFocus={(e) => e.currentTarget.select()}
                 />
                 <button
                   onClick={() => copyShare(newlyMinted.token, "human")}

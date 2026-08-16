@@ -148,14 +148,23 @@ describe("PersonalLlmUrlPanel", () => {
       );
     });
 
-    // The minted URL surfaces in a readonly <input>; check it points
-    // at the LLM handshake endpoint with the token in the ?t= query.
+    // The minted URL is redacted in the DOM; the real token stays off-screen.
     const minted = (await screen.findByLabelText(
       /newly minted personal llm url/i,
     )) as HTMLInputElement;
     expect(minted.value).toBe(
-      "https://portablellm.wiki/cary/llm?t=PLAINTEXT_TOKEN_VALUE",
+      "https://portablellm.wiki/cary/llm?t=••••••••",
     );
+    expect(document.body.textContent).not.toContain("PLAINTEXT_TOKEN_VALUE");
+
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    fireEvent.click(screen.getByRole("button", { name: /copy url/i }));
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledWith(
+        "https://portablellm.wiki/cary/llm?t=PLAINTEXT_TOKEN_VALUE",
+      );
+    });
   });
 
   it("URL-encodes special characters in tokens", async () => {
@@ -189,8 +198,10 @@ describe("PersonalLlmUrlPanel", () => {
       /newly minted personal llm url/i,
     )) as HTMLInputElement;
     expect(minted.value).toBe(
-      "https://portablellm.wiki/cary/llm?t=a%2Bb%2Fc%3Dd",
+      "https://portablellm.wiki/cary/llm?t=••••••••",
     );
+    expect(minted.value).not.toContain("a+b/c=d");
+    expect(document.body.textContent).not.toContain("a+b/c=d");
   });
 
   it("lists ONLY private-tier tokens (recruiter tokens stay in the other panel)", async () => {

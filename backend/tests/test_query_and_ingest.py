@@ -149,3 +149,5 @@ def test_healthz_reports_page_count(client):
     assert data["disk_total_bytes"] > 0
     assert data["disk_used_bytes"] >= 0
     assert data["disk_free_bytes"] >= 0
+    for leaked in ("wiki_root", "indexed_tenant_ids", "indexed_tenants"):
+        assert leaked not in data, leaked

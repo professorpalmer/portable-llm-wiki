@@ -65,3 +65,45 @@ def test_scrape_refuses_loopback_url():
     page = asyncio.run(url_scrape.scrape("http://127.0.0.1:8000/owner/secrets"))
     assert page.content == ""
     assert any("refusing to fetch" in e for e in page.errors)
+
+
+def test_url_on_pinned_ip_rewrites_netloc():
+    assert url_scrape._url_on_pinned_ip("http://example.test/a", "203.0.113.10") == (
+        "http://203.0.113.10/a"
+    )
+    assert url_scrape._url_on_pinned_ip("https://example.test:8443/a", "203.0.113.10") == (
+        "https://203.0.113.10:8443/a"
+    )
+
+
+def test_scrape_pins_connect_to_validated_ip(monkeypatch):
+    """scrape() connects to the already-validated IP, not a re-resolved hostname."""
+    from urllib.parse import urlparse
+
+    import httpx
+
+    seen: dict = {}
+
+    def fake_pin(host: str):
+        return "8.8.8.8", ""
+
+    class FakeResp:
+        status_code = 200
+        reason_phrase = "OK"
+        headers = {"content-type": "text/html"}
+        text = "<html><title>ok</title><body><p>" + ("word " * 40) + "</p></body></html>"
+        url = "http://8.8.8.8/page"
+
+    async def fake_send(self, request):
+        seen["url"] = str(request.url)
+        seen["host"] = request.headers.get("host")
+        return FakeResp()
+
+    monkeypatch.setattr(url_scrape, "_pin_ip_for_host", fake_pin)
+    monkeypatch.setattr(httpx.AsyncClient, "send", fake_send)
+
+    page = asyncio.run(url_scrape.scrape("http://example.test/page"))
+    assert seen.get("url"), page.errors
+    assert urlparse(seen["url"]).hostname == "8.8.8.8"
+    assert seen["host"] == "example.test"
+    assert page.title == "ok"
