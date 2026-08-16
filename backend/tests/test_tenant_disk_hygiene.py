@@ -10,9 +10,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
-from app.config import settings
 from app.tenants import (
-    TenantManager,
     is_preexisting_tenant_id,
     prune_preexisting_tenant_dirs,
 )
@@ -43,15 +41,24 @@ def test_preexisting_id_helper() -> None:
 
 
 def test_load_from_disk_skips_preexisting(tmp_path: Path, monkeypatch) -> None:
+    # Patch the settings object TenantManager actually reads. A module-level
+    # ``from app.config import settings`` can be stale after hosted tests
+    # reload config (CI order: this file runs after test_hosted_multitenant).
+    from app import tenants as tenants_mod
+
     _write_tenant(tmp_path, "alice")
     leftover = _write_tenant(tmp_path, "alice.preexisting")
     orphan = _write_tenant(tmp_path, "plttn.preexisting")
     monkeypatch.setattr(
-        settings,
+        tenants_mod.settings,
         "_base",
-        replace(settings._base, single_tenant_mode=False, tenants_root=tmp_path),
+        replace(
+            tenants_mod.settings._base,
+            single_tenant_mode=False,
+            tenants_root=tmp_path,
+        ),
     )
-    mgr = TenantManager()
+    mgr = tenants_mod.TenantManager()
     mgr.load_from_disk()
     ids = {tenant.id for tenant in mgr.all_tenants()}
     assert ids == {"alice"}
