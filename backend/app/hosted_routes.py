@@ -51,7 +51,7 @@ from fastapi import APIRouter, Body, Cookie, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
-from . import github_api, persistence, tenants, url_scrape
+from . import github_api, onboarding_seed, persistence, tenants, url_scrape
 from .config import settings
 
 
@@ -1629,6 +1629,14 @@ async def onboarding_connect_repo(
     # Never blocks connect — a failure just means we rely on polling.
     await _register_push_webhook_best_effort(tenant, token, full_name, default_branch)
 
+    # A 0-page tenant after a successful connect is a failed signup.
+    # Seed a deterministic private starter (purpose + how-to-ingest) so
+    # the wiki is real immediately. Skip when bootstrap already imported
+    # pages. Never clones the Avery demo.
+    starter_seed = onboarding_seed.seed_starter_wiki(tenant)
+    if starter_seed.get("action") == "seeded":
+        persistence.flush_tenant_async(tenant, "wiki: seed starter pages")
+
     # If there was preexisting local content, the bootstrap already pushed
     # it as the seed commit. Just confirm and return status.
     return {
@@ -1639,6 +1647,7 @@ async def onboarding_connect_repo(
         "html_url": f"https://github.com/{full_name}",
         "bootstrap": boot,
         "status": persistence.get_tenant_status(tenant),
+        "starter_seed": starter_seed,
     }
 
 
@@ -2467,16 +2476,20 @@ def onboarding_cleanup_imports(request: Request) -> dict:
 
 @router.get("/tenants")
 def list_tenants() -> dict:
-    """Public list of tenants whose ``visibility`` is ``public``.
+    """Public directory of tenants with real content.
 
-    Unlisted wikis are reachable by direct URL (GET /tenants/{id}) but
-    must not appear in the directory. Private tenants 404 on GET by id.
+    Lists ``visibility==public`` tenants that have at least one wiki
+    page, plus demo tenants (Avery) regardless of page count. Unlisted
+    wikis stay reachable by GET /tenants/{id} but do not appear here.
+    Empty public shells are omitted so the directory does not advertise
+    wikis with no pages. Private tenants 404 on GET by id. This filter
+    does not rewrite ``tenant.json`` visibility fields.
     """
     if settings.single_tenant_mode:
         return {"tenants": []}
     out = []
     for t in tenants.manager().all_tenants():
-        if t.visibility != "public":
+        if not tenants.listed_in_public_directory(t):
             continue
         out.append(
             {
