@@ -3714,6 +3714,8 @@ def test_hosted_env_owner_token_is_not_master_key(multi_tenant_app, monkeypatch)
 
     monkeypatch.setattr(_config.settings, "owner_token", "hosted-env-token")
     monkeypatch.setattr(_auth.settings, "owner_token", "hosted-env-token")
+    monkeypatch.setattr(_config.settings, "hosted_owner_tenant_ids", frozenset())
+    monkeypatch.setattr(_auth.settings, "hosted_owner_tenant_ids", frozenset())
 
     r = multi_tenant_app.post(
         "/t/bob/owner/reload",
@@ -3724,6 +3726,30 @@ def test_hosted_env_owner_token_is_not_master_key(multi_tenant_app, monkeypatch)
     _set_session_user(multi_tenant_app, "bob", login="bob")
     r = multi_tenant_app.post("/t/bob/owner/reload")
     assert r.status_code == 200, r.text
+
+
+def test_hosted_owner_token_allowlist_is_tenant_scoped(multi_tenant_app, monkeypatch):
+    """HOSTED_OWNER_TENANT_IDS elevates OWNER_TOKEN for listed tenants only."""
+    import app.auth as _auth
+    import app.config as _config
+
+    monkeypatch.setattr(_config.settings, "owner_token", "hosted-env-token")
+    monkeypatch.setattr(_auth.settings, "owner_token", "hosted-env-token")
+    allowed = frozenset({"alice"})
+    monkeypatch.setattr(_config.settings, "hosted_owner_tenant_ids", allowed)
+    monkeypatch.setattr(_auth.settings, "hosted_owner_tenant_ids", allowed)
+
+    r = multi_tenant_app.post(
+        "/t/alice/owner/reload",
+        headers={"Authorization": "Bearer hosted-env-token"},
+    )
+    assert r.status_code == 200, r.text
+
+    r = multi_tenant_app.post(
+        "/t/bob/owner/reload",
+        headers={"Authorization": "Bearer hosted-env-token"},
+    )
+    assert r.status_code == 401, r.text
 
 
 def test_demo_tenant_writes_rejected(multi_tenant_app):

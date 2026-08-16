@@ -92,6 +92,12 @@ services:
         value: private
       - key: OWNER_TOKEN
         generateValue: true  # Render auto-generates a strong value
+      # Hosted operator allowlist. Process OWNER_TOKEN is a headless
+      # owner key only for these tenant ids (comma-separated). Leave
+      # unset/blank so the token cannot open every tenant. Production
+      # sets this in the dashboard (sync: false) to the operator wiki.
+      - key: HOSTED_OWNER_TENANT_IDS
+        sync: false
 
       # --- Single-tenant (OSS) vs multi-tenant (hosted) toggle ---
       # PROMPTED at first deploy because the right value depends on
