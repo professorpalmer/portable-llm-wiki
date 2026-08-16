@@ -44,8 +44,42 @@ Register the OAuth App at <https://github.com/settings/applications/new>:
 Click "Generate a new client secret" — copy both the **Client ID** and
 **Client Secret** for the env vars below.
 
-The OAuth app only needs `read:user, public_repo` scopes (the backend
-requests these implicitly; users see them on the consent screen).
+The OAuth app requests `read:user, repo`. We need `repo` (not
+`public_repo`) so we can create and push **one** wiki repository on the
+user's account and import a private wiki they already have. An OAuth
+App cannot be limited to a single repo — that is honest, and it is why
+GitHub's consent screen looks broad. Do not switch live OAuth to
+`public_repo`; that breaks private-wiki import and push.
+
+The narrower path is a GitHub App the user installs on just that one
+repo. Leave the App unset until you create it; OAuth keeps working.
+
+### 1b. GitHub App (optional, later)
+
+When you are ready to narrow trust, create a GitHub App at
+<https://github.com/settings/apps/new>:
+
+* **Name**: Portable LLM Wiki
+* **Homepage URL**: `https://portablellm.wiki`
+* **Webhook**: inactive until you need one
+* **Repository permissions**: Contents (read/write), Metadata (read).
+  No org or account-wide administration.
+* **Where can this GitHub App be installed?**: Only on this account,
+  then install it on the one wiki repo (or let each user install it on
+  theirs).
+
+Generate a private key. Set on the backend (empty = unused):
+
+```bash
+GITHUB_APP_ID=<numeric app id>
+GITHUB_APP_PRIVATE_KEY=<PEM; literal \n newlines are fine>
+GITHUB_APP_INSTALL_URL=https://github.com/apps/<slug>/installations/new
+# Optional, single-install deploys only:
+# GITHUB_APP_INSTALLATION_ID=<numeric installation id>
+```
+
+You do not need to create the App for the current OAuth path or for
+CI. Tests mock the installation-token mint.
 
 ### 2. DNS
 

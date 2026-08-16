@@ -5,8 +5,9 @@ Used by the hosted onboarding flow:
 * :func:`exchange_oauth_code` — swap an OAuth ``code`` for an access token.
 * :func:`get_user` — fetch the authenticated user's profile + bio.
 * :func:`create_repo` — create ``<owner>/my-portable-llm-wiki`` on the user's
-  account (uses ``public_repo`` scope; falls back to private if the user
-  requests it).
+  account (private by default; pass ``private=False`` for a public wiki).
+* :func:`resolve_access_token` — prefer a GitHub App installation token
+  when App env is set; otherwise keep the OAuth user token.
 * :func:`commit_files` — Contents-API style batch write of multiple
   files to a repo (used to seed the repo on signup and to push wiki edits).
 
@@ -32,22 +33,33 @@ GITHUB_OAUTH = "https://github.com/login/oauth"
 
 # Scopes we request:
 #   * ``read:user`` — show the user their name/avatar after sign-in.
-#   * ``repo``      — read + write any of the user's repos, public OR
-#                     private. We need private-repo read so the
-#                     onboarding "Import existing wiki" picker can list
-#                     and clone the user's own private wikis (most users
-#                     keep their personal-context wikis private), and
-#                     read+write because the existing OSS path creates +
-#                     pushes to a portable-llm-wiki repo on their account.
+#   * ``repo``      — create + push ONE wiki repo on the user's account,
+#                     and list/clone a private wiki they already have so
+#                     onboarding can import it. Most personal-context
+#                     wikis are private; ``public_repo`` cannot see them.
 #
-# This is broader than the more conservative ``public_repo`` scope we
-# used in earlier OAuth-app versions. The trade-off: we get the
-# private-repo import flow that users actually want (no PAT to paste),
-# at the cost of asking for the full repo scope at consent. Existing
-# users signed in with the old scope will need to re-authorize once —
-# the onboarding UI detects insufficient scope from the
-# ``X-OAuth-Scopes`` header and prompts them to re-sign-in.
+# Honest consent: ``repo`` is broader than the one wiki we touch. We
+# ask for it because a GitHub OAuth App cannot be limited to a single
+# repository. The narrower path is a GitHub App the user installs on
+# just that one repo (see github_app.py). Until that App is configured
+# (GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY), this OAuth scope stays
+# ``repo`` — switching live OAuth to ``public_repo`` would break
+# private-wiki import and push.
+#
+# Existing users signed in with the old ``public_repo`` scope need to
+# re-authorize once. The onboarding UI detects insufficient scope from
+# the ``X-OAuth-Scopes`` header and prompts them to re-sign-in.
 DEFAULT_SCOPES = "read:user,repo"
+
+# Shown in operator docs and tests so the consent story cannot drift
+# from the scope we actually request.
+REPO_SCOPE_CONSENT = (
+    "We ask for the repo scope so we can create and push one wiki "
+    "repository on your GitHub account and import a private wiki you "
+    "already have. We do not need access to your other repositories. "
+    "A GitHub App you install on just that one repo is the narrower "
+    "path; OAuth repo remains until that App is live."
+)
 
 
 class GitHubAPIError(RuntimeError):
@@ -152,6 +164,28 @@ async def exchange_oauth_code(
         # GitHub returns 200 with an error field if the code is bad.
         raise GitHubAPIError(400, payload.get("error_description") or str(payload))
     return str(payload["access_token"])
+
+
+async def resolve_access_token(
+    oauth_token: str,
+    *,
+    installation_id: str | int | None = None,
+    settings: object | None = None,
+) -> str:
+    """Return the token subsequent GitHub calls should use.
+
+    When GitHub App env is unset (the default), this is a no-op and the
+    OAuth user token is returned unchanged. When App env is set and an
+    installation id is known, mint a short-lived installation token
+    instead. See :mod:`app.github_app`.
+    """
+    from . import github_app
+
+    return await github_app.resolve_access_token(
+        oauth_token,
+        installation_id=installation_id,
+        settings=settings,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -466,15 +500,17 @@ async def create_repo(
     *,
     name: str = "my-portable-llm-wiki",
     description: str = "My portable LLM wiki. Vendor-neutral personal context, in markdown.",
-    private: bool = False,
+    private: bool = True,
     auto_init: bool = True,
 ) -> dict:
     """POST /user/repos.
 
+    New wiki repos are private unless the caller passes ``private=False``.
     Returns the GitHub repo object (full_name, default_branch, html_url, …).
     If a repo with the same name already exists, we GET that one instead and
     return it — onboarding is idempotent.
     """
+    token = await resolve_access_token(token)
     async with httpx.AsyncClient(timeout=30.0) as client:
         r = await client.post(
             f"{GITHUB_API}/user/repos",

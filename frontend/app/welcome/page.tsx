@@ -318,6 +318,11 @@ export default function WelcomePage() {
   // bouncer by default. If they click "Import anyway" we flip this to
   // true and render the import wizard with force_overwrite enabled.
   const [forceImport, setForceImport] = useState(false);
+  // After connect-repo seeds a private starter wiki, page_count > 0
+  // but the user has not added a first source yet. Keep them on the
+  // assemble step instead of the AlreadyOnboarded bouncer (which would
+  // send them to a wiki they have not authored).
+  const [needsFirstSource, setNeedsFirstSource] = useState(false);
 
   const [tab, setTab] = useState<Tab>("assemble");
   // Interview answers, keyed by INTERVIEW_PROMPTS[].id.
@@ -770,7 +775,12 @@ export default function WelcomePage() {
     stepBadge = isFreshSignup
       ? "Step 1 of 2 — Connect GitHub"
       : "One-time upgrade";
-  } else if (pageCount !== null && pageCount > 0 && !forceImport) {
+  } else if (
+    pageCount !== null &&
+    pageCount > 0 &&
+    !forceImport &&
+    !needsFirstSource
+  ) {
     stepBadge = null;
   } else {
     stepBadge = "Step 2 of 2 — Seed your wiki";
@@ -795,17 +805,25 @@ export default function WelcomePage() {
           // a populated repo (e.g. switching to an existing cary-wiki)
           // would leave pageCount stale at 0 and bounce the user into
           // the import wizard instead of the AlreadyOnboarded panel.
-          onConnected={async (status) => {
+          onConnected={async (status, meta) => {
             // Optimistic update first so the connect step disappears
             // immediately — re-fetch lands a moment later with the
             // authoritative counts.
             setSyncStatus(status);
+            if (meta?.keepOnFirstSource) {
+              setNeedsFirstSource(true);
+            }
             try {
-              await fetchAuthMe();
+              const me = await fetchAuthMe();
+              // Seed failed or not yet visible: still empty → stay on
+              // the assemble step instead of an empty tenant home.
+              if ((me?.page_count ?? 0) === 0) {
+                setNeedsFirstSource(true);
+              }
             } catch {
-              // Best-effort. If the re-fetch fails, the user just sees
-              // the form-section default (which is at worst harmless)
-              // and a 30s page refresh recovers the bouncer view.
+              // Best-effort. If the re-fetch fails, keep the user on
+              // the first-source form rather than dumping them home.
+              setNeedsFirstSource(true);
             }
           }}
         />
@@ -828,7 +846,8 @@ export default function WelcomePage() {
     phase.kind === "idle" &&
     pageCount !== null &&
     pageCount > 0 &&
-    !forceImport
+    !forceImport &&
+    !needsFirstSource
   ) {
     return (
       <div className="max-w-3xl mx-auto px-5 py-10 sm:py-14">
@@ -867,6 +886,7 @@ export default function WelcomePage() {
           submitting={phase.kind === "submitting"}
           submitError={submitError}
           forceImport={forceImport}
+          needsFirstSource={needsFirstSource}
         />
       ) : (
         <ProgressSection phase={phase} user={user} />
@@ -924,7 +944,10 @@ function ConnectRepoStep({
 }: {
   user: AuthUser;
   pageCount: number;
-  onConnected: (status: GitHubSyncStatus) => void;
+  onConnected: (
+    status: GitHubSyncStatus,
+    meta?: { keepOnFirstSource?: boolean },
+  ) => void;
 }) {
   type Mode = "create" | "existing";
   const [mode, setMode] = useState<Mode>("create");
@@ -1002,6 +1025,9 @@ function ConnectRepoStep({
       if (!res.connected) {
         throw new Error(res.message || "Connect failed for an unknown reason.");
       }
+      const starter = (
+        res as { starter_seed?: { action?: string } }
+      ).starter_seed;
       onConnected(
         res.status ?? {
           connected: true,
@@ -1012,6 +1038,7 @@ function ConnectRepoStep({
           last_error: res.bootstrap?.error ?? "",
           pushes_made: 0,
         },
+        { keepOnFirstSource: starter?.action === "seeded" },
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : "unknown error");
@@ -1118,8 +1145,11 @@ function ConnectRepoStep({
             )}
             {needsReauth && (
               <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
-                Your GitHub token can&apos;t see private repos. Re-authorize
-                with the <code>repo</code> scope to see them in this list.
+                Your GitHub token can&apos;t see a private wiki. We ask
+                for the <code>repo</code> scope so we can create/push one
+                wiki repo and import yours. Re-authorize to continue. A
+                GitHub App on just that one repo is the narrower path
+                once it is live.
               </div>
             )}
             {reposError && (
@@ -1225,8 +1255,13 @@ function ConnectRepoStep({
               ? "Create repo + connect"
               : "Connect this repo"}
         </button>
-        <span className="text-xs text-ink-muted">
-          Uses the GitHub OAuth token you granted at sign-in. No PAT to paste.
+        <span className="text-xs text-ink-muted leading-relaxed">
+          We ask GitHub for the <code>repo</code> scope so we can create
+          and push one wiki repo on your account, and import a private
+          wiki you already have. We do not need your other repositories.
+          A GitHub App you install on just that one repo is the narrower
+          path; we will switch to it once the App is live. No PAT to
+          paste.
         </span>
       </div>
     </div>
@@ -1680,6 +1715,10 @@ function FormSection(props: {
   // banner so they don't lose the context that they're about to merge
   // into an existing wiki, not start fresh.
   forceImport?: boolean;
+  // Connect just seeded (or left empty) a private starter wiki. Keep
+  // the assemble form as the first-source step instead of bouncing
+  // home.
+  needsFirstSource?: boolean;
 }) {
   const {
     tab,
@@ -1699,6 +1738,7 @@ function FormSection(props: {
     submitting,
     submitError,
     forceImport,
+    needsFirstSource,
   } = props;
 
   return (
@@ -1708,6 +1748,15 @@ function FormSection(props: {
           Merging into your existing wiki. Conflicting slugs will get a{" "}
           <code className="font-mono">-imported</code> suffix.
         </div>
+      )}
+      {needsFirstSource && !forceImport && (
+        <p
+          className="mb-5 text-sm text-ink-muted leading-relaxed"
+          data-testid="first-source-step"
+        >
+          A private starter wiki is already in your repo. Add a first
+          source below so the pages are about you — not an empty shell.
+        </p>
       )}
       <Segmented tab={tab} setTab={setTab} />
 
@@ -2205,12 +2254,13 @@ function WikiImportForm({
       {needsReauth && (
         <div className="mb-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2.5 text-xs text-amber-900 leading-relaxed">
           You signed in with public-repo access only, so we can&apos;t see
-          your private repos.{" "}
+          a private wiki to import. We ask for the <code>repo</code>{" "}
+          scope so we can create/push one wiki repo and import yours.{" "}
           <a href={reauthHref} className="underline font-medium hover:text-amber-950">
             Re-authorize with private-repo access
           </a>{" "}
-          (one click, GitHub will ask for consent) and your private repos
-          will show up here.
+          (GitHub will ask for consent). A GitHub App installed on just
+          that one repo is the narrower path, once it is live.
         </div>
       )}
 

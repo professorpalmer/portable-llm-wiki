@@ -99,6 +99,18 @@ services:
       - key: HOSTED_OWNER_TENANT_IDS
         sync: false
 
+      # Optional GitHub App (narrower than OAuth ``repo``). Empty keeps
+      # today's OAuth path. Dashboard-only so Blueprint never stomps a
+      # live PEM. See HOSTED_DEPLOYMENT.md section 1b.
+      - key: GITHUB_APP_ID
+        sync: false
+      - key: GITHUB_APP_PRIVATE_KEY
+        sync: false
+      - key: GITHUB_APP_INSTALL_URL
+        sync: false
+      - key: GITHUB_APP_INSTALLATION_ID
+        sync: false
+
       # --- Single-tenant (OSS) vs multi-tenant (hosted) toggle ---
       # PROMPTED at first deploy because the right value depends on
       # what you're building:
