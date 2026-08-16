@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import threading
 import time
 from contextvars import ContextVar
@@ -43,6 +44,38 @@ from .config import settings
 
 if TYPE_CHECKING:
     from .wiki import WikiIndex
+
+
+# Connect-repo stashes a non-git wiki_root as ``<id>.preexisting`` before
+# clone. Those dirs keep tenant.json, so a naive disk scan registered them
+# as extra tenants and doubled volume use. They are leftovers, not tenants.
+PREEXISTING_SUFFIX = ".preexisting"
+
+
+def is_preexisting_tenant_id(tenant_id: str) -> bool:
+    return tenant_id.endswith(PREEXISTING_SUFFIX)
+
+
+def prune_preexisting_tenant_dirs(root: Path) -> dict:
+    """Delete leftover ``*.preexisting`` stash directories under ``root``.
+
+    Call at process startup only. ``bootstrap_tenant`` uses the same
+    suffix as a mid-request stash; pruning while a clone is in flight
+    would drop that content.
+    """
+    removed = []
+    errors = []
+    if not root.exists():
+        return {"removed": removed, "errors": errors}
+    for entry in list(root.iterdir()):
+        if not entry.is_dir() or not is_preexisting_tenant_id(entry.name):
+            continue
+        try:
+            shutil.rmtree(entry)
+            removed.append(entry.name)
+        except OSError as exc:
+            errors.append({"name": entry.name, "error": str(exc)})
+    return {"removed": removed, "errors": errors}
 
 
 # Cap how many per-tenant WikiIndex objects we keep warm. Each index holds
@@ -306,6 +339,8 @@ class TenantManager:
                 if root.exists():
                     for entry in sorted(root.iterdir()):
                         if not entry.is_dir() or entry.name.startswith("."):
+                            continue
+                        if is_preexisting_tenant_id(entry.name):
                             continue
                         meta_path = entry / _TENANT_META_FILE
                         if not meta_path.exists():

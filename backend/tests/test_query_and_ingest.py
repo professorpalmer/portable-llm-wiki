@@ -146,3 +146,6 @@ def test_healthz_reports_page_count(client):
     assert data["status"] == "ok"
     # The owner-visible page count includes private pages too.
     assert data["page_count"] >= 4
+    assert data["disk_total_bytes"] > 0
+    assert data["disk_used_bytes"] >= 0
+    assert data["disk_free_bytes"] >= 0

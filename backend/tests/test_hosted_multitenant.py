@@ -300,6 +300,17 @@ def test_tenants_public_list_excludes_default(multi_tenant_app):
     assert "default" not in ids
 
 
+def test_healthz_reports_tenant_volume(multi_tenant_app):
+    r = multi_tenant_app.get("/healthz")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["tenant_count"] == 2
+    assert data["tenant_dir_count"] == 2
+    assert data["preexisting_dir_count"] == 0
+    assert data["disk_total_bytes"] > 0
+    assert data["disk_free_bytes"] >= 0
+
+
 def test_tenant_metadata_endpoint(multi_tenant_app):
     r = multi_tenant_app.get("/tenants/alice")
     assert r.status_code == 200
