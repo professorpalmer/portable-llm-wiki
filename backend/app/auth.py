@@ -140,14 +140,26 @@ def viewer_from_header(authorization: str | None) -> Viewer:
     if len(parts) != 2 or parts[0].lower() != "bearer":
         return PUBLIC_VIEWER
     token = parts[1].strip()
-    # Hosted OWNER_TOKEN is not a master key across tenants. OSS
-    # single-tenant still treats the env token as the owner credential.
+    # OSS: process OWNER_TOKEN is the owner credential.
+    # Hosted: the same env token is owner only for tenants listed in
+    # HOSTED_OWNER_TENANT_IDS — never a cross-tenant master key.
     if (
-        settings.single_tenant_mode
-        and settings.owner_token
+        settings.owner_token
+        and len(token) == len(settings.owner_token)
         and hmac.compare_digest(token, settings.owner_token)
     ):
-        return Viewer(tier="private", is_owner=True, label="owner")
+        if settings.single_tenant_mode:
+            return Viewer(tier="private", is_owner=True, label="owner")
+        allowed = getattr(settings, "hosted_owner_tenant_ids", frozenset())
+        if allowed:
+            try:
+                from . import tenants as _tenants
+
+                current = _tenants.current_tenant_or_none()
+            except Exception:  # noqa: BLE001
+                current = None
+            if current is not None and current.id.lower() in allowed:
+                return Viewer(tier="private", is_owner=True, label="owner")
     # Static SHARE_TOKENS env var (legacy v0 mechanism)
     tiers = _share_tokens()
     if token in tiers:

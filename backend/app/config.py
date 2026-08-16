@@ -68,6 +68,9 @@ class _BaseSettings:
     # Brave, Safari ITP) block the cross-host AJAX cookie even on shared
     # eTLD+1. Empty = host-only (legacy behavior).
     session_cookie_domain: str
+    # Hosted-only: tenant ids for which process OWNER_TOKEN is a headless
+    # owner key. Empty means the env token is never a master key.
+    hosted_owner_tenant_ids: frozenset[str]
 
 
 class Settings:
@@ -119,6 +122,13 @@ def _load_owner_token(single_tenant_mode: bool) -> str:
             "token with: openssl rand -hex 32"
         )
     return token
+
+
+def _load_hosted_owner_tenant_ids() -> frozenset[str]:
+    raw = os.environ.get("HOSTED_OWNER_TENANT_IDS", "").strip()
+    if not raw:
+        return frozenset()
+    return frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
 
 
 def _load_settings() -> Settings:
@@ -199,6 +209,7 @@ def _load_settings() -> Settings:
         or "plw_session",
         session_secret=os.environ.get("SESSION_SECRET", "").strip(),
         session_cookie_domain=os.environ.get("SESSION_COOKIE_DOMAIN", "").strip(),
+        hosted_owner_tenant_ids=_load_hosted_owner_tenant_ids(),
     )
 
     return Settings(base)
