@@ -1,17 +1,17 @@
 "use client";
 
 // Recognizes `?share=...` on any page load. If the URL has a share token,
-// stores it in localStorage (under the same key the rest of the app uses)
+// stores it in a tenant-scoped share-token key (never llmwiki:ownerToken)
 // and strips the query param from the URL so it doesn't leak via reload /
 // back button / clipboard paste.
 //
 // This is the receiver side of the tokenized share flow. The owner mints a
-// URL like `https://wiki.example.com?share=ABC123` and hands it to someone.
-// When that someone opens the URL, this component captures the token and
-// the rest of the app sees a tier-elevated viewer.
+// URL like `https://wiki.example.com/<tenant>?share=ABC123` and hands it
+// to someone. When that someone opens the URL, this component captures
+// the token; browse/API reads send it as X-Share-Token.
 
 import { useEffect } from "react";
-import { setOwnerToken } from "@/lib/api";
+import { setShareToken, tenantFromPathname } from "@/lib/shareToken";
 
 export function ShareTokenCatcher() {
   useEffect(() => {
@@ -19,7 +19,7 @@ export function ShareTokenCatcher() {
     const params = new URLSearchParams(window.location.search);
     const share = params.get("share");
     if (!share) return;
-    setOwnerToken(share);
+    setShareToken(share, tenantFromPathname(window.location.pathname));
     params.delete("share");
     const newSearch = params.toString();
     const cleanUrl =

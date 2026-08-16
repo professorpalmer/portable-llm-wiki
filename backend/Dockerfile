@@ -35,7 +35,7 @@ COPY scripts /app/scripts
 
 # Default env (override at deploy time)
 ENV WIKI_ROOT=/app/wiki \
-    DEFAULT_TIER=public \
+    DEFAULT_TIER=private \
     PUBLIC_BASE_URL=http://localhost:8000 \
     CORS_ORIGINS=http://localhost:3000 \
     PYTHONUNBUFFERED=1

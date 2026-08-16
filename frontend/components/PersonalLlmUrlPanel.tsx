@@ -51,6 +51,7 @@ import {
   type MintedShareToken,
   type ShareTokenInfo,
 } from "@/lib/api";
+import { redactTokenizedUrl } from "@/lib/shareToken";
 import { buildOfflineBriefing, isBriefingComplete } from "@/lib/briefing";
 import { ConnectMarionetteButton } from "@/components/ConnectMarionetteButton";
 import {
@@ -284,10 +285,9 @@ export function PersonalLlmUrlPanel({
             <div className="flex gap-2">
               <input
                 readOnly
-                value={personalLlmUrl(newlyMinted.token)}
+                value={redactTokenizedUrl(personalLlmUrl(newlyMinted.token))}
                 aria-label="Newly minted personal LLM URL"
                 className="flex-1 border border-red-300 rounded px-2 py-1.5 text-xs font-mono bg-white"
-                onFocus={(e) => e.currentTarget.select()}
               />
               <button
                 onClick={() => copyMinted(newlyMinted.token)}

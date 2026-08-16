@@ -95,6 +95,22 @@ def _make_app() -> FastAPI:
     def wiki_chat_stream():
         return {"answer": "..."}
 
+    @app.post("/onboarding/import-url")
+    def onboarding_import_url():
+        return {"ok": True}
+
+    @app.post("/onboarding/import-text")
+    def onboarding_import_text():
+        return {"ok": True}
+
+    @app.post("/onboarding/assemble")
+    def onboarding_assemble():
+        return {"ok": True}
+
+    @app.post("/t/{tenant}/onboarding/assemble")
+    def tenant_onboarding_assemble(tenant: str):
+        return {"ok": True, "tenant": tenant}
+
     @app.get("/owner/share-tokens")
     def owner_share_tokens():
         # Owner-gated path — used by tests to verify NON-LLM paths
@@ -407,7 +423,18 @@ def test_share_token_in_header_bypasses_rate_limit(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("path", ["/wiki/query", "/wiki/chat", "/wiki/chat/stream"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/wiki/query",
+        "/wiki/chat",
+        "/wiki/chat/stream",
+        "/onboarding/import-url",
+        "/onboarding/import-text",
+        "/onboarding/assemble",
+        "/t/alice/onboarding/assemble",
+    ],
+)
 def test_synthesis_endpoints_are_metered_not_bypassed(monkeypatch, path):
     """The crawler bypass exempts /wiki/ reads, but the budget-spending
     synthesis endpoints must still be throttled or a scripted loop runs the

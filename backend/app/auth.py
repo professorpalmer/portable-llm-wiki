@@ -140,7 +140,13 @@ def viewer_from_header(authorization: str | None) -> Viewer:
     if len(parts) != 2 or parts[0].lower() != "bearer":
         return PUBLIC_VIEWER
     token = parts[1].strip()
-    if settings.owner_token and hmac.compare_digest(token, settings.owner_token):
+    # Hosted OWNER_TOKEN is not a master key across tenants. OSS
+    # single-tenant still treats the env token as the owner credential.
+    if (
+        settings.single_tenant_mode
+        and settings.owner_token
+        and hmac.compare_digest(token, settings.owner_token)
+    ):
         return Viewer(tier="private", is_owner=True, label="owner")
     # Static SHARE_TOKENS env var (legacy v0 mechanism)
     tiers = _share_tokens()
@@ -240,13 +246,32 @@ def require_owner(
     a real owner from doing owner-only operations.
     """
     v = viewer_from_header(authorization)
-    if v.is_owner:
-        return v
-    session_owner = _session_owner_viewer(request)
-    if session_owner is not None:
-        return session_owner
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Owner token required",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+    if not v.is_owner:
+        session_owner = _session_owner_viewer(request)
+        if session_owner is not None:
+            v = session_owner
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Owner token required",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+    _reject_demo_writes()
+    return v
+
+
+def _reject_demo_writes() -> None:
+    """Demo tenants (Avery) are read-only — no owner mutations."""
+    if settings.single_tenant_mode:
+        return
+    try:
+        from . import tenants as _tenants
+
+        current = _tenants.current_tenant_or_none()
+    except Exception:  # noqa: BLE001
+        return
+    if current is not None and current.is_demo:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="demo tenant is read-only",
+        )

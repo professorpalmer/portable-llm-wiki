@@ -30,6 +30,7 @@ from .orchestrator import (
     _save_jobs,
     _lock,
     build_worker_cmd,
+    stamp_tenant_id,
 )
 
 
@@ -270,6 +271,7 @@ def _spawn_drafter_job(
         cwd=cwd,
         log_path=str(log_path),
         artifacts_path=target_rel,
+        tenant_id=stamp_tenant_id(),
     )
 
     proc = subprocess.Popen(

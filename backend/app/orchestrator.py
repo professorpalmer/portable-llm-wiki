@@ -234,6 +234,7 @@ class TrackedJob:
     exit_code: Optional[int] = None
     summary: Optional[str] = None
     artifacts_path: Optional[str] = None
+    tenant_id: Optional[str] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -271,16 +272,65 @@ def _update(tracking_id: str, **fields) -> None:
         _save_jobs(jobs)
 
 
+def stamp_tenant_id() -> Optional[str]:
+    """Tenant id to stamp on a new job/swarm for the current request."""
+    try:
+        from . import tenants as _tenants
+
+        current = _tenants.current_tenant_or_none()
+        if current is not None:
+            return current.id
+    except Exception:  # noqa: BLE001
+        pass
+    if settings.single_tenant_mode:
+        return "default"
+    return None
+
+
+def _scope_wiki_root() -> str:
+    return str(settings.wiki_root)
+
+
+def _paths_match(left: str, right: str) -> bool:
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    try:
+        return Path(left).resolve() == Path(right).resolve()
+    except OSError:
+        return False
+
+
+def job_visible_to_current(tenant_id: Optional[str], cwd: str) -> bool:
+    """Whether a job/swarm record is visible to the current tenant.
+
+    Stamped ``tenant_id`` must match. Legacy records with a missing
+    tenant_id are visible only when ``cwd`` matches this tenant's
+    wiki_root; otherwise they stay hidden.
+    """
+    current_id = stamp_tenant_id()
+    if tenant_id:
+        return bool(current_id) and tenant_id == current_id
+    return _paths_match(cwd, _scope_wiki_root())
+
+
 def get_job(tracking_id: str) -> Optional[TrackedJob]:
     with _lock:
-        return _load_jobs().get(tracking_id)
+        job = _load_jobs().get(tracking_id)
+    if job is None:
+        return None
+    if not job_visible_to_current(job.tenant_id, job.cwd):
+        return None
+    return job
 
 
 def list_jobs(limit: int = 50) -> list[TrackedJob]:
     with _lock:
         jobs = list(_load_jobs().values())
-    jobs.sort(key=lambda j: j.started_at, reverse=True)
-    return jobs[:limit]
+    visible = [j for j in jobs if job_visible_to_current(j.tenant_id, j.cwd)]
+    visible.sort(key=lambda j: j.started_at, reverse=True)
+    return visible[:limit]
 
 
 def _ingest_prompt(raw_rel_path: str, note: str) -> str:
@@ -417,6 +467,7 @@ def start_import_job(raw_rel_path: str, kind: str, note: str = "") -> TrackedJob
         started_at=datetime.now(timezone.utc).isoformat(),
         cwd=cwd,
         log_path=str(log_path),
+        tenant_id=stamp_tenant_id(),
     )
 
     try:
@@ -564,6 +615,7 @@ def start_ingest_job(raw_rel_path: str, note: str = "") -> TrackedJob:
         started_at=datetime.now(timezone.utc).isoformat(),
         cwd=cwd,
         log_path=str(log_path),
+        tenant_id=stamp_tenant_id(),
     )
 
     try:

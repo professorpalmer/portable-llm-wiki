@@ -36,7 +36,7 @@ import re
 import socket
 from dataclasses import dataclass, field
 from typing import Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -78,32 +78,72 @@ def _ip_is_blocked(ip_text: str) -> bool:
     )
 
 
+def _public_ips_for_host(host: str) -> tuple[list[str], str]:
+    """Resolve ``host`` and return public IPs, or ([], reason) if blocked."""
+    if not host:
+        return [], "missing host"
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except (socket.gaierror, UnicodeError) as exc:
+        return [], f"DNS resolution failed: {exc}"
+    if not infos:
+        return [], "host did not resolve"
+    ips: list[str] = []
+    for info in infos:
+        ip_text = info[4][0]
+        if _ip_is_blocked(ip_text):
+            return [], f"blocked address {ip_text} (private/loopback/link-local)"
+        if ip_text not in ips:
+            ips.append(ip_text)
+    return ips, ""
+
+
 def _host_resolves_safe(host: str) -> tuple[bool, str]:
     """Resolve ``host`` (A + AAAA) and confirm EVERY address is a public,
     routable IP. Returns (ok, reason). Blocks SSRF to cloud metadata,
     localhost, and internal networks. Re-run for every redirect hop.
-
-    Residual caveat (honest): this validates at resolve time, so a TOCTOU
-    DNS-rebind between this check and httpx's own resolution is still
-    theoretically possible. Closing that fully requires pinning the
-    connection to the validated IP; for this owner/signed-in-user-gated
-    onboarding flow the resolve-time check removes the practical hole.
     """
     if _allow_private_targets():
         return True, ""
-    if not host:
-        return False, "missing host"
+    ips, reason = _public_ips_for_host(host)
+    return (bool(ips), reason)
+
+
+def _pin_ip_for_host(host: str) -> tuple[Optional[str], str]:
+    """First already-validated IP to connect to (do not let httpx re-resolve)."""
+    if _allow_private_targets():
+        try:
+            infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+        except (socket.gaierror, UnicodeError) as exc:
+            return None, f"DNS resolution failed: {exc}"
+        if not infos:
+            return None, "host did not resolve"
+        return infos[0][4][0], ""
+    ips, reason = _public_ips_for_host(host)
+    if not ips:
+        return None, reason
+    return ips[0], ""
+
+
+def _url_on_pinned_ip(url: str, ip: str) -> str:
+    """Rewrite ``url`` so the connect target is ``ip``; caller sets Host/SNI."""
+    parsed = urlparse(url)
     try:
-        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
-    except (socket.gaierror, UnicodeError) as exc:
-        return False, f"DNS resolution failed: {exc}"
-    if not infos:
-        return False, "host did not resolve"
-    for info in infos:
-        ip_text = info[4][0]
-        if _ip_is_blocked(ip_text):
-            return False, f"blocked address {ip_text} (private/loopback/link-local)"
-    return True, ""
+        version = ipaddress.ip_address(ip).version
+    except ValueError:
+        version = 4
+    host = f"[{ip}]" if version == 6 else ip
+    port = parsed.port
+    netloc = f"{host}:{port}" if port is not None else host
+    return urlunparse(parsed._replace(netloc=netloc))
+
+
+def _host_header(parsed) -> str:
+    hostname = parsed.hostname or ""
+    port = parsed.port
+    if port is None:
+        return hostname
+    return f"{hostname}:{port}"
 
 
 @dataclass
@@ -184,15 +224,10 @@ async def scrape(url: str) -> ScrapedPage:
         page.errors.append("URL missing a hostname")
         return page
 
-    safe, reason = _host_resolves_safe(parsed.hostname)
-    if not safe:
-        page.errors.append(f"refusing to fetch {parsed.hostname!r}: {reason}")
-        return page
-
-    # Manual redirect following so we can re-validate the target host on
-    # every hop. httpx's built-in follow_redirects would chase a 3xx to an
-    # internal address without giving us a chance to re-check it — the
-    # classic SSRF redirect bypass.
+    # Manual redirect following so we can re-validate + pin the target
+    # IP on every hop. Connecting to the already-validated address
+    # (Host/SNI keep the original hostname) closes DNS rebinding
+    # between the check and httpx's own resolve.
     r: Optional[httpx.Response] = None
     try:
         async with httpx.AsyncClient(
@@ -206,23 +241,30 @@ async def scrape(url: str) -> ScrapedPage:
         ) as client:
             current = url
             for _ in range(MAX_REDIRECTS + 1):
-                r = await client.get(current)
+                hop = urlparse(current)
+                if hop.scheme not in ("http", "https") or not hop.hostname:
+                    page.errors.append(f"unsupported target {current!r}")
+                    return page
+                pinned_ip, why = _pin_ip_for_host(hop.hostname)
+                if pinned_ip is None:
+                    label = "refusing to fetch" if current == url else "refusing redirect to"
+                    page.errors.append(f"{label} {hop.hostname!r}: {why}")
+                    return page
+                pinned_url = _url_on_pinned_ip(current, pinned_ip)
+                req = client.build_request(
+                    "GET",
+                    pinned_url,
+                    headers={"Host": _host_header(hop)},
+                )
+                if hop.scheme == "https":
+                    req.extensions["sni_hostname"] = hop.hostname
+                r = await client.send(req)
                 if r.status_code not in (301, 302, 303, 307, 308):
                     break
                 location = r.headers.get("location")
                 if not location:
                     break
                 current = urljoin(current, location)
-                hop = urlparse(current)
-                if hop.scheme not in ("http", "https") or not hop.hostname:
-                    page.errors.append(f"redirect to unsupported target {current!r}")
-                    return page
-                ok, why = _host_resolves_safe(hop.hostname)
-                if not ok:
-                    page.errors.append(
-                        f"refusing redirect to {hop.hostname!r}: {why}"
-                    )
-                    return page
             else:
                 page.errors.append("too many redirects; aborting")
                 return page

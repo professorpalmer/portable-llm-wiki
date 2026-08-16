@@ -12,6 +12,7 @@ import {
   fetchManifest,
   ownerLint,
 } from "@/lib/api";
+import { setShareToken } from "@/lib/shareToken";
 
 describe("owner token roundtrip", () => {
   beforeEach(() => {
@@ -153,5 +154,51 @@ describe("preview-as vs owner bootstrap headers", () => {
     const hdrs = init.headers as Record<string, string>;
     expect(hdrs["Authorization"]).toBe("Bearer owner-secret");
     expect(hdrs["X-Preview-As"]).toBeUndefined();
+  });
+
+  it("browse sends X-Share-Token and does not put the share token in Authorization", async () => {
+    setShareToken("recruiter-share", "cary");
+    setOwnerToken("real-owner-secret");
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ...ownerManifest,
+        viewer_tier: "recruiter",
+        viewer_is_owner: false,
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await fetchManifest("cary");
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    const hdrs = init.headers as Record<string, string>;
+    expect(hdrs["X-Share-Token"]).toBe("recruiter-share");
+    expect(hdrs["Authorization"]).toBe("Bearer real-owner-secret");
+  });
+
+  it("owner endpoints never send X-Share-Token as Authorization substitute", async () => {
+    setShareToken("recruiter-share");
+    setOwnerToken("owner-secret");
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        totals: { pages: 0, by_section: {}, by_tier: {} },
+        orphans: [],
+        stale: [],
+        missing_pages: [],
+        broken_provenance: [],
+        missing_index_entries: [],
+        generated_at: "2026-01-01T00:00:00Z",
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await ownerLint();
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    const hdrs = init.headers as Record<string, string>;
+    expect(hdrs["Authorization"]).toBe("Bearer owner-secret");
+    expect(hdrs["X-Share-Token"]).toBeUndefined();
   });
 });

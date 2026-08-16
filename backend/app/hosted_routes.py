@@ -480,8 +480,18 @@ async def github_callback(
         raise HTTPException(status_code=502, detail=f"github oauth failed: {exc.message}") from exc
 
     tenant_id = gh_user.login.lower()
+    if tenant_id in tenants.RESERVED_TENANT_IDS:
+        raise HTTPException(
+            status_code=403,
+            detail="this GitHub login is reserved and cannot be bound",
+        )
     mgr = tenants.manager()
     tenant = mgr.get(tenant_id)
+    if tenant is not None and tenant.is_demo:
+        raise HTTPException(
+            status_code=403,
+            detail="demo tenant cannot be bound or overwritten",
+        )
     if tenant is None:
         tenant = mgr.provision_local(
             tenant_id,
@@ -650,46 +660,22 @@ def auth_logout(request: Request) -> dict:
 
 
 @router.get("/auth/logout")
-def auth_logout_redirect(request: Request, return_to: str = "") -> RedirectResponse:
-    """Clear the session cookie and bounce back to the frontend.
+def auth_logout_get_rejected() -> JSONResponse:
+    """GET must not clear the session (logout CSRF). Nav must POST.
 
-    Same effect as POST /auth/logout but reachable from a plain
-    ``<a href>`` so the nav menu "Sign out" works without JavaScript.
-    ``return_to`` is validated against the same allow-list OAuth uses,
-    so this can't be abused as an open redirect.
-
-    Landing-page choice: the fallback target is the frontend ROOT (``/``),
-    not ``/welcome``. The welcome page is fundamentally a signed-in
-    onboarding step — if it gets visited anonymously (which signing out
-    produces), it renders a "we can't finish signing you in / cookie
-    didn't make it back" error that's both wrong and alarming for the
-    user who just deliberately signed out. Landing on the public
-    homepage instead reads as a clean sign-off.
+    A crafted ``<img src>`` or prefetch of GET /auth/logout used to sign
+    the victim out. POST /auth/logout is the only path that clears the
+    cookie. The frontend nav must use a form POST or fetch, not ``<a href>``.
     """
     _require_hosted_mode()
-    if hasattr(request, "session"):
-        request.session.clear()
-    # _safe_redirect returns _default_return_to() (= /welcome) when the
-    # given target fails the allow-list, which is the WRONG default for
-    # logout. So we resolve sign-out's own default first (root), then
-    # only run _safe_redirect when an explicit return_to was passed.
-    if return_to:
-        target = _safe_redirect(return_to)
-        # _safe_redirect's "rejected" sentinel is _default_return_to()
-        # (= /welcome). If we got that back from a return_to that the
-        # caller bothered to specify, it was probably the www/apex
-        # mismatch — but either way, prefer root over /welcome for
-        # the post-logout case.
-        if target == _default_return_to():
-            target = _logout_default_landing()
-    else:
-        target = _logout_default_landing()
-    # Reanchor onto PUBLIC_BASE_URL if the caller passed a bare path —
-    # /auth/logout lives on api.portablellm.wiki, but the user wants to
-    # land back on portablellm.wiki.
-    if target.startswith("/") and settings.public_base_url:
-        target = settings.public_base_url.rstrip("/") + target
-    return RedirectResponse(url=target, status_code=302)
+    return JSONResponse(
+        status_code=405,
+        content={
+            "ok": False,
+            "detail": "Use POST /auth/logout to sign out. GET does not clear the session.",
+        },
+        headers={"Allow": "POST"},
+    )
 
 
 def _logout_default_landing() -> str:
@@ -780,12 +766,26 @@ async def owner_delete_account(request: Request) -> JSONResponse:
 
 
 @router.get("/auth/switch-account")
+def auth_switch_account_get_rejected() -> JSONResponse:
+    """GET must not clear the session. Nav must POST /auth/switch-account."""
+    _require_hosted_mode()
+    return JSONResponse(
+        status_code=405,
+        content={
+            "ok": False,
+            "detail": "Use POST /auth/switch-account. GET does not clear the session.",
+        },
+        headers={"Allow": "POST"},
+    )
+
+
+@router.post("/auth/switch-account")
 def auth_switch_account(
     request: Request, return_to: str = ""
 ) -> RedirectResponse:
     """Clear our session and immediately kick off the GitHub OAuth flow.
 
-    UX: the nav's "Switch GitHub account" menu action lands here. We
+    UX: the nav's "Switch GitHub account" menu action POSTs here. We
     can't drive GitHub itself to ``prompt=select_account`` (the GitHub
     OAuth provider doesn't support it the way Google's does), so the
     real switch happens at github.com — whichever account the user is
@@ -793,11 +793,8 @@ def auth_switch_account(
     want a different one, they sign out of github.com first or open
     incognito; the menu copy explains this.
 
-    Implementation note: we used to drive this from the client with a
-    two-hop chain (``/auth/logout?return_to=<encoded /auth/github/login
-    URL>``), but ``_safe_redirect`` rightly rejects API-origin return
-    targets to keep itself a tight open-redirect guard. Doing the
-    clear+redirect server-side is both cleaner and immune to that.
+    GET is rejected (does not clear the session) so a CSRF-via-GET
+    cannot sign the user out. The frontend nav must POST.
     """
     _require_hosted_mode()
     _require_oauth_config()
@@ -1233,9 +1230,9 @@ class AssembleRequest(BaseModel):
     somewhere before drafting.
     """
 
-    answers: list[AssembleAnswer] = Field(default_factory=list)
-    text_sources: list[AssembleTextSource] = Field(default_factory=list)
-    urls: list[AssembleUrlSource] = Field(default_factory=list)
+    answers: list[AssembleAnswer] = Field(default_factory=list, max_length=8)
+    text_sources: list[AssembleTextSource] = Field(default_factory=list, max_length=8)
+    urls: list[AssembleUrlSource] = Field(default_factory=list, max_length=5)
     # Same toggle the existing text/URL onboarding endpoints expose. Self-
     # hosters with Puppetmaster get the agentic path; the hosted product
     # falls through to the direct-LLM drafter inside the same helper.
@@ -1897,14 +1894,12 @@ async def github_push_webhook(request: Request) -> dict:
     repo = payload.get("repository") or {}
     full_name = str(repo.get("full_name") or "")
     tenant = _tenant_for_repo(full_name)
-    if tenant is None:
-        # Unknown repo — nothing we manage. 404 so GitHub's webhook
-        # delivery log shows it as unrouted rather than silently OK.
-        raise HTTPException(status_code=404, detail="no tenant for repo")
-
     signature = request.headers.get("X-Hub-Signature-256", "")
-    if not _verify_github_signature(tenant.gh_webhook_secret, raw_body, signature):
-        raise HTTPException(status_code=401, detail="bad signature")
+    secret = tenant.gh_webhook_secret if tenant is not None else ""
+    # Unknown repo and bad/missing HMAC share one status so existence
+    # is not distinguishable. Empty secret fails closed.
+    if tenant is None or not _verify_github_signature(secret, raw_body, signature):
+        raise HTTPException(status_code=401, detail="unauthorized")
 
     # Ping (sent on hook creation) — acknowledge, no work.
     if event == "ping":
@@ -2472,16 +2467,16 @@ def onboarding_cleanup_imports(request: Request) -> dict:
 
 @router.get("/tenants")
 def list_tenants() -> dict:
-    """Public list of tenants whose ``visibility`` is ``public`` or ``unlisted``.
+    """Public list of tenants whose ``visibility`` is ``public``.
 
-    Used by the landing page to show ``portablellm.wiki/<user>`` examples and
-    by the demo experience to discover Avery.
+    Unlisted wikis are reachable by direct URL (GET /tenants/{id}) but
+    must not appear in the directory. Private tenants 404 on GET by id.
     """
     if settings.single_tenant_mode:
         return {"tenants": []}
     out = []
     for t in tenants.manager().all_tenants():
-        if t.visibility not in ("public", "unlisted"):
+        if t.visibility != "public":
             continue
         out.append(
             {
@@ -2514,3 +2509,36 @@ def get_tenant_public(tenant_id: str) -> dict:
         "created_at": t.created_at,
         "visibility": t.visibility,
     }
+
+
+class TenantVisibilityBody(BaseModel):
+    visibility: str = Field(..., min_length=1, max_length=16)
+
+
+@router.patch("/owner/tenant/visibility")
+@router.post("/owner/tenant/visibility")
+def owner_set_tenant_visibility(
+    request: Request,
+    body: TenantVisibilityBody,
+) -> dict:
+    """Owner-only visibility setter, scoped to the current tenant."""
+    from .auth import require_owner
+
+    _require_hosted_mode()
+    require_owner(request, request.headers.get("authorization"))
+    vis = body.visibility.strip().lower()
+    if vis not in tenants.VALID_VISIBILITY:
+        raise HTTPException(
+            status_code=400,
+            detail="visibility must be public, unlisted, or private",
+        )
+    tenant = tenants.current_tenant_or_none()
+    if tenant is None or tenant.id == "default":
+        user = _session_user(request)
+        if user:
+            tenant = tenants.manager().get(user["tenant_id"])
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="no current tenant")
+    tenant.visibility = vis
+    tenant._persist()
+    return {"ok": True, "id": tenant.id, "visibility": tenant.visibility}

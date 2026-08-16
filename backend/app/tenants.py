@@ -29,6 +29,9 @@ so existing handlers don't need to change their signatures.
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
 import os
 import shutil
@@ -41,6 +44,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from .config import settings
+
+# GitHub logins that must never become a provisioned / OAuth-bound tenant.
+# ``avery`` is the public demo; ``default`` is the unused fallback record.
+RESERVED_TENANT_IDS = frozenset({"avery", "default"})
+VALID_VISIBILITY = ("public", "unlisted", "private")
+
+# Prefix for secrets encrypted into tenant.json. Dual-read: values without
+# this prefix are treated as legacy plaintext and re-encrypted on persist.
+_SECRET_AT_REST_PREFIX = "enc:v1:"
 
 if TYPE_CHECKING:
     from .wiki import WikiIndex
@@ -125,7 +137,7 @@ class Tenant:
     updated_at: str = ""
     # Misc
     is_demo: bool = False  # read-only public demo tenants (e.g. Avery)
-    visibility: str = "public"  # public | unlisted | private
+    visibility: str = "unlisted"  # public | unlisted | private
 
     # Lazy-loaded wiki index for this tenant; not serialized to disk.
     _index: Optional["WikiIndex"] = field(default=None, repr=False, compare=False)
@@ -230,6 +242,10 @@ class Tenant:
             "visibility": self.visibility,
         }
 
+    def _persist(self) -> None:
+        """Write this tenant's metadata to disk (secrets encrypted)."""
+        _manager._persist(self)
+
 
 # ---------------------------------------------------------------------------
 # Request-scoped tenant context (one entry per HTTP request)
@@ -300,6 +316,75 @@ def set_current_tenant(tenant: Tenant) -> _TenantContextManager:
 _TENANT_META_FILE = "tenant.json"
 
 
+def _secret_key_material() -> bytes:
+    """32-byte key from SESSION_SECRET (hosted) or OWNER_TOKEN (OSS)."""
+    if not settings.single_tenant_mode:
+        raw = (settings.session_secret or "").strip()
+    else:
+        raw = (settings.owner_token or "").strip()
+    if not raw:
+        raw = (settings.session_secret or settings.owner_token or "").strip()
+    if not raw:
+        return b""
+    return hashlib.sha256(b"plw-tenant-at-rest-v1:" + raw.encode("utf-8")).digest()
+
+
+def _keystream(key: bytes, nonce: bytes, length: int) -> bytes:
+    out = bytearray()
+    counter = 0
+    while len(out) < length:
+        block = hashlib.sha256(key + nonce + counter.to_bytes(8, "big")).digest()
+        out.extend(block)
+        counter += 1
+    return bytes(out[:length])
+
+
+def encrypt_tenant_secret(plaintext: str) -> str:
+    """Encrypt a tenant secret for tenant.json. Empty / already-encrypted pass through."""
+    if not plaintext:
+        return ""
+    if plaintext.startswith(_SECRET_AT_REST_PREFIX):
+        return plaintext
+    key = _secret_key_material()
+    if not key:
+        return plaintext
+    nonce = os.urandom(16)
+    raw = plaintext.encode("utf-8")
+    stream = _keystream(key, nonce, len(raw))
+    ct = bytes(a ^ b for a, b in zip(raw, stream))
+    tag = hmac.new(key, nonce + ct, hashlib.sha256).digest()
+    blob = base64.urlsafe_b64encode(nonce + tag + ct).decode("ascii")
+    return _SECRET_AT_REST_PREFIX + blob
+
+
+def decrypt_tenant_secret(value: str) -> str:
+    """Decrypt an enc:v1: blob, or return plaintext unchanged (dual-read)."""
+    if not value:
+        return ""
+    if not value.startswith(_SECRET_AT_REST_PREFIX):
+        return value
+    key = _secret_key_material()
+    if not key:
+        return ""
+    try:
+        blob = base64.urlsafe_b64decode(value[len(_SECRET_AT_REST_PREFIX) :].encode("ascii"))
+        nonce, tag, ct = blob[:16], blob[16:48], blob[48:]
+        expected = hmac.new(key, nonce + ct, hashlib.sha256).digest()
+        if not hmac.compare_digest(tag, expected):
+            return ""
+        stream = _keystream(key, nonce, len(ct))
+        return bytes(a ^ b for a, b in zip(ct, stream)).decode("utf-8")
+    except Exception:  # noqa: BLE001 — corrupt blob ⇒ empty, never raise
+        return ""
+
+
+def _normalize_visibility(raw: object) -> str:
+    vis = str(raw or "").strip().lower()
+    if vis in VALID_VISIBILITY:
+        return vis
+    return "public"
+
+
 class TenantManager:
     """In-memory registry of tenants, persisted to disk as JSON.
 
@@ -361,17 +446,18 @@ class TenantManager:
             display_name=str(data.get("display_name", "")),
             gh_login=str(data.get("gh_login", "")),
             gh_user_id=int(data.get("gh_user_id", 0) or 0),
-            gh_token=str(data.get("gh_token", "")),
+            gh_token=decrypt_tenant_secret(str(data.get("gh_token", ""))),
             gh_repo=str(data.get("gh_repo", "")),
             gh_default_branch=str(data.get("gh_default_branch", "main")) or "main",
-            gh_webhook_secret=str(data.get("gh_webhook_secret", "")),
+            gh_webhook_secret=decrypt_tenant_secret(str(data.get("gh_webhook_secret", ""))),
             git_last_synced_at=float(data.get("git_last_synced_at", 0) or 0),
             git_last_error=str(data.get("git_last_error", "")),
             git_pushes_made=int(data.get("git_pushes_made", 0) or 0),
             created_at=str(data.get("created_at", "")),
             updated_at=str(data.get("updated_at", "")),
             is_demo=bool(data.get("is_demo", False)),
-            visibility=str(data.get("visibility", "public")) or "public",
+            # Missing field on old tenant.json stays public (back-compat).
+            visibility=_normalize_visibility(data.get("visibility", "public")),
         )
 
     # ---------- lookups ----------
@@ -476,14 +562,8 @@ class TenantManager:
             "display_name": tenant.display_name,
             "gh_login": tenant.gh_login,
             "gh_user_id": tenant.gh_user_id,
-            # NOTE: writing the OAuth token to disk in plaintext is a v1.0
-            # shortcut. v1.1 must encrypt or move to a secret store. Render
-            # disk is already private but multi-tenant means we don't want
-            # an accidental ``ls`` to leak someone else's token.
-            "gh_token": tenant.gh_token,
-            # Webhook secret: same sensitivity class as the token. Stays
-            # on disk (gitignored via tenant.json) and never goes to_dict.
-            "gh_webhook_secret": tenant.gh_webhook_secret,
+            "gh_token": encrypt_tenant_secret(tenant.gh_token),
+            "gh_webhook_secret": encrypt_tenant_secret(tenant.gh_webhook_secret),
             "gh_repo": tenant.gh_repo,
             "gh_default_branch": tenant.gh_default_branch,
             "git_last_synced_at": tenant.git_last_synced_at,
@@ -569,6 +649,7 @@ class TenantManager:
             gh_user_id=gh_user_id,
             gh_token=gh_token,
             is_demo=is_demo,
+            visibility="public" if is_demo else "unlisted",
         )
         return self.upsert(tenant)
 
