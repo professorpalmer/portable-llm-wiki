@@ -3682,6 +3682,62 @@ def test_tenants_list_excludes_unlisted(multi_tenant_app):
     assert r.status_code == 404
 
 
+def test_tenants_list_excludes_empty_public(multi_tenant_app):
+    """Public tenants with zero markdown pages stay off the directory.
+
+    GET /tenants/{id} still 200 — the URL works; the directory just
+    refuses to advertise an empty shell.
+    """
+    from app import tenants as _tenants
+
+    empty = _tenants.manager().provision_local("empty-pub", display_name="Empty")
+    empty.visibility = "public"
+    _tenants.manager().upsert(empty)
+    assert _tenants.count_wiki_markdown_pages(empty) == 0
+
+    r = multi_tenant_app.get("/tenants")
+    ids = {t["id"] for t in r.json()["tenants"]}
+    assert "alice" in ids
+    assert "avery" in ids
+    assert "empty-pub" not in ids
+
+    r = multi_tenant_app.get("/tenants/empty-pub")
+    assert r.status_code == 200
+    assert r.json()["visibility"] == "public"
+
+
+def test_tenants_list_always_includes_empty_demo(multi_tenant_app):
+    """Avery stays in the directory even with no pages on disk."""
+    from app import tenants as _tenants
+
+    avery = _tenants.manager().require("avery")
+    for path in avery.wiki_dir.rglob("*.md"):
+        path.unlink()
+    assert _tenants.count_wiki_markdown_pages(avery) == 0
+    assert avery.is_demo is True
+
+    r = multi_tenant_app.get("/tenants")
+    ids = {t["id"] for t in r.json()["tenants"]}
+    assert "avery" in ids
+
+
+def test_tenants_list_does_not_rewrite_visibility_or_warm_indexes(multi_tenant_app):
+    from app import tenants as _tenants
+
+    mgr = _tenants.manager()
+    alice = mgr.require("alice")
+    meta_path = alice.wiki_root / "tenant.json"
+    before = meta_path.read_text(encoding="utf-8")
+    for tenant in mgr.all_tenants():
+        tenant.invalidate_index()
+
+    r = multi_tenant_app.get("/tenants")
+    assert r.status_code == 200
+    assert meta_path.read_text(encoding="utf-8") == before
+    assert json.loads(before)["visibility"] == "public"
+    assert mgr.indexed_tenant_ids() == []
+
+
 def test_owner_sets_tenant_visibility(multi_tenant_app):
     _set_session_user(multi_tenant_app, "alice", login="alice")
     r = multi_tenant_app.post(

@@ -247,6 +247,40 @@ class Tenant:
         _manager._persist(self)
 
 
+def count_wiki_markdown_pages(tenant: Tenant) -> int:
+    """Count ``*.md`` files under ``tenant.wiki_dir`` without warming an index.
+
+    Listing the public directory must not construct a :class:`WikiIndex`
+    for every tenant — each index holds page bodies in RAM. A recursive
+    markdown count is enough to know whether the wiki has content.
+    """
+    wiki_dir = tenant.wiki_dir
+    try:
+        if not wiki_dir.is_dir():
+            return 0
+        return sum(1 for _ in wiki_dir.rglob("*.md"))
+    except OSError:
+        return 0
+
+
+def listed_in_public_directory(tenant: Tenant) -> bool:
+    """Whether GET /tenants should include this tenant.
+
+    Demo tenants (Avery) are always listed. Everyone else appears only
+    when ``visibility`` is ``public`` and the wiki dir has at least one
+    markdown page. Does not rewrite ``tenant.json``.
+    """
+    if tenant.is_demo:
+        return True
+    if tenant.visibility != "public":
+        return False
+    wiki_dir = tenant.wiki_dir
+    try:
+        return wiki_dir.is_dir() and any(wiki_dir.rglob("*.md"))
+    except OSError:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Request-scoped tenant context (one entry per HTTP request)
 # ---------------------------------------------------------------------------

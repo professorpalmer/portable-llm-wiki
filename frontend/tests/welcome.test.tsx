@@ -289,6 +289,93 @@ describe("WelcomePage step badge + post-connect refetch", () => {
       expect(screen.queryByTestId("welcome-step-badge")).not.toBeInTheDocument();
     });
   });
+
+  it("post-connect of an empty repo stays on the first-source assemble step", async () => {
+    // FIRST WIKI, NOT FIRST LOGIN: connect-repo seeds a private starter
+    // so page_count becomes 2. That must NOT dump the user onto the
+    // AlreadyOnboarded bouncer (or an empty home). They still need to
+    // add a first source.
+    stubAuthMeQueue([
+      authMeBody({ pageCount: 0, connected: false }),
+      authMeBody({
+        pageCount: 2,
+        connected: true,
+        repo: "alice/my-portable-llm-wiki",
+      }),
+    ]);
+
+    mockConnect.mockResolvedValueOnce({
+      ok: true,
+      connected: true,
+      repo: "alice/my-portable-llm-wiki",
+      branch: "main",
+      html_url: "https://github.com/alice/my-portable-llm-wiki",
+      bootstrap: { ok: true, action: "seeded_empty" },
+      starter_seed: {
+        action: "seeded",
+        pages: ["purpose.md", "how-to-ingest.md"],
+        page_count: 2,
+      },
+      status: {
+        connected: true,
+        repo: "alice/my-portable-llm-wiki",
+        branch: "main",
+        html_url: "https://github.com/alice/my-portable-llm-wiki",
+        last_synced_at: 0,
+        last_error: "",
+        pushes_made: 0,
+      },
+    });
+
+    render(<WelcomePage />);
+    await screen.findByTestId("connect-repo-step");
+    fireEvent.click(screen.getByText(/Create repo \+ connect/i));
+
+    await waitFor(() => {
+      expect(mockConnect).toHaveBeenCalled();
+    });
+
+    expect(await screen.findByTestId("assemble-form")).toBeInTheDocument();
+    expect(screen.getByTestId("first-source-step")).toBeInTheDocument();
+    const badge = screen.getByTestId("welcome-step-badge");
+    expect(badge.textContent).toMatch(/Step 2 of 2 — Seed your wiki/);
+    expect(screen.queryByTestId("connect-repo-step")).not.toBeInTheDocument();
+  });
+
+  it("post-connect that is still empty keeps the assemble step (no empty home)", async () => {
+    stubAuthMeQueue([
+      authMeBody({ pageCount: 0, connected: false }),
+      authMeBody({ pageCount: 0, connected: true, repo: "alice/empty-wiki" }),
+    ]);
+
+    mockConnect.mockResolvedValueOnce({
+      ok: true,
+      connected: true,
+      repo: "alice/empty-wiki",
+      branch: "main",
+      html_url: "https://github.com/alice/empty-wiki",
+      bootstrap: { ok: true, action: "seeded_empty" },
+      starter_seed: { action: "error", pages: [], page_count: 0 },
+      status: {
+        connected: true,
+        repo: "alice/empty-wiki",
+        branch: "main",
+        html_url: "https://github.com/alice/empty-wiki",
+        last_synced_at: 0,
+        last_error: "",
+        pushes_made: 0,
+      },
+    });
+
+    render(<WelcomePage />);
+    await screen.findByTestId("connect-repo-step");
+    fireEvent.click(screen.getByText(/Create repo \+ connect/i));
+
+    expect(await screen.findByTestId("assemble-form")).toBeInTheDocument();
+    expect(screen.getByTestId("first-source-step")).toBeInTheDocument();
+    expect(screen.queryByText(/already onboarded/i)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("connect-repo-step")).not.toBeInTheDocument();
+  });
 });
 
 // ---------------------------------------------------------------------------

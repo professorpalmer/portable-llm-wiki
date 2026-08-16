@@ -52,6 +52,12 @@ class _BaseSettings:
     github_oauth_client_id: str
     github_oauth_client_secret: str
     github_oauth_redirect_url: str
+    # Optional GitHub App (narrower than OAuth ``repo``). Empty = unused;
+    # the current OAuth path continues unchanged. See github_app.py.
+    github_app_id: str
+    github_app_private_key: str
+    github_app_install_url: str
+    github_app_installation_id: str
     # Public origin of the API host (e.g. https://api.portablellm.wiki).
     # Used to build the GitHub push-webhook callback URL. Defaults to the
     # origin of github_oauth_redirect_url (which already lives on the API
@@ -200,6 +206,12 @@ def _load_settings() -> Settings:
         github_oauth_client_secret=os.environ.get("GITHUB_OAUTH_CLIENT_SECRET", "").strip(),
         github_oauth_redirect_url=os.environ.get(
             "GITHUB_OAUTH_REDIRECT_URL", ""
+        ).strip(),
+        github_app_id=os.environ.get("GITHUB_APP_ID", "").strip(),
+        github_app_private_key=os.environ.get("GITHUB_APP_PRIVATE_KEY", "").strip(),
+        github_app_install_url=os.environ.get("GITHUB_APP_INSTALL_URL", "").strip(),
+        github_app_installation_id=os.environ.get(
+            "GITHUB_APP_INSTALLATION_ID", ""
         ).strip(),
         public_api_base_url=(
             os.environ.get("PUBLIC_API_BASE_URL", "").strip()
