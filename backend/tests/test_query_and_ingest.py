@@ -139,8 +139,15 @@ def test_well_known_manifest_is_self_describing(client):
     assert "SPEC.md" in data["spec_url"]
 
 
-def test_healthz_reports_page_count(client):
+def test_healthz_is_public_liveness_only(client):
     r = client.get("/healthz")
+    assert r.status_code == 200
+    data = r.json()
+    assert data == {"status": "ok"}
+
+
+def test_owner_healthz_reports_page_count_and_volume(client, owner_headers):
+    r = client.get("/owner/healthz", headers=owner_headers)
     assert r.status_code == 200
     data = r.json()
     assert data["status"] == "ok"
@@ -151,3 +158,8 @@ def test_healthz_reports_page_count(client):
     assert data["disk_free_bytes"] >= 0
     for leaked in ("wiki_root", "indexed_tenant_ids", "indexed_tenants"):
         assert leaked not in data, leaked
+
+
+def test_owner_healthz_rejects_public(client):
+    r = client.get("/owner/healthz")
+    assert r.status_code in (401, 403)

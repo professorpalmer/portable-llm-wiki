@@ -8,6 +8,12 @@ ordered newest-first.
 
 ## Unreleased
 
+- **Public `/healthz` is liveness-only.** The footer status link and
+  Render/Docker probes no longer return `page_count`, process RSS, or
+  tenant-volume disk bytes. Those are shared-service fingerprints, not
+  per-viewer stats (and `page_count` included private pages). Operators
+  still get them on authenticated `GET /owner/healthz`; hosted tenant
+  owners see only their current wiki's page count, not the platform disk.
 - **Hosted personal-LLM tokens are headless owner credentials.** Private-tier
   tokens minted from Owner → Personal LLM URL (`/<tenant>/llm?t=…`) now
   resolve to `viewer_is_owner=true`, so Cursor/Marionette MCP can
@@ -20,7 +26,7 @@ ordered newest-first.
   calls ``reload_index()`` (which warmed every connected wiki into RAM);
   it ``invalidate_index()``s instead. Per-tenant WikiIndex objects are
   now LRU-capped (`WIKI_INDEX_CACHE_MAX`, default 8; demo tenants pinned).
-  `/healthz` reports `rss_mb` + warm index counts. Hosted blueprint plan
+  Operator `GET /owner/healthz` reports `rss_mb`. Hosted blueprint plan
   bumped Starter → Standard (2 GB) after a 512 MiB OOM on 2026-07-26.
 - **Share-token hit counters no longer block GitHub smart-pull.**
   `resolve()` used to rewrite tracked `.share-tokens.json` on every
