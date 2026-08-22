@@ -2,7 +2,7 @@
 
 Endpoints (LLM-facing, vendor-neutral):
 
-  GET  /healthz
+  GET  /healthz                   — public liveness ({"status":"ok"})
   GET  /wiki/manifest.json        — list of pages visible to the viewer
   GET  /wiki/page/{slug}          — full page (frontmatter + body + cross-refs)
   GET  /wiki/search?q=...         — keyword search across visible pages
@@ -10,6 +10,7 @@ Endpoints (LLM-facing, vendor-neutral):
 
 Owner-only (requires Authorization: Bearer <OWNER_TOKEN>):
 
+  GET  /owner/healthz             — wiki size; volume/RSS for operators only
   POST /owner/ingest              — drop a new raw/ source into the wiki
   POST /owner/page                — create or update a wiki page
   PATCH /owner/page/{slug}/tier   — change a page's tier
@@ -558,18 +559,33 @@ def _volume_stats() -> dict:
     }
 
 
-@app.get("/healthz")
-def healthz() -> dict:
-    """Public liveness. No tenant identities, wiki_root, or tenant counts."""
+def _owner_health_payload(viewer: Viewer) -> dict:
+    """Current-wiki size is fine for an owner. Volume/RSS describe the
+    whole process (and on hosted, the shared tenant disk) — only the
+    static ``OWNER_TOKEN`` path (label ``owner``) or OSS single-tenant
+    may see those."""
     payload: dict = {
         "status": "ok",
         "page_count": len(index.all_pages()),
     }
-    rss = _rss_mb()
-    if rss is not None:
-        payload["rss_mb"] = rss
-    payload.update(_volume_stats())
+    if settings.single_tenant_mode or viewer.label == "owner":
+        rss = _rss_mb()
+        if rss is not None:
+            payload["rss_mb"] = rss
+        payload.update(_volume_stats())
     return payload
+
+
+@app.get("/healthz")
+def healthz() -> dict:
+    """Public liveness for Render/Docker/MCP. No wiki size or disk."""
+    return {"status": "ok"}
+
+
+@app.get("/owner/healthz")
+def owner_healthz(viewer: Viewer = Depends(require_owner)) -> dict:
+    """Authenticated diagnostics. Public ``/healthz`` stays status-only."""
+    return _owner_health_payload(viewer)
 
 
 def _api_base_url() -> str:

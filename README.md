@@ -319,7 +319,7 @@ Then start the dev servers:
 
 Open <http://localhost:3000>. Paste the `OWNER_TOKEN` from
 `backend/.env` on the `/owner` page to authenticate. The backend's
-<http://localhost:8000/healthz> should respond with `{"status":"ok",…}`.
+<http://localhost:8000/healthz> should respond with `{"status":"ok"}`.
 
 For the cloud path instead, see [scripts/deploy.md](scripts/deploy.md).
 

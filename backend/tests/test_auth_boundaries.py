@@ -59,6 +59,8 @@ def test_require_owner_endpoints_reject_public(client):
     # And rejects a wrong bearer
     r = client.post("/owner/reload", headers={"Authorization": "Bearer wrong"})
     assert r.status_code in (401, 403)
+    r = client.get("/owner/healthz")
+    assert r.status_code in (401, 403)
 
 
 def test_preview_as_downgrades_owner(client, owner_headers):

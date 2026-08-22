@@ -520,7 +520,7 @@ class TenantManager:
     def indexed_tenant_ids(self) -> list[str]:
         """Ids of tenants that currently hold a warm WikiIndex in RAM.
 
-        Used by ``/healthz`` memory diagnostics. Does not trigger loads.
+        Used by owner health diagnostics. Does not trigger loads.
         """
         if not self._loaded:
             return []

@@ -310,21 +310,49 @@ def test_tenants_public_list_excludes_default(multi_tenant_app):
     assert "default" not in ids
 
 
-def test_healthz_reports_tenant_volume(multi_tenant_app):
+def test_healthz_is_public_liveness_only(multi_tenant_app):
     r = multi_tenant_app.get("/healthz")
     assert r.status_code == 200
     data = r.json()
-    assert data["status"] == "ok"
-    assert data["disk_total_bytes"] > 0
-    assert data["disk_free_bytes"] >= 0
-    assert data["disk_used_bytes"] >= 0
+    assert data == {"status": "ok"}
     for leaked in (
+        "page_count",
+        "rss_mb",
+        "disk_total_bytes",
+        "disk_used_bytes",
+        "disk_free_bytes",
         "wiki_root",
         "indexed_tenant_ids",
         "indexed_tenants",
         "tenant_count",
         "tenant_dir_count",
         "preexisting_dir_count",
+    ):
+        assert leaked not in data, leaked
+
+
+def test_owner_healthz_rejects_public(multi_tenant_app):
+    r = multi_tenant_app.get("/owner/healthz")
+    assert r.status_code in (401, 403)
+
+
+def test_owner_healthz_session_owner_sees_page_count_not_volume(multi_tenant_app):
+    """A tenant owner is not the platform operator. Their page count is
+    their wiki; disk/RSS describe the shared Render volume and process."""
+    _set_session_user(multi_tenant_app, "alice", login="alice")
+    r = multi_tenant_app.get("/t/alice/owner/healthz")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["status"] == "ok"
+    assert isinstance(data.get("page_count"), int)
+    for leaked in (
+        "rss_mb",
+        "disk_total_bytes",
+        "disk_used_bytes",
+        "disk_free_bytes",
+        "wiki_root",
+        "indexed_tenant_ids",
+        "indexed_tenants",
     ):
         assert leaked not in data, leaked
 

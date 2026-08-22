@@ -70,7 +70,7 @@ deploying:
 
 Click **Apply**. Wait ~90 seconds for the build. Render gives you a
 URL like `https://portable-llm-wiki-backend-XXXX.onrender.com`. Hit
-`/healthz` on it — you should see `{"status":"ok",…}`.
+`/healthz` on it — you should see `{"status":"ok"}`.
 
 ### Step 3 — Note your `OWNER_TOKEN`
 
