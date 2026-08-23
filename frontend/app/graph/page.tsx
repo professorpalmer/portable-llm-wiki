@@ -10,20 +10,6 @@ import {
   type GraphNode,
 } from "@/lib/api";
 import { useTenant } from "@/lib/useTenant";
-import {
-  graphLayoutProfile,
-  linkEndpointId,
-  neighborSlugSet,
-  shouldAutoRelaxOnInitialStop,
-  nodeRadius,
-  paintFocusEdges,
-  pickLabelAnchor,
-  requestGraphRedraw,
-  shouldPaintLink,
-  sparsifyEdges,
-  tryZoomToFit,
-  type LabelRect,
-} from "@/lib/graphView";
 
 // react-force-graph-2d is canvas-based, so it must be loaded client-side
 // only. ``next/dynamic`` returns a ``LoadableComponent`` HOC that does
@@ -85,16 +71,11 @@ export default function GraphPage() {
   const [viewerTier, setViewerTier] = useState<string>("public");
   const [isOwner, setIsOwner] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [hoveredSlug, setHoveredSlug] = useState<string | null>(null);
   const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
   const [sectionFilter, setSectionFilter] = useState<string>("");
   const [labelMode, setLabelMode] = useState<LabelMode>("off");
-  const [layoutPhase, setLayoutPhase] = useState<"running" | "settled">("running");
   const wrapperRef = useRef<HTMLDivElement | null>(null);
-  // Large graphs need one extra pass to reach the same polished equilibrium
-  // that the manual Relax button produces. These refs keep it exactly once per
-  // graph/filter load and distinguish it from a user-triggered Relax.
-  const autoRelaxUsedRef = useRef(false);
-  const manualRelaxRequestedRef = useRef(false);
   // The ForceGraph2D instance exposes d3Force(...) and zoomToFit() — keep a ref.
   // The library's exported type is loose; using `any` here is intentional.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -102,16 +83,8 @@ export default function GraphPage() {
   // Per-frame accumulator for painted label rectangles so collision avoidance
   // can skip labels that would overlap already-painted ones. Reset every frame
   // in onRenderFramePre.
-  const labelRectsRef = useRef<LabelRect[]>([]);
-  // Hover stays off the React render path so moving across 1k+ nodes does not
-  // rebuild canvas callbacks every frame. ForceGraph.refresh() redraws.
-  const hoveredSlugRef = useRef<string | null>(null);
-  const nodesRef = useRef<Array<{ slug?: string; x?: number; y?: number }>>(
-    [],
-  );
-  // null until ResizeObserver reports the real pane — mounting at 800x600 and
-  // then growing the canvas is what parks the cluster in the top-left corner.
-  const [size, setSize] = useState<{ w: number; h: number } | null>(null);
+  const labelRectsRef = useRef<Array<{ x: number; y: number; w: number; h: number }>>([]);
+  const [size, setSize] = useState({ w: 800, h: 600 });
 
   useEffect(() => {
     fetchGraph(tenant)
@@ -131,7 +104,7 @@ export default function GraphPage() {
     if (!wrapperRef.current) return;
     const ro = new ResizeObserver((entries) => {
       const r = entries[0]?.contentRect;
-      if (!r || r.width < 8 || r.height < 8) return;
+      if (!r) return;
       setSize({ w: r.width, h: Math.max(500, r.height) });
     });
     ro.observe(wrapperRef.current);
@@ -151,60 +124,28 @@ export default function GraphPage() {
     };
   }, [graph, sectionFilter]);
 
-  const profile = useMemo(
-    () =>
-      graphLayoutProfile(
-        filtered?.nodes.length ?? 0,
-        filtered?.edges.length ?? 0,
-      ),
-    [filtered?.nodes.length, filtered?.edges.length],
-  );
-
-  const layoutEdges = useMemo(() => {
-    if (!filtered) return [];
-    return sparsifyEdges(filtered.nodes, filtered.edges, profile.maxLayoutEdges);
-  }, [filtered, profile.maxLayoutEdges]);
-
   const data = useMemo(() => {
     if (!filtered) return { nodes: [], links: [] };
     return {
-      nodes: filtered.nodes.map((n) => ({ ...n, id: n.slug })) as Array<
-        GraphNode & { id: string; x?: number; y?: number }
-      >,
-      links: layoutEdges,
+      nodes: filtered.nodes.map((n) => ({ ...n, id: n.slug })),
+      links: filtered.edges.map((e) => ({ source: e.source, target: e.target })),
     };
-  }, [filtered, layoutEdges]);
-  nodesRef.current = data.nodes;
-
-  const graphKey = `${sectionFilter}:${data.nodes.length}:${data.links.length}`;
-  const nodesBySlug = useMemo(() => {
-    const map = new Map<string, { x?: number; y?: number }>();
-    for (const node of data.nodes) map.set(node.slug, node);
-    return map;
-  }, [data.nodes]);
-  const fullEdgesRef = useRef(filtered?.edges ?? []);
-  fullEdgesRef.current = filtered?.edges ?? [];
-
-  useEffect(() => {
-    autoRelaxUsedRef.current = false;
-    manualRelaxRequestedRef.current = false;
-    setLayoutPhase("running");
-  }, [graphKey]);
+  }, [filtered]);
 
   const selectedNode = useMemo(
     () => filtered?.nodes.find((n) => n.slug === selectedSlug) ?? null,
     [filtered, selectedSlug]
   );
 
-  const selectedNeighborSlugs = useMemo(() => {
-    if (!filtered || !selectedSlug) return new Set<string>();
-    return neighborSlugSet(filtered.edges, selectedSlug);
-  }, [filtered, selectedSlug]);
-
   const selectedNeighbors = useMemo(() => {
-    if (!filtered || selectedNeighborSlugs.size === 0) return [];
-    return filtered.nodes.filter((n) => selectedNeighborSlugs.has(n.slug));
-  }, [filtered, selectedNeighborSlugs]);
+    if (!filtered || !selectedSlug) return [];
+    const set = new Set<string>();
+    for (const e of filtered.edges) {
+      if (e.source === selectedSlug) set.add(e.target);
+      if (e.target === selectedSlug) set.add(e.source);
+    }
+    return filtered.nodes.filter((n) => set.has(n.slug));
+  }, [filtered, selectedSlug]);
 
   const sectionCounts = useMemo(() => {
     if (!graph) return {} as Record<string, number>;
@@ -233,49 +174,31 @@ export default function GraphPage() {
     return set;
   }, [filtered, selectedSlug, selectedNeighbors, labelMode]);
 
-  // Tune the d3-force layout when graph data changes. Collision runs on every
-  // tier (quadtree O(n) per tick) so nodes separate into a readable web instead
-  // of hubs stacking; the huge/large tiers also lay out over the full edge set
-  // (maxLayoutEdges: Infinity) and reheat so the tuned forces apply on mount.
+  // Tune the d3-force layout when graph data changes. Defaults are tuned for
+  // sparse graphs; our wiki graph has avg degree ~9, which collapses without
+  // stronger repulsion + a collision force.
   useEffect(() => {
     if (!fgRef.current || !filtered || filtered.nodes.length === 0) return;
     const fg = fgRef.current;
     const linkF = fg.d3Force("link");
-    if (linkF) linkF.distance(profile.linkDistance).strength(profile.linkStrength);
+    if (linkF) linkF.distance(90).strength(0.4);
     const chargeF = fg.d3Force("charge");
-    if (chargeF) {
-      chargeF.strength(profile.chargeStrength).distanceMax(profile.chargeDistanceMax);
-      if (typeof chargeF.theta === "function") chargeF.theta(profile.chargeTheta);
-    }
-    if (!profile.useCollision) {
-      fg.d3Force("collision", null);
-      // Reheat even without collision: without d3ReheatSimulation() the tuned
-      // charge/link forces are never applied and the simulation stays as a tight
-      // default clump until the user clicks Relax.
-      fg.d3ReheatSimulation();
-      return;
-    }
-    let cancelled = false;
+    if (chargeF) chargeF.strength(-420).distanceMax(600);
+    // Inject a collision force keyed to node radius so nodes don't overlap.
     import("d3-force").then(({ forceCollide }) => {
-      if (cancelled || fgRef.current !== fg) return;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       fg.d3Force("collision", forceCollide((d: any) => {
-        return nodeRadius(d.degree || 1) + 14;
+        const r = 4 + Math.sqrt(d.degree || 1) * 1.6;
+        return r + 14; // generous radius so labels also have room
       }).strength(0.9));
       fg.d3ReheatSimulation();
     });
-    return () => {
-      cancelled = true;
-    };
-  }, [filtered, profile, size]);
 
-  useEffect(() => {
-    if (!size || data.nodes.length === 0) return;
-    const t = window.setTimeout(() => {
-      tryZoomToFit(fgRef.current, nodesRef.current, 60);
-    }, 80);
-    return () => window.clearTimeout(t);
-  }, [size?.w, size?.h, data.nodes.length, data.links.length]);
+    // onEngineStop sometimes doesn't fire when the simulation is rewarmed by
+    // dependencies. Belt-and-suspenders: explicit zoom-to-fit after a delay.
+    const t = setTimeout(() => fgRef.current?.zoomToFit?.(500, 60), 1500);
+    return () => clearTimeout(t);
+  }, [filtered]);
 
   return (
     <div className="max-w-7xl mx-auto px-5 py-6">
@@ -305,11 +228,6 @@ export default function GraphPage() {
                   : "0"}
               </span>
             </span>
-            {layoutEdges.length < graph.edges.length && (
-              <span title="The force layout uses a hub backbone so the animation stays responsive. Select a node to see its real neighborhood.">
-                layout {layoutEdges.length} edges
-              </span>
-            )}
           </div>
         )}
       </div>
@@ -392,22 +310,18 @@ export default function GraphPage() {
             {LABEL_MODE_TEXT[labelMode]}
           </button>
           <button
-            onClick={() => tryZoomToFit(fgRef.current, nodesRef.current, 80, 500)}
+            onClick={() => fgRef.current?.zoomToFit?.(500, 80)}
             className="text-xs px-2 py-1 rounded border border-paper-soft text-ink-muted hover:border-ink hover:text-ink"
             title="Fit graph to view"
           >
-            recenter
+            ⤢ recenter
           </button>
           <button
-            onClick={() => {
-              manualRelaxRequestedRef.current = true;
-              setLayoutPhase("running");
-              fgRef.current?.d3ReheatSimulation?.();
-            }}
+            onClick={() => fgRef.current?.d3ReheatSimulation?.()}
             className="text-xs px-2 py-1 rounded border border-paper-soft text-ink-muted hover:border-ink hover:text-ink"
             title="Re-run layout simulation"
           >
-            relax
+            ↻ relax
           </button>
         </span>
       </div>
@@ -418,11 +332,9 @@ export default function GraphPage() {
           className="bg-white border border-paper-soft rounded-xl overflow-hidden"
           style={{ height: "78vh", minHeight: 600 }}
         >
-          {!size || data.nodes.length === 0 ? (
+          {data.nodes.length === 0 ? (
             <div className="h-full flex items-center justify-center text-sm text-ink-muted">
-              {graph && data.nodes.length === 0
-                ? "no pages match the current filter"
-                : "loading…"}
+              {graph ? "no pages match the current filter" : "loading…"}
             </div>
           ) : (
             <ForceGraphCanvas
@@ -432,74 +344,57 @@ export default function GraphPage() {
               graphData={data}
               backgroundColor="#fafaf7"
               nodeRelSize={6}
-              cooldownTicks={profile.cooldownTicks}
-              cooldownTime={profile.cooldownTime}
-              warmupTicks={profile.warmupTicks}
-              d3AlphaDecay={profile.alphaDecay}
-              d3AlphaMin={profile.alphaMin}
-              d3VelocityDecay={profile.velocityDecay}
-              autoPauseRedraw
-              enablePointerInteraction={layoutPhase === "settled"}
+              cooldownTicks={300}
+              d3AlphaDecay={0.018}
+              d3VelocityDecay={0.35}
+              warmupTicks={80}
               onEngineStop={() => {
-                const largeGraph =
-                  data.nodes.length >= 600 || data.links.length >= 4000;
-                if (
-                  shouldAutoRelaxOnInitialStop({
-                    isLargeOrHuge: largeGraph,
-                    autoRelaxUsed: autoRelaxUsedRef.current,
-                    manualRelaxRequested: manualRelaxRequestedRef.current,
-                  })
-                ) {
-                  // A large graph looks noticeably better after the same second
-                  // pass that the Relax button provides. Keep the canvas in its
-                  // running state until that one automatic pass finishes.
-                  autoRelaxUsedRef.current = true;
-                  setLayoutPhase("running");
-                  fgRef.current?.d3ReheatSimulation?.();
-                  return;
-                }
-                setLayoutPhase("settled");
-                tryZoomToFit(fgRef.current, nodesRef.current, 60, 500);
+                fgRef.current?.zoomToFit?.(500, 60);
+                // Reset the per-frame label-rect accumulator so the new
+                // post-settle frame starts clean.
                 labelRectsRef.current = [];
               }}
               onRenderFramePre={() => {
+                // Clear the painted-label rect list at the start of every
+                // render frame so collision detection only considers labels
+                // drawn this frame.
                 labelRectsRef.current = [];
               }}
-              onRenderFramePost={(ctx: CanvasRenderingContext2D) => {
-                if (layoutPhase !== "settled") return;
-                const focus = selectedSlug ?? hoveredSlugRef.current;
-                if (!focus) return;
-                paintFocusEdges(ctx, nodesBySlug, fullEdgesRef.current, focus, {
-                  color: selectedSlug
-                    ? "rgba(255,106,0,0.55)"
-                    : "rgba(14,14,16,0.28)",
-                  width: selectedSlug ? 1.6 : 1,
-                });
+              linkColor={(link: unknown) => {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const l = link as any;
+                const sSlug = typeof l.source === "object" ? l.source.slug : l.source;
+                const tSlug = typeof l.target === "object" ? l.target.slug : l.target;
+                if (
+                  selectedSlug &&
+                  (sSlug === selectedSlug || tSlug === selectedSlug)
+                ) {
+                  return "rgba(255,106,0,0.55)";
+                }
+                if (selectedSlug) return "rgba(14,14,16,0.06)";
+                return "rgba(14,14,16,0.12)";
               }}
-              linkVisibility={(link: unknown) => {
-                if (layoutPhase !== "settled") return false;
-                if (selectedSlug || hoveredSlugRef.current) return false;
-                const typed = link as { source?: unknown; target?: unknown };
-                const s = linkEndpointId(typed.source);
-                const tId = linkEndpointId(typed.target);
-                return shouldPaintLink(s, tId, {
-                  edgeCount: fullEdgesRef.current.length,
-                  focusSlug: null,
-                  maxIdleEdges: profile.maxIdleEdges,
-                });
+              linkWidth={(link: unknown) => {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const l = link as any;
+                const sSlug = typeof l.source === "object" ? l.source.slug : l.source;
+                const tSlug = typeof l.target === "object" ? l.target.slug : l.target;
+                if (
+                  selectedSlug &&
+                  (sSlug === selectedSlug || tSlug === selectedSlug)
+                ) {
+                  return 1.6;
+                }
+                return 0.6;
               }}
-              linkColor={() => "rgba(14,14,16,0.12)"}
-              linkWidth={0.6}
-              linkDirectionalArrowLength={0}
+              linkDirectionalArrowLength={3}
+              linkDirectionalArrowRelPos={0.92}
               onNodeHover={(node: unknown) => {
                 const n = node as { slug?: string } | null;
-                const slug = n?.slug ?? null;
-                if (hoveredSlugRef.current === slug) return;
-                hoveredSlugRef.current = slug;
+                setHoveredSlug(n?.slug ?? null);
                 if (wrapperRef.current) {
-                  wrapperRef.current.style.cursor = slug ? "pointer" : "default";
+                  wrapperRef.current.style.cursor = n ? "pointer" : "default";
                 }
-                requestGraphRedraw(fgRef.current);
               }}
               onNodeClick={(node: unknown) => {
                 const n = node as { slug?: string } | null;
@@ -508,19 +403,13 @@ export default function GraphPage() {
               onBackgroundClick={() => setSelectedSlug(null)}
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               nodeCanvasObject={(node: any, ctx: CanvasRenderingContext2D, scale: number) => {
-                const radius = nodeRadius(node.degree || 1);
-                const fill = SECTION_COLORS[node.section] || SECTION_COLORS.other;
-                if (layoutPhase !== "settled") {
-                  ctx.beginPath();
-                  ctx.arc(node.x, node.y, radius, 0, 2 * Math.PI, false);
-                  ctx.fillStyle = fill;
-                  ctx.fill();
-                  return;
-                }
-
+                const radius = Math.max(4, Math.min(14, 4 + Math.sqrt(node.degree || 1) * 1.6));
                 const isSelected = node.slug === selectedSlug;
-                const isHovered = node.slug === hoveredSlugRef.current;
-                const isNeighbor = selectedNeighborSlugs.has(node.slug);
+                const isHovered = node.slug === hoveredSlug;
+                const isNeighbor =
+                  !!selectedSlug &&
+                  selectedNeighbors.some((nb) => nb.slug === node.slug);
+                const fill = SECTION_COLORS[node.section] || SECTION_COLORS.other;
                 const ring = TIER_RING[node.tier] || "#999";
 
                 ctx.beginPath();
@@ -529,76 +418,102 @@ export default function GraphPage() {
                 ctx.globalAlpha =
                   selectedSlug && !(isSelected || isNeighbor) ? 0.18 : 1.0;
                 ctx.fill();
+                ctx.lineWidth = isSelected ? 3 : isHovered ? 2 : 1.5;
+                ctx.strokeStyle = isSelected ? "#0e0e10" : ring;
+                ctx.stroke();
                 ctx.globalAlpha = 1.0;
-                // Suppress confetti rings on huge graphs: only paint rings for
-                // focused / neighbor nodes or when the node is large enough on
-                // screen. Ring width scales with 1/scale like labels do.
-                const isHugeTier = profile.maxIdleEdges <= 900;
-                const shouldPaintRing =
-                  isSelected || isHovered || isNeighbor || !isHugeTier;
-                if (shouldPaintRing) {
-                  const baseWidth = isSelected ? 3 : isHovered ? 2 : 1.5;
-                  const scaledWidth = baseWidth / Math.max(0.85, scale);
-                  // On huge tier at low zoom, skip faint background rings when
-                  // the node itself is sub-pixel small.
-                  if (!isHugeTier || isSelected || isHovered || isNeighbor || radius * scale >= 2.4) {
-                    ctx.lineWidth = scaledWidth;
-                    ctx.strokeStyle = isSelected ? "#0e0e10" : ring;
-                    ctx.stroke();
-                  }
-                }
 
                 const shouldLabel =
                   isSelected ||
                   isHovered ||
                   labelSet.has(node.slug) ||
                   (labelMode !== "off" && scale > 1.6);
-                if (!shouldLabel) return;
+                if (shouldLabel) {
+                  const fullTitle = node.title as string;
+                  const label =
+                    isSelected || isHovered || scale > 2 || fullTitle.length <= 26
+                      ? fullTitle
+                      : fullTitle.slice(0, 24) + "…";
+                  const fontSize = Math.max(9, 11 / Math.max(0.6, scale));
+                  ctx.font = `${isSelected || isHovered ? "600 " : ""}${fontSize}px ui-sans-serif`;
+                  const padX = 4 / scale;
+                  const padY = 2 / scale;
+                  const textW = ctx.measureText(label).width;
+                  const textH = fontSize;
+                  const gap = 4 / scale;
 
-                const fullTitle = node.title as string;
-                const label =
-                  isSelected || isHovered || scale > 2 || fullTitle.length <= 26
-                    ? fullTitle
-                    : fullTitle.slice(0, 24) + "…";
-                const fontSize = Math.max(9, 11 / Math.max(0.6, scale));
-                ctx.font = `${isSelected || isHovered ? "600 " : ""}${fontSize}px ui-sans-serif`;
-                const padX = 4 / scale;
-                const padY = 2 / scale;
-                const textW = ctx.measureText(label).width;
-                const gap = 4 / scale;
-                const chosen = pickLabelAnchor(
-                  [
-                    { x: node.x, y: node.y + radius + gap, ax: "center", ay: "top" },
-                    { x: node.x, y: node.y - radius - gap, ax: "center", ay: "bottom" },
-                    { x: node.x + radius + gap, y: node.y, ax: "left", ay: "middle" },
-                    { x: node.x - radius - gap, y: node.y, ax: "right", ay: "middle" },
-                  ],
-                  textW,
-                  fontSize,
-                  padX,
-                  padY,
-                  labelRectsRef.current,
-                  isSelected || isHovered,
-                );
-                if (!chosen) return;
+                  // Try several anchor positions around the node, in priority
+                  // order: below, above, right, left. Pick the first that
+                  // doesn't overlap an already-painted label this frame.
+                  // Selected/hovered always paints (and dominates everything).
+                  const candidates = [
+                    { x: node.x, y: node.y + radius + gap, ax: "center" as const, ay: "top" as const },
+                    { x: node.x, y: node.y - radius - gap, ax: "center" as const, ay: "bottom" as const },
+                    { x: node.x + radius + gap, y: node.y, ax: "left" as const, ay: "middle" as const },
+                    { x: node.x - radius - gap, y: node.y, ax: "right" as const, ay: "middle" as const },
+                  ];
 
-                const { rect, anchor } = chosen;
-                ctx.fillStyle =
-                  isSelected || isHovered
-                    ? "rgba(250,250,247,0.95)"
-                    : "rgba(250,250,247,0.85)";
-                ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
-                ctx.fillStyle = isSelected || isHovered ? "#0e0e10" : "#525258";
-                ctx.textAlign = anchor.ax;
-                ctx.textBaseline = anchor.ay;
-                ctx.fillText(label, anchor.x, anchor.y);
-                labelRectsRef.current.push(rect);
+                  function rectFor(c: (typeof candidates)[number]) {
+                    let rx = c.x;
+                    let ry = c.y;
+                    if (c.ax === "center") rx -= textW / 2;
+                    else if (c.ax === "right") rx -= textW;
+                    if (c.ay === "middle") ry -= textH / 2;
+                    else if (c.ay === "bottom") ry -= textH;
+                    return {
+                      x: rx - padX,
+                      y: ry - padY,
+                      w: textW + padX * 2,
+                      h: textH + padY * 2,
+                    };
+                  }
+
+                  function overlaps(
+                    a: { x: number; y: number; w: number; h: number },
+                    b: { x: number; y: number; w: number; h: number }
+                  ) {
+                    return !(
+                      a.x + a.w < b.x ||
+                      b.x + b.w < a.x ||
+                      a.y + a.h < b.y ||
+                      b.y + b.h < a.y
+                    );
+                  }
+
+                  const forced = isSelected || isHovered;
+                  let chosen: { rect: { x: number; y: number; w: number; h: number }; c: (typeof candidates)[number] } | null = null;
+                  for (const c of candidates) {
+                    const r = rectFor(c);
+                    const collision = labelRectsRef.current.some((other) => overlaps(r, other));
+                    if (!collision) {
+                      chosen = { rect: r, c };
+                      break;
+                    }
+                  }
+                  // If everything collides and the label isn't forced (selected/
+                  // hovered), skip drawing it — keeps dense clusters readable.
+                  if (!chosen && forced) {
+                    chosen = { rect: rectFor(candidates[0]), c: candidates[0] };
+                  }
+
+                  if (chosen) {
+                    const { rect, c } = chosen;
+                    ctx.fillStyle = forced
+                      ? "rgba(250,250,247,0.95)"
+                      : "rgba(250,250,247,0.85)";
+                    ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+                    ctx.fillStyle = forced ? "#0e0e10" : "#525258";
+                    ctx.textAlign = c.ax;
+                    ctx.textBaseline = c.ay;
+                    ctx.fillText(label, c.x, c.y);
+                    labelRectsRef.current.push(rect);
+                  }
+                }
               }}
               // Increase the painted hit-area so clicks/hovers are forgiving.
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               nodePointerAreaPaint={(node: any, color: string, ctx: CanvasRenderingContext2D) => {
-                if (layoutPhase !== "settled") return;
-                const radius = Math.max(8, nodeRadius(node.degree || 1) + 2);
+                const radius = Math.max(8, 6 + Math.sqrt(node.degree || 1) * 1.6);
                 ctx.fillStyle = color;
                 ctx.beginPath();
                 ctx.arc(node.x, node.y, radius, 0, 2 * Math.PI, false);
