@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import {
   ownerListShareTokens,
   ownerMintShareToken,
+  ownerPurgeRevokedShareTokens,
   ownerRevokeShareToken,
   type MintedShareToken,
   type ShareTokenInfo,
@@ -108,6 +109,27 @@ export function ShareTokensPanel({
     if (!confirm(`Revoke "${label}"? This is permanent.`)) return;
     try {
       await ownerRevokeShareToken(id, tenant);
+      await refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
+  async function purgeOne(id: string, label: string) {
+    if (!confirm(`Permanently remove revoked token "${label}"? This cannot be undone.`)) return;
+    try {
+      await ownerPurgeRevokedShareTokens([id], tenant);
+      await refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
+  async function purgeAllRevoked() {
+    const revoked = tokens.filter((t) => t.revoked);
+    if (!confirm(`Permanently remove ${revoked.length} revoked token(s)? This cannot be undone.`)) return;
+    try {
+      await ownerPurgeRevokedShareTokens(undefined, tenant);
       await refresh();
     } catch (e) {
       setError((e as Error).message);
@@ -225,7 +247,7 @@ export function ShareTokensPanel({
                   onClick={() => copyShare(newlyMinted.token, "llm")}
                   className="px-3 py-1.5 rounded bg-amber-700 text-white text-xs font-medium hover:bg-amber-800"
                 >
-                  {copyOk ? "copied ✓" : "copy"}
+                  {copyOk ? "copied" : "copy"}
                 </button>
               </div>
             </div>
@@ -262,64 +284,93 @@ export function ShareTokensPanel({
 
       {/* Token list */}
       <div className="mt-5">
-        {loading ? (
-          <div className="text-xs text-ink-muted">loading…</div>
-        ) : tokens.length === 0 ? (
-          <div className="text-xs text-ink-muted">No share tokens yet.</div>
-        ) : (
-          <ul className="space-y-2">
-            {tokens.map((t) => (
-              <li
-                key={t.id}
-                className={`p-3 rounded border ${
-                  t.revoked
-                    ? "border-paper-soft bg-paper-soft/40 opacity-60"
-                    : "border-paper-soft bg-paper"
-                }`}
-              >
-                <div className="flex items-start justify-between gap-3 flex-wrap">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-medium text-ink truncate">
-                        {t.label}
-                      </span>
-                      <span
-                        className={`text-[10px] uppercase tracking-wider font-semibold px-1.5 py-0.5 rounded border ${
-                          TIER_STYLE[t.tier]
-                        }`}
-                      >
-                        {t.tier}
-                      </span>
-                      {t.revoked && (
-                        <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-red-100 text-red-700 border border-red-200">
-                          revoked
-                        </span>
-                      )}
-                    </div>
-                    <div className="mt-1 text-xs text-ink-muted font-mono">
-                      id: {t.id} · created {fmtDate(t.created_at)}
-                      {t.expires_at && <> · expires {fmtDate(t.expires_at)}</>}
-                    </div>
-                    <div className="mt-0.5 text-xs text-ink-muted">
-                      {t.hits} hit{t.hits === 1 ? "" : "s"}
-                      {t.last_used_at && (
-                        <> · last used {fmtDate(t.last_used_at)}</>
-                      )}
-                    </div>
+        {(() => {
+          const revokedCount = tokens.filter((t) => t.revoked).length;
+          return (
+            <>
+              {tokens.length > 0 && revokedCount >= 1 && (
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-[11px] uppercase tracking-wider text-ink-muted font-semibold">
+                    Tokens
                   </div>
-                  {!t.revoked && (
-                    <button
-                      onClick={() => revoke(t.id, t.label)}
-                      className="text-xs text-red-700 hover:text-red-900 underline shrink-0"
-                    >
-                      revoke
-                    </button>
-                  )}
+                  <button
+                    onClick={purgeAllRevoked}
+                    className="text-xs text-ink-muted hover:text-ink underline"
+                  >
+                    clear revoked ({revokedCount})
+                  </button>
                 </div>
-              </li>
-            ))}
-          </ul>
-        )}
+              )}
+              {loading ? (
+                <div className="text-xs text-ink-muted">loading…</div>
+              ) : tokens.length === 0 ? (
+                <div className="text-xs text-ink-muted">No share tokens yet.</div>
+              ) : (
+                <ul className="space-y-2">
+                  {tokens.map((t) => (
+                    <li
+                      key={t.id}
+                      className={`relative p-3 rounded border ${
+                        t.revoked
+                          ? "border-paper-soft bg-paper-soft/40 opacity-60"
+                          : "border-paper-soft bg-paper"
+                      }`}
+                    >
+                      {t.revoked && (
+                        <button
+                          onClick={() => purgeOne(t.id, t.label)}
+                          aria-label={`Remove revoked token ${t.label}`}
+                          className="absolute top-1 right-1 text-ink-muted hover:text-ink text-sm leading-none px-1"
+                        >
+                          ×
+                        </button>
+                      )}
+                      <div className="flex items-start justify-between gap-3 flex-wrap">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-medium text-ink truncate">
+                              {t.label}
+                            </span>
+                            <span
+                              className={`text-[10px] uppercase tracking-wider font-semibold px-1.5 py-0.5 rounded border ${
+                                TIER_STYLE[t.tier]
+                              }`}
+                            >
+                              {t.tier}
+                            </span>
+                            {t.revoked && (
+                              <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-red-100 text-red-700 border border-red-200">
+                                revoked
+                              </span>
+                            )}
+                          </div>
+                          <div className="mt-1 text-xs text-ink-muted font-mono">
+                            id: {t.id} · created {fmtDate(t.created_at)}
+                            {t.expires_at && <> · expires {fmtDate(t.expires_at)}</>}
+                          </div>
+                          <div className="mt-0.5 text-xs text-ink-muted">
+                            {t.hits} hit{t.hits === 1 ? "" : "s"}
+                            {t.last_used_at && (
+                              <> · last used {fmtDate(t.last_used_at)}</>
+                            )}
+                          </div>
+                        </div>
+                        {!t.revoked && (
+                          <button
+                            onClick={() => revoke(t.id, t.label)}
+                            className="text-xs text-red-700 hover:text-red-900 underline shrink-0"
+                          >
+                            revoke
+                          </button>
+                        )}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
+          );
+        })()}
       </div>
     </section>
   );

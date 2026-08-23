@@ -362,6 +362,59 @@ def test_resolve_increments_sidecar_hits(client, owner_headers, wiki_root):
     assert listed["hits"] == 3
 
 
+def test_purge_all_revoked_removes_only_revoked(client, owner_headers):
+    a = _mint(client, owner_headers, "keep", "recruiter")
+    b = _mint(client, owner_headers, "purge me", "friend")
+    c = _mint(client, owner_headers, "also purge", "private")
+    client.delete(f"/owner/share-tokens/{b['id']}", headers=owner_headers)
+    client.delete(f"/owner/share-tokens/{c['id']}", headers=owner_headers)
+    r = client.post("/owner/share-tokens/purge-revoked", json={}, headers=owner_headers)
+    assert r.status_code == 200
+    assert r.json()["removed"] == 2
+    r = client.get("/owner/share-tokens", headers=owner_headers)
+    ids = {t["id"] for t in r.json()["tokens"]}
+    assert a["id"] in ids
+    assert b["id"] not in ids
+    assert c["id"] not in ids
+
+
+def test_purge_targeted_ids_skips_unknown_and_active(client, owner_headers):
+    active = _mint(client, owner_headers, "active", "recruiter")
+    revoked = _mint(client, owner_headers, "revoked", "friend")
+    client.delete(f"/owner/share-tokens/{revoked['id']}", headers=owner_headers)
+    r = client.post(
+        "/owner/share-tokens/purge-revoked",
+        json={"ids": [active["id"], revoked["id"], "does-not-exist"]},
+        headers=owner_headers,
+    )
+    assert r.status_code == 200
+    assert r.json()["removed"] == 1
+    r = client.get("/owner/share-tokens", headers=owner_headers)
+    ids = {t["id"] for t in r.json()["tokens"]}
+    assert active["id"] in ids
+    assert revoked["id"] not in ids
+
+
+def test_purge_requires_owner(client):
+    r = client.post("/owner/share-tokens/purge-revoked", json={})
+    assert r.status_code in (401, 403)
+    r = client.post("/owner/share-tokens/purge-revoked", json={"ids": ["x"]})
+    assert r.status_code in (401, 403)
+
+
+def test_purge_triggers_persistence_push(client, owner_headers, monkeypatch):
+    from app import persistence
+
+    tok = _mint(client, owner_headers, "to purge", "recruiter")
+    client.delete(f"/owner/share-tokens/{tok['id']}", headers=owner_headers)
+    calls: list[str] = []
+    monkeypatch.setattr(persistence, "flush_async", lambda m: calls.append(m))
+    r = client.post("/owner/share-tokens/purge-revoked", json={}, headers=owner_headers)
+    assert r.status_code == 200
+    assert r.json()["removed"] == 1
+    assert any("purge revoked share tokens" in m for m in calls)
+
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
