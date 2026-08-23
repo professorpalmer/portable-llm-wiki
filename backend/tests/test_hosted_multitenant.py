@@ -777,7 +777,7 @@ def test_draft_from_raw_with_fallback_uses_direct_drafter_when_orchestrator_miss
     rel = "raw/imports/2026-05-24-test.md"
     (tenant.wiki_root / rel).write_text("body", encoding="utf-8")
 
-    result = asyncio.get_event_loop().run_until_complete(
+    result = asyncio.run(
         hr._draft_from_raw_with_fallback(
             tenant=tenant,
             raw_rel=rel,
@@ -822,7 +822,7 @@ def test_draft_from_raw_with_fallback_503s_when_no_llm_key(
     tenant = _tenants.manager().require("alice")
 
     with pytest.raises(HTTPException) as exc_info:
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             hr._draft_from_raw_with_fallback(
                 tenant=tenant,
                 raw_rel="raw/imports/x.md",
@@ -3569,7 +3569,7 @@ def test_convention_auto_bind_picks_new_name_first(multi_tenant_app, monkeypatch
     monkeypatch.setattr(gh_api, "get_repo_root_entries", fake_get_root_entries)
     monkeypatch.setattr(persistence_mod, "bootstrap_tenant", fake_bootstrap)
 
-    asyncio.get_event_loop().run_until_complete(
+    asyncio.run(
         hosted_routes._hydrate_tenant_from_github(tenant)
     )
 
@@ -3615,7 +3615,7 @@ def test_convention_auto_bind_falls_back_to_legacy_name(
         persistence_mod, "bootstrap_tenant", lambda t: {"ok": True}
     )
 
-    asyncio.get_event_loop().run_until_complete(
+    asyncio.run(
         hosted_routes._hydrate_tenant_from_github(tenant)
     )
 
@@ -3665,7 +3665,7 @@ def test_convention_auto_bind_skips_product_fork_at_legacy_name(
         lambda t: bootstrap_called.append(t.gh_repo) or {"ok": True},
     )
 
-    asyncio.get_event_loop().run_until_complete(
+    asyncio.run(
         hosted_routes._hydrate_tenant_from_github(tenant)
     )
 
