@@ -9,7 +9,24 @@ import {
   type GraphResponse,
   type GraphNode,
 } from "@/lib/api";
+import { fitForceGraphCamera } from "@/lib/graphCamera";
 import { useTenant } from "@/lib/useTenant";
+
+let pinningCamera = false;
+
+function pinDefaultCamera(fg: {
+  zoom?: (k?: number, ms?: number) => unknown;
+  centerAt?: (x?: number, y?: number, ms?: number) => void;
+} | null) {
+  if (!fg?.zoom || !fg.centerAt || pinningCamera) return;
+  pinningCamera = true;
+  try {
+    fg.zoom(1, 0);
+    fg.centerAt(0, 0, 0);
+  } finally {
+    pinningCamera = false;
+  }
+}
 
 // react-force-graph-2d is canvas-based, so it must be loaded client-side
 // only. ``next/dynamic`` returns a ``LoadableComponent`` HOC that does
@@ -84,6 +101,9 @@ export default function GraphPage() {
   // can skip labels that would overlap already-painted ones. Reset every frame
   // in onRenderFramePre.
   const labelRectsRef = useRef<Array<{ x: number; y: number; w: number; h: number }>>([]);
+  // Keep the default k=1 camera until the user hits Recenter. force-graph
+  // otherwise applies `4 / cbrt(n)` after warmup, which is the late zoom-out.
+  const holdInitialCameraRef = useRef(true);
   const [size, setSize] = useState({ w: 800, h: 600 });
 
   useEffect(() => {
@@ -174,6 +194,23 @@ export default function GraphPage() {
     return set;
   }, [filtered, selectedSlug, selectedNeighbors, labelMode]);
 
+  useEffect(() => {
+    if (!filtered?.nodes.length) return;
+    holdInitialCameraRef.current = true;
+    const pin = () => {
+      if (!holdInitialCameraRef.current) return;
+      pinDefaultCamera(fgRef.current);
+    };
+    pin();
+    // Keep k=1 through force-graph's delayed node-count auto-zoom.
+    const id = window.setInterval(pin, 150);
+    const stop = window.setTimeout(() => window.clearInterval(id), 12000);
+    return () => {
+      window.clearInterval(id);
+      window.clearTimeout(stop);
+    };
+  }, [filtered]);
+
   // Tune the d3-force layout when graph data changes. Defaults are tuned for
   // sparse graphs; our wiki graph has avg degree ~9, which collapses without
   // stronger repulsion + a collision force.
@@ -192,12 +229,8 @@ export default function GraphPage() {
         return r + 14; // generous radius so labels also have room
       }).strength(0.9));
       fg.d3ReheatSimulation();
+      pinDefaultCamera(fg);
     });
-
-    // onEngineStop sometimes doesn't fire when the simulation is rewarmed by
-    // dependencies. Belt-and-suspenders: explicit zoom-to-fit after a delay.
-    const t = setTimeout(() => fgRef.current?.zoomToFit?.(500, 60), 1500);
-    return () => clearTimeout(t);
   }, [filtered]);
 
   return (
@@ -310,7 +343,10 @@ export default function GraphPage() {
             {LABEL_MODE_TEXT[labelMode]}
           </button>
           <button
-            onClick={() => fgRef.current?.zoomToFit?.(500, 80)}
+            onClick={() => {
+              holdInitialCameraRef.current = false;
+              fitForceGraphCamera(fgRef.current, 80, 400);
+            }}
             className="text-xs px-2 py-1 rounded border border-paper-soft text-ink-muted hover:border-ink hover:text-ink"
             title="Fit graph to view"
           >
@@ -349,9 +385,9 @@ export default function GraphPage() {
               d3VelocityDecay={0.35}
               warmupTicks={80}
               onEngineStop={() => {
-                fgRef.current?.zoomToFit?.(500, 60);
-                // Reset the per-frame label-rect accumulator so the new
-                // post-settle frame starts clean.
+                if (holdInitialCameraRef.current) {
+                  pinDefaultCamera(fgRef.current);
+                }
                 labelRectsRef.current = [];
               }}
               onRenderFramePre={() => {
