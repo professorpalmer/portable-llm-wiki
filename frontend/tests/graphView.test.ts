@@ -24,9 +24,9 @@ describe("graphLayoutProfile", () => {
     expect(profile.maxIdleEdges).toBe(Number.POSITIVE_INFINITY);
   });
 
-  it("drops arrows and collision but lays out the full edge set on a wiki-scale graph", () => {
+  it("drops arrows but keeps collision and lays out the full edge set on a wiki-scale graph", () => {
     const profile = graphLayoutProfile(1854, 23739);
-    expect(profile.useCollision).toBe(false);
+    expect(profile.useCollision).toBe(true);
     expect(profile.showArrows).toBe(false);
     expect(profile.maxIdleEdges).toBeLessThan(1200);
     expect(profile.maxLayoutEdges).toBe(Number.POSITIVE_INFINITY);
@@ -35,9 +35,9 @@ describe("graphLayoutProfile", () => {
     expect(profile.chargeDistanceMax).toBeGreaterThanOrEqual(500);
   });
 
-  it("caps painted idle edges but uses the full edge set on a large graph", () => {
+  it("caps painted idle edges but uses the full edge set and keeps collision on a large graph", () => {
     const profile = graphLayoutProfile(700, 5000);
-    expect(profile.useCollision).toBe(false);
+    expect(profile.useCollision).toBe(true);
     expect(profile.showArrows).toBe(false);
     expect(profile.maxIdleEdges).toBeLessThan(graphLayoutProfile(40, 80).maxIdleEdges);
     // Layout sees every edge (prevents the hollow donut); only painting is sampled.
@@ -259,7 +259,7 @@ describe("link and neighbor helpers", () => {
 });
 
 describe("graphLayoutProfile huge tier is compact and non-degenerate", () => {
-  it("lays out over the full edge set with strong charge so leaves are not ejected into a donut", () => {
+  it("lays out over the full edge set, keeps collision on, and leaves room to spread", () => {
     const huge = graphLayoutProfile(1867, 24025);
     // Full-edge layout is what prevents the hollow donut (sparsifyEdges stranding
     // degree-1 leaves with no link force). The cap must never bind.
@@ -267,18 +267,23 @@ describe("graphLayoutProfile huge tier is compact and non-degenerate", () => {
     expect(huge.maxIdleEdges).toBeGreaterThan(0);
     expect(huge.maxIdleEdges).toBeLessThan(1200);
     expect(huge.chargeStrength).toBeLessThan(-320);
-    expect(huge.chargeStrength).toBeGreaterThan(-420);
+    expect(huge.chargeStrength).toBeLessThanOrEqual(-420);
     expect(huge.chargeDistanceMax).toBeGreaterThanOrEqual(500);
-    expect(huge.useCollision).toBe(false);
+    // Collision is what separates degree-90 hubs into a spread web instead of an
+    // overlapping clump. It is O(n) per tick (quadtree), so leave it ON.
+    expect(huge.useCollision).toBe(true);
     expect(huge.showArrows).toBe(false);
     expect(huge.warmupTicks).toBeLessThan(10);
+    // Enough cooldown budget for the layout to reach a spread equilibrium on load.
+    expect(huge.cooldownTicks).toBeGreaterThanOrEqual(200);
   });
 
-  it("large tier also uses the full edge set and keeps a finite paint cap", () => {
+  it("large tier also uses the full edge set and keeps collision on", () => {
     const large = graphLayoutProfile(800, 6000);
     expect(large.maxLayoutEdges).toBe(Number.POSITIVE_INFINITY);
     expect(large.maxIdleEdges).toBeLessThan(Number.POSITIVE_INFINITY);
     expect(large.chargeStrength).toBeLessThan(-90);
+    expect(large.useCollision).toBe(true);
   });
 });
 

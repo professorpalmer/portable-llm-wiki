@@ -225,9 +225,10 @@ export default function GraphPage() {
     return set;
   }, [filtered, selectedSlug, selectedNeighbors, labelMode]);
 
-  // Tune the d3-force layout when graph data changes. Small wikis still get
-  // collision; dense graphs skip it (O(n^2)) and do not reheat — reheating
-  // plus a timed zoomToFit was both the jank and the random corner-zoom.
+  // Tune the d3-force layout when graph data changes. Collision runs on every
+  // tier (quadtree O(n) per tick) so nodes separate into a readable web instead
+  // of hubs stacking; the huge/large tiers also lay out over the full edge set
+  // (maxLayoutEdges: Infinity) and reheat so the tuned forces apply on mount.
   useEffect(() => {
     if (!fgRef.current || !filtered || filtered.nodes.length === 0) return;
     const fg = fgRef.current;
@@ -240,11 +241,9 @@ export default function GraphPage() {
     }
     if (!profile.useCollision) {
       fg.d3Force("collision", null);
-      // Reheat even without collision: on the huge/large tiers useCollision is
-      // false, and without d3ReheatSimulation() the tuned charge/link forces
-      // are never applied and the simulation stays as a tight default clump.
-      // This is what made "first load" look like an overlapping blob until the
-      // user clicked Relax (which reheats). Now the layout spreads on mount.
+      // Reheat even without collision: without d3ReheatSimulation() the tuned
+      // charge/link forces are never applied and the simulation stays as a tight
+      // default clump until the user clicks Relax.
       fg.d3ReheatSimulation();
       return;
     }
@@ -254,7 +253,7 @@ export default function GraphPage() {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       fg.d3Force("collision", forceCollide((d: any) => {
         return nodeRadius(d.degree || 1) + 14;
-      }).strength(0.7));
+      }).strength(0.9));
       fg.d3ReheatSimulation();
     });
     return () => {

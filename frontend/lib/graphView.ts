@@ -67,17 +67,20 @@ export function graphLayoutProfile(
   if (huge) {
     return {
       warmupTicks: 4,
-      cooldownTicks: 120,
-      cooldownTime: 3000,
+      cooldownTicks: 300,
+      cooldownTime: 12000,
       alphaDecay: 0.045,
       alphaMin: 0.008,
       velocityDecay: 0.4,
       linkDistance: 82,
-      linkStrength: 0.38,
-      chargeStrength: -360,
-      chargeDistanceMax: 560,
-      chargeTheta: 0.85,
-      useCollision: false,
+      linkStrength: 0.34,
+      chargeStrength: -420,
+      chargeDistanceMax: 600,
+      chargeTheta: 0.81,
+      // collision is what separates nodes into the spread "brain" shape; without
+      // it degree-90 hubs (radius 14) overlap into a clump. It is O(n) per tick
+      // via quadtree, so it does not regress responsiveness. keep it ON here.
+      useCollision: true,
       showArrows: false,
       maxIdleEdges: 850,
       // Lay out over the FULL edge set. Sparsifying to a hub backbone is what
@@ -91,17 +94,17 @@ export function graphLayoutProfile(
   if (large) {
     return {
       warmupTicks: 6,
-      cooldownTicks: 120,
-      cooldownTime: 3000,
+      cooldownTicks: 260,
+      cooldownTime: 10000,
       alphaDecay: 0.04,
       alphaMin: 0.007,
       velocityDecay: 0.38,
       linkDistance: 74,
-      linkStrength: 0.36,
-      chargeStrength: -320,
-      chargeDistanceMax: 520,
-      chargeTheta: 0.88,
-      useCollision: false,
+      linkStrength: 0.32,
+      chargeStrength: -380,
+      chargeDistanceMax: 580,
+      chargeTheta: 0.84,
+      useCollision: true,
       showArrows: false,
       maxIdleEdges: 1500,
       maxLayoutEdges: Number.POSITIVE_INFINITY,
