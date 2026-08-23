@@ -28,6 +28,21 @@ function pinDefaultCamera(fg: {
   }
 }
 
+/** force-graph auto-zoom: 4 / cbrt(n). That is the ~5s snap to a tiny cluster. */
+function undoHeuristicZoom(
+  fg: {
+    zoom?: (k?: number, ms?: number) => unknown;
+    centerAt?: (x?: number, y?: number, ms?: number) => void;
+  } | null,
+  nodeCount: number,
+) {
+  if (!fg?.zoom || nodeCount <= 0) return;
+  const k = fg.zoom();
+  if (typeof k !== "number" || !Number.isFinite(k)) return;
+  if (Math.abs(k - 4 / Math.cbrt(nodeCount)) > 0.05) return;
+  pinDefaultCamera(fg);
+}
+
 // react-force-graph-2d is canvas-based, so it must be loaded client-side
 // only. ``next/dynamic`` returns a ``LoadableComponent`` HOC that does
 // NOT forward refs to the wrapped component — which silently breaks the
@@ -104,6 +119,7 @@ export default function GraphPage() {
   // Keep the default k=1 camera until the user hits Recenter. force-graph
   // otherwise applies `4 / cbrt(n)` after warmup, which is the late zoom-out.
   const holdInitialCameraRef = useRef(true);
+  const nodeCountRef = useRef(0);
   const [size, setSize] = useState({ w: 800, h: 600 });
 
   useEffect(() => {
@@ -194,17 +210,18 @@ export default function GraphPage() {
     return set;
   }, [filtered, selectedSlug, selectedNeighbors, labelMode]);
 
+  nodeCountRef.current = filtered?.nodes.length ?? 0;
+
   useEffect(() => {
     if (!filtered?.nodes.length) return;
     holdInitialCameraRef.current = true;
     const pin = () => {
       if (!holdInitialCameraRef.current) return;
-      pinDefaultCamera(fgRef.current);
+      undoHeuristicZoom(fgRef.current, nodeCountRef.current);
     };
     pin();
-    // Keep k=1 through force-graph's delayed node-count auto-zoom.
-    const id = window.setInterval(pin, 150);
-    const stop = window.setTimeout(() => window.clearInterval(id), 12000);
+    const id = window.setInterval(pin, 100);
+    const stop = window.setTimeout(() => window.clearInterval(id), 20000);
     return () => {
       window.clearInterval(id);
       window.clearTimeout(stop);
@@ -229,7 +246,7 @@ export default function GraphPage() {
         return r + 14; // generous radius so labels also have room
       }).strength(0.9));
       fg.d3ReheatSimulation();
-      pinDefaultCamera(fg);
+      undoHeuristicZoom(fg, filtered.nodes.length);
     });
   }, [filtered]);
 
@@ -386,15 +403,15 @@ export default function GraphPage() {
               warmupTicks={80}
               onEngineStop={() => {
                 if (holdInitialCameraRef.current) {
-                  pinDefaultCamera(fgRef.current);
+                  undoHeuristicZoom(fgRef.current, nodeCountRef.current);
                 }
                 labelRectsRef.current = [];
               }}
               onRenderFramePre={() => {
-                // Clear the painted-label rect list at the start of every
-                // render frame so collision detection only considers labels
-                // drawn this frame.
                 labelRectsRef.current = [];
+                if (holdInitialCameraRef.current) {
+                  undoHeuristicZoom(fgRef.current, nodeCountRef.current);
+                }
               }}
               linkColor={(link: unknown) => {
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
