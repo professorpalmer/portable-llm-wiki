@@ -115,6 +115,8 @@ export function tryZoomToFit(
 export function fitForceGraphCamera(
   fg: {
     graphData?: () => { nodes?: CameraNode[] };
+    zoom?: (k?: number, ms?: number) => number | unknown;
+    centerAt?: (x?: number, y?: number, ms?: number) => unknown;
     zoomToFit?: (
       ms?: number,
       px?: number,
@@ -126,6 +128,42 @@ export function fitForceGraphCamera(
 ): boolean {
   const nodes = fg?.graphData?.()?.nodes ?? [];
   return tryZoomToFit(fg, nodes, padding, duration);
+}
+
+export type CameraPose = { k: number; x: number; y: number };
+
+export function captureCamera(
+  fg: {
+    zoom?: (k?: number, ms?: number) => number | unknown;
+    centerAt?: (x?: number, y?: number, ms?: number) => unknown;
+  } | null,
+): CameraPose | null {
+  if (!fg?.zoom || !fg.centerAt) return null;
+  const k = fg.zoom();
+  const center = fg.centerAt();
+  if (typeof k !== "number" || !Number.isFinite(k)) return null;
+  if (
+    !center ||
+    typeof center !== "object" ||
+    typeof (center as { x?: number }).x !== "number" ||
+    typeof (center as { y?: number }).y !== "number"
+  ) {
+    return null;
+  }
+  return { k, x: (center as { x: number }).x, y: (center as { y: number }).y };
+}
+
+export function applyCamera(
+  fg: {
+    zoom?: (k?: number, ms?: number) => number | unknown;
+    centerAt?: (x?: number, y?: number, ms?: number) => unknown;
+  } | null,
+  pose: CameraPose,
+): boolean {
+  if (!fg?.zoom || !fg.centerAt) return false;
+  fg.zoom(pose.k, 0);
+  fg.centerAt(pose.x, pose.y, 0);
+  return true;
 }
 
 /** force-graph's built-in onFinishUpdate heuristic: `4 / cbrt(nodeCount)`. */
@@ -168,10 +206,12 @@ export function restoreDefaultCamera(fg: ZoomableGraph | null): boolean {
 export function undoLibraryAutoZoom(
   fg: ZoomableGraph | null,
   nodeCount: number,
+  restore: CameraPose | null = null,
 ): boolean {
   if (!fg?.zoom) return false;
   const k = fg.zoom();
   if (typeof k !== "number") return false;
   if (!isLibraryNodeCountZoom(k, nodeCount)) return false;
+  if (restore) return applyCamera(fg, restore);
   return restoreDefaultCamera(fg);
 }
