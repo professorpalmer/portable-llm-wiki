@@ -240,6 +240,12 @@ export default function GraphPage() {
     }
     if (!profile.useCollision) {
       fg.d3Force("collision", null);
+      // Reheat even without collision: on the huge/large tiers useCollision is
+      // false, and without d3ReheatSimulation() the tuned charge/link forces
+      // are never applied and the simulation stays as a tight default clump.
+      // This is what made "first load" look like an overlapping blob until the
+      // user clicked Relax (which reheats). Now the layout spreads on mount.
+      fg.d3ReheatSimulation();
       return;
     }
     let cancelled = false;

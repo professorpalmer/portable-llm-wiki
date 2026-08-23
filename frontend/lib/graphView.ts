@@ -8,7 +8,10 @@
  * few pixels near the origin and the cluster sits in a corner.
  */
 
-export type GraphEdgeRef = { source: string; target: string };
+export type GraphEdgeRef = {
+  source: string | Record<string, unknown>;
+  target: string | Record<string, unknown>;
+};
 
 export type GraphLayoutProfile = {
   warmupTicks: number;
@@ -154,12 +157,18 @@ export function sparsifyEdges(
   const degree = new Map<string, number>();
   for (const node of nodes) degree.set(node.slug, node.degree);
 
-  const ranked = edges.map((edge, index) => ({
-    edge,
-    index,
-    key: `${edge.source}\0${edge.target}`,
-    score: (degree.get(edge.source) ?? 0) + (degree.get(edge.target) ?? 0),
-  }));
+  const ranked = edges.map((edge, index) => {
+    const s = linkEndpointId(edge.source);
+    const t = linkEndpointId(edge.target);
+    return {
+      edge,
+      index,
+      key: `${s}\0${t}`,
+      sourceId: s,
+      targetId: t,
+      score: (degree.get(s) ?? 0) + (degree.get(t) ?? 0),
+    };
+  });
   ranked.sort((a, b) => b.score - a.score || a.index - b.index);
 
   const selected = new Set<string>();
@@ -175,10 +184,10 @@ export function sparsifyEdges(
   const covered = new Set<string>();
   for (const item of ranked) {
     if (kept.length >= maxEdges) return kept;
-    if (covered.has(item.edge.source) && covered.has(item.edge.target)) continue;
+    if (covered.has(item.sourceId) && covered.has(item.targetId)) continue;
     if (take(item)) {
-      covered.add(item.edge.source);
-      covered.add(item.edge.target);
+      covered.add(item.sourceId);
+      covered.add(item.targetId);
     }
   }
   for (const item of ranked) {
@@ -201,9 +210,11 @@ export function paintFocusEdges(
   ctx.beginPath();
   let drawn = 0;
   for (const edge of edges) {
-    if (edge.source !== focusSlug && edge.target !== focusSlug) continue;
-    const from = nodesBySlug.get(edge.source);
-    const to = nodesBySlug.get(edge.target);
+    const s = linkEndpointId(edge.source as unknown);
+    const t = linkEndpointId(edge.target as unknown);
+    if (s !== focusSlug && t !== focusSlug) continue;
+    const from = nodesBySlug.get(s);
+    const to = nodesBySlug.get(t);
     if (
       !from ||
       !to ||
@@ -229,8 +240,10 @@ export function neighborSlugSet(
 ): Set<string> {
   const out = new Set<string>();
   for (const edge of edges) {
-    if (edge.source === slug) out.add(edge.target);
-    if (edge.target === slug) out.add(edge.source);
+    const s = linkEndpointId(edge.source as unknown);
+    const t = linkEndpointId(edge.target as unknown);
+    if (s === slug) out.add(t);
+    if (t === slug) out.add(s);
   }
   return out;
 }

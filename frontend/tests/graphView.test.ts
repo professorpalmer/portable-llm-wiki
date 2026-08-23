@@ -239,6 +239,18 @@ describe("link and neighbor helpers", () => {
     expect([...neighbors].sort()).toEqual(["a", "b"]);
   });
 
+  it("resolves neighbors when react-force-graph has mutated endpoints to node objects", () => {
+    const neighbors = neighborSlugSet(
+      [
+        { source: { slug: "hub" }, target: { slug: "a" } },
+        { source: { slug: "b" }, target: { slug: "hub" } },
+        { source: "c", target: "d" },
+      ],
+      "hub",
+    );
+    expect([...neighbors].sort()).toEqual(["a", "b"]);
+  });
+
   it("grows node radius with degree but stays capped", () => {
     expect(nodeRadius(1)).toBeGreaterThanOrEqual(4);
     expect(nodeRadius(100)).toBeLessThanOrEqual(14);
