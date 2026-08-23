@@ -171,6 +171,7 @@ export function undoLibraryAutoZoom(
 ): boolean {
   if (!fg?.zoom) return false;
   const k = fg.zoom();
+  if (typeof k !== "number") return false;
   if (!isLibraryNodeCountZoom(k, nodeCount)) return false;
   return restoreDefaultCamera(fg);
 }
