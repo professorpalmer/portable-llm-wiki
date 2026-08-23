@@ -9,7 +9,39 @@ import {
   type GraphResponse,
   type GraphNode,
 } from "@/lib/api";
+import { fitForceGraphCamera } from "@/lib/graphCamera";
 import { useTenant } from "@/lib/useTenant";
+
+let pinningCamera = false;
+
+function pinDefaultCamera(fg: {
+  zoom?: (k?: number, ms?: number) => unknown;
+  centerAt?: (x?: number, y?: number, ms?: number) => void;
+} | null) {
+  if (!fg?.zoom || !fg.centerAt || pinningCamera) return;
+  pinningCamera = true;
+  try {
+    fg.zoom(1, 0);
+    fg.centerAt(0, 0, 0);
+  } finally {
+    pinningCamera = false;
+  }
+}
+
+/** force-graph auto-zoom: 4 / cbrt(n). That is the ~5s snap to a tiny cluster. */
+function undoHeuristicZoom(
+  fg: {
+    zoom?: (k?: number, ms?: number) => unknown;
+    centerAt?: (x?: number, y?: number, ms?: number) => void;
+  } | null,
+  nodeCount: number,
+) {
+  if (!fg?.zoom || nodeCount <= 0) return;
+  const k = fg.zoom();
+  if (typeof k !== "number" || !Number.isFinite(k)) return;
+  if (Math.abs(k - 4 / Math.cbrt(nodeCount)) > 0.05) return;
+  pinDefaultCamera(fg);
+}
 
 // react-force-graph-2d is canvas-based, so it must be loaded client-side
 // only. ``next/dynamic`` returns a ``LoadableComponent`` HOC that does
@@ -84,6 +116,10 @@ export default function GraphPage() {
   // can skip labels that would overlap already-painted ones. Reset every frame
   // in onRenderFramePre.
   const labelRectsRef = useRef<Array<{ x: number; y: number; w: number; h: number }>>([]);
+  // Keep the default k=1 camera until the user hits Recenter. force-graph
+  // otherwise applies `4 / cbrt(n)` after warmup, which is the late zoom-out.
+  const holdInitialCameraRef = useRef(true);
+  const nodeCountRef = useRef(0);
   const [size, setSize] = useState({ w: 800, h: 600 });
 
   useEffect(() => {
@@ -174,6 +210,24 @@ export default function GraphPage() {
     return set;
   }, [filtered, selectedSlug, selectedNeighbors, labelMode]);
 
+  nodeCountRef.current = filtered?.nodes.length ?? 0;
+
+  useEffect(() => {
+    if (!filtered?.nodes.length) return;
+    holdInitialCameraRef.current = true;
+    const pin = () => {
+      if (!holdInitialCameraRef.current) return;
+      undoHeuristicZoom(fgRef.current, nodeCountRef.current);
+    };
+    pin();
+    const id = window.setInterval(pin, 100);
+    const stop = window.setTimeout(() => window.clearInterval(id), 20000);
+    return () => {
+      window.clearInterval(id);
+      window.clearTimeout(stop);
+    };
+  }, [filtered]);
+
   // Tune the d3-force layout when graph data changes. Defaults are tuned for
   // sparse graphs; our wiki graph has avg degree ~9, which collapses without
   // stronger repulsion + a collision force.
@@ -192,12 +246,8 @@ export default function GraphPage() {
         return r + 14; // generous radius so labels also have room
       }).strength(0.9));
       fg.d3ReheatSimulation();
+      undoHeuristicZoom(fg, filtered.nodes.length);
     });
-
-    // onEngineStop sometimes doesn't fire when the simulation is rewarmed by
-    // dependencies. Belt-and-suspenders: explicit zoom-to-fit after a delay.
-    const t = setTimeout(() => fgRef.current?.zoomToFit?.(500, 60), 1500);
-    return () => clearTimeout(t);
   }, [filtered]);
 
   return (
@@ -310,7 +360,10 @@ export default function GraphPage() {
             {LABEL_MODE_TEXT[labelMode]}
           </button>
           <button
-            onClick={() => fgRef.current?.zoomToFit?.(500, 80)}
+            onClick={() => {
+              holdInitialCameraRef.current = false;
+              fitForceGraphCamera(fgRef.current, 80, 400);
+            }}
             className="text-xs px-2 py-1 rounded border border-paper-soft text-ink-muted hover:border-ink hover:text-ink"
             title="Fit graph to view"
           >
@@ -349,16 +402,16 @@ export default function GraphPage() {
               d3VelocityDecay={0.35}
               warmupTicks={80}
               onEngineStop={() => {
-                fgRef.current?.zoomToFit?.(500, 60);
-                // Reset the per-frame label-rect accumulator so the new
-                // post-settle frame starts clean.
+                if (holdInitialCameraRef.current) {
+                  undoHeuristicZoom(fgRef.current, nodeCountRef.current);
+                }
                 labelRectsRef.current = [];
               }}
               onRenderFramePre={() => {
-                // Clear the painted-label rect list at the start of every
-                // render frame so collision detection only considers labels
-                // drawn this frame.
                 labelRectsRef.current = [];
+                if (holdInitialCameraRef.current) {
+                  undoHeuristicZoom(fgRef.current, nodeCountRef.current);
+                }
               }}
               linkColor={(link: unknown) => {
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
