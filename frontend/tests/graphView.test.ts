@@ -24,24 +24,24 @@ describe("graphLayoutProfile", () => {
     expect(profile.maxIdleEdges).toBe(Number.POSITIVE_INFINITY);
   });
 
-  it("drops arrows and collision on a dense wiki-scale graph", () => {
+  it("drops arrows and collision but lays out the full edge set on a wiki-scale graph", () => {
     const profile = graphLayoutProfile(1854, 23739);
     expect(profile.useCollision).toBe(false);
     expect(profile.showArrows).toBe(false);
     expect(profile.maxIdleEdges).toBeLessThan(1200);
-    expect(profile.maxLayoutEdges).toBeLessThanOrEqual(800);
-    expect(profile.warmupTicks).toBeLessThan(8);
-    expect(profile.cooldownTicks).toBeLessThanOrEqual(32);
-    expect(profile.alphaDecay).toBeGreaterThan(0.08);
-    expect(profile.chargeTheta).toBeGreaterThan(1);
+    expect(profile.maxLayoutEdges).toBe(Number.POSITIVE_INFINITY);
+    expect(profile.warmupTicks).toBeLessThan(10);
+    expect(profile.chargeStrength).toBeLessThan(-320);
+    expect(profile.chargeDistanceMax).toBeGreaterThanOrEqual(500);
   });
 
-  it("caps idle edges once the graph crosses the large threshold", () => {
+  it("caps painted idle edges but uses the full edge set on a large graph", () => {
     const profile = graphLayoutProfile(700, 5000);
     expect(profile.useCollision).toBe(false);
     expect(profile.showArrows).toBe(false);
     expect(profile.maxIdleEdges).toBeLessThan(graphLayoutProfile(40, 80).maxIdleEdges);
-    expect(profile.maxLayoutEdges).toBeLessThan(graphLayoutProfile(40, 80).maxLayoutEdges);
+    // Layout sees every edge (prevents the hollow donut); only painting is sampled.
+    expect(profile.maxLayoutEdges).toBe(Number.POSITIVE_INFINITY);
   });
 });
 
@@ -246,29 +246,27 @@ describe("link and neighbor helpers", () => {
   });
 });
 
-describe("graphLayoutProfile huge tier is non-degenerate", () => {
-  it("keeps enough charge and link force to pull leaves inward", () => {
+describe("graphLayoutProfile huge tier is compact and non-degenerate", () => {
+  it("lays out over the full edge set with strong charge so leaves are not ejected into a donut", () => {
     const huge = graphLayoutProfile(1867, 24025);
-    expect(huge.chargeStrength).toBeLessThan(-80);
-    expect(huge.chargeStrength).toBeGreaterThan(-260);
-    expect(huge.chargeDistanceMax).toBeGreaterThanOrEqual(320);
-    expect(huge.linkDistance).toBeGreaterThanOrEqual(50);
-    expect(huge.linkStrength).toBeGreaterThanOrEqual(0.22);
-    expect(huge.useCollision).toBe(false);
-    expect(huge.showArrows).toBe(false);
+    // Full-edge layout is what prevents the hollow donut (sparsifyEdges stranding
+    // degree-1 leaves with no link force). The cap must never bind.
+    expect(huge.maxLayoutEdges).toBe(Number.POSITIVE_INFINITY);
     expect(huge.maxIdleEdges).toBeGreaterThan(0);
     expect(huge.maxIdleEdges).toBeLessThan(1200);
-    expect(huge.maxLayoutEdges).toBeGreaterThan(0);
+    expect(huge.chargeStrength).toBeLessThan(-320);
+    expect(huge.chargeStrength).toBeGreaterThan(-420);
+    expect(huge.chargeDistanceMax).toBeGreaterThanOrEqual(500);
+    expect(huge.useCollision).toBe(false);
+    expect(huge.showArrows).toBe(false);
     expect(huge.warmupTicks).toBeLessThan(10);
-    expect(huge.cooldownTicks).toBeLessThanOrEqual(40);
   });
 
-  it("large tier is stronger than the pre-fix huge regress but still capped", () => {
+  it("large tier also uses the full edge set and keeps a finite paint cap", () => {
     const large = graphLayoutProfile(800, 6000);
-    expect(large.chargeStrength).toBeLessThan(-90);
-    expect(large.chargeDistanceMax).toBeGreaterThan(300);
+    expect(large.maxLayoutEdges).toBe(Number.POSITIVE_INFINITY);
     expect(large.maxIdleEdges).toBeLessThan(Number.POSITIVE_INFINITY);
-    expect(large.maxLayoutEdges).toBeLessThan(Number.POSITIVE_INFINITY);
+    expect(large.chargeStrength).toBeLessThan(-90);
   });
 });
 

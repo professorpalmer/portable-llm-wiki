@@ -63,40 +63,45 @@ export function graphLayoutProfile(
   // that blocks the main thread, so keep warmup small and make live ticks cheap.
   if (huge) {
     return {
-      warmupTicks: 6,
-      cooldownTicks: 30,
-      cooldownTime: 2200,
-      alphaDecay: 0.09,
-      alphaMin: 0.012,
-      velocityDecay: 0.35,
-      linkDistance: 58,
-      linkStrength: 0.30,
-      chargeStrength: -140,
-      chargeDistanceMax: 400,
-      chargeTheta: 1.05,
+      warmupTicks: 4,
+      cooldownTicks: 120,
+      cooldownTime: 3000,
+      alphaDecay: 0.045,
+      alphaMin: 0.008,
+      velocityDecay: 0.4,
+      linkDistance: 82,
+      linkStrength: 0.38,
+      chargeStrength: -360,
+      chargeDistanceMax: 560,
+      chargeTheta: 0.85,
       useCollision: false,
       showArrows: false,
       maxIdleEdges: 850,
-      maxLayoutEdges: 800,
+      // Lay out over the FULL edge set. Sparsifying to a hub backbone is what
+      // produced the hollow donut: ~1k degree-1 leaves got no layout link and
+      // pure repulsion ejected them into a ring. The force layout needs to see
+      // every edge to converge into a compact web; painting stays sampled
+      // (maxIdleEdges) so frames remain cheap.
+      maxLayoutEdges: Number.POSITIVE_INFINITY,
     };
   }
   if (large) {
     return {
-      warmupTicks: 8,
-      cooldownTicks: 42,
-      cooldownTime: 2600,
-      alphaDecay: 0.05,
-      alphaMin: 0.014,
-      velocityDecay: 0.35,
-      linkDistance: 62,
-      linkStrength: 0.30,
-      chargeStrength: -150,
-      chargeDistanceMax: 380,
-      chargeTheta: 0.9,
+      warmupTicks: 6,
+      cooldownTicks: 120,
+      cooldownTime: 3000,
+      alphaDecay: 0.04,
+      alphaMin: 0.007,
+      velocityDecay: 0.38,
+      linkDistance: 74,
+      linkStrength: 0.36,
+      chargeStrength: -320,
+      chargeDistanceMax: 520,
+      chargeTheta: 0.88,
       useCollision: false,
       showArrows: false,
       maxIdleEdges: 1500,
-      maxLayoutEdges: 1200,
+      maxLayoutEdges: Number.POSITIVE_INFINITY,
     };
   }
   return {
