@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 import Link from "next/link";
 import {
   fetchGraph,
@@ -9,38 +9,38 @@ import {
   type GraphResponse,
   type GraphNode,
 } from "@/lib/api";
-import { fitForceGraphCamera } from "@/lib/graphCamera";
+import {
+  captureCamera,
+  fitForceGraphCamera,
+  undoLibraryAutoZoom,
+  type CameraPose,
+} from "@/lib/graphCamera";
 import { useTenant } from "@/lib/useTenant";
 
-let pinningCamera = false;
-
-function pinDefaultCamera(fg: {
-  zoom?: (k?: number, ms?: number) => unknown;
-  centerAt?: (x?: number, y?: number, ms?: number) => void;
-} | null) {
-  if (!fg?.zoom || !fg.centerAt || pinningCamera) return;
-  pinningCamera = true;
-  try {
-    fg.zoom(1, 0);
-    fg.centerAt(0, 0, 0);
-  } finally {
-    pinningCamera = false;
-  }
-}
-
-/** force-graph auto-zoom: 4 / cbrt(n). That is the ~5s snap to a tiny cluster. */
-function undoHeuristicZoom(
+function settleGraphCamera(
   fg: {
-    zoom?: (k?: number, ms?: number) => unknown;
-    centerAt?: (x?: number, y?: number, ms?: number) => void;
+    graphData?: () => { nodes?: { degree?: number; x?: number; y?: number }[] };
+    zoom?: (k?: number, ms?: number) => number | unknown;
+    centerAt?: (x?: number, y?: number, ms?: number) => unknown;
+    zoomToFit?: (
+      ms?: number,
+      px?: number,
+      nodeFilter?: (node: { degree?: number; x?: number; y?: number }) => boolean,
+    ) => void;
   } | null,
-  nodeCount: number,
+  autoFitDoneRef: MutableRefObject<boolean>,
+  fittedPoseRef: MutableRefObject<CameraPose | null>,
 ) {
-  if (!fg?.zoom || nodeCount <= 0) return;
-  const k = fg.zoom();
-  if (typeof k !== "number" || !Number.isFinite(k)) return;
-  if (Math.abs(k - 4 / Math.cbrt(nodeCount)) > 0.05) return;
-  pinDefaultCamera(fg);
+  if (!fg) return;
+  const nodeCount = fg.graphData?.()?.nodes?.length ?? 0;
+  if (autoFitDoneRef.current) {
+    undoLibraryAutoZoom(fg, nodeCount, fittedPoseRef.current);
+    return;
+  }
+  if (fitForceGraphCamera(fg, 40, 0)) {
+    autoFitDoneRef.current = true;
+    fittedPoseRef.current = captureCamera(fg);
+  }
 }
 
 // react-force-graph-2d is canvas-based, so it must be loaded client-side
@@ -116,10 +116,8 @@ export default function GraphPage() {
   // can skip labels that would overlap already-painted ones. Reset every frame
   // in onRenderFramePre.
   const labelRectsRef = useRef<Array<{ x: number; y: number; w: number; h: number }>>([]);
-  // Keep the default k=1 camera until the user hits Recenter. force-graph
-  // otherwise applies `4 / cbrt(n)` after warmup, which is the late zoom-out.
-  const holdInitialCameraRef = useRef(true);
-  const nodeCountRef = useRef(0);
+  const autoFitDoneRef = useRef(false);
+  const fittedPoseRef = useRef<ReturnType<typeof captureCamera>>(null);
   const [size, setSize] = useState({ w: 800, h: 600 });
 
   useEffect(() => {
@@ -210,22 +208,16 @@ export default function GraphPage() {
     return set;
   }, [filtered, selectedSlug, selectedNeighbors, labelMode]);
 
-  nodeCountRef.current = filtered?.nodes.length ?? 0;
-
   useEffect(() => {
+    autoFitDoneRef.current = false;
+    fittedPoseRef.current = null;
     if (!filtered?.nodes.length) return;
-    holdInitialCameraRef.current = true;
-    const pin = () => {
-      if (!holdInitialCameraRef.current) return;
-      undoHeuristicZoom(fgRef.current, nodeCountRef.current);
-    };
-    pin();
-    const id = window.setInterval(pin, 100);
-    const stop = window.setTimeout(() => window.clearInterval(id), 20000);
-    return () => {
-      window.clearInterval(id);
-      window.clearTimeout(stop);
-    };
+    // Engine stop is the real settle; this is only a backup if it never fires.
+    const t = window.setTimeout(
+      () => settleGraphCamera(fgRef.current, autoFitDoneRef, fittedPoseRef),
+      5500,
+    );
+    return () => window.clearTimeout(t);
   }, [filtered]);
 
   // Tune the d3-force layout when graph data changes. Defaults are tuned for
@@ -246,7 +238,6 @@ export default function GraphPage() {
         return r + 14; // generous radius so labels also have room
       }).strength(0.9));
       fg.d3ReheatSimulation();
-      undoHeuristicZoom(fg, filtered.nodes.length);
     });
   }, [filtered]);
 
@@ -361,8 +352,10 @@ export default function GraphPage() {
           </button>
           <button
             onClick={() => {
-              holdInitialCameraRef.current = false;
-              fitForceGraphCamera(fgRef.current, 80, 400);
+              if (fitForceGraphCamera(fgRef.current, 40, 400)) {
+                autoFitDoneRef.current = true;
+                fittedPoseRef.current = captureCamera(fgRef.current);
+              }
             }}
             className="text-xs px-2 py-1 rounded border border-paper-soft text-ink-muted hover:border-ink hover:text-ink"
             title="Fit graph to view"
@@ -402,15 +395,17 @@ export default function GraphPage() {
               d3VelocityDecay={0.35}
               warmupTicks={80}
               onEngineStop={() => {
-                if (holdInitialCameraRef.current) {
-                  undoHeuristicZoom(fgRef.current, nodeCountRef.current);
-                }
+                settleGraphCamera(fgRef.current, autoFitDoneRef, fittedPoseRef);
                 labelRectsRef.current = [];
               }}
               onRenderFramePre={() => {
                 labelRectsRef.current = [];
-                if (holdInitialCameraRef.current) {
-                  undoHeuristicZoom(fgRef.current, nodeCountRef.current);
+                if (autoFitDoneRef.current) {
+                  settleGraphCamera(
+                    fgRef.current,
+                    autoFitDoneRef,
+                    fittedPoseRef,
+                  );
                 }
               }}
               linkColor={(link: unknown) => {

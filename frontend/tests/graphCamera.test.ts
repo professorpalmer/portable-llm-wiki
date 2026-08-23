@@ -117,18 +117,44 @@ describe("undoLibraryAutoZoom", () => {
     expect(fg.centerAt).toHaveBeenCalledWith(0, 0, 0);
   });
 
-  it("leaves a non-heuristic camera alone", () => {
-    let k = 1;
+  it("restores a saved fitted pose instead of k=1 when one is provided", () => {
+    const nodeCount = 1878;
+    let k = libraryNodeCountZoom(nodeCount);
+    let x = 0;
+    let y = 0;
     const fg = {
-      zoom: Object.assign((next?: number) => {
+      zoom: (next?: number) => {
         if (next === undefined) return k;
         k = next;
         return k;
-      }, {}),
+      },
+      centerAt: (nx?: number, ny?: number) => {
+        if (nx === undefined && ny === undefined) return { x, y };
+        if (nx !== undefined) x = nx;
+        if (ny !== undefined) y = ny;
+        return { x, y };
+      },
+    };
+    expect(
+      undoLibraryAutoZoom(fg, nodeCount, { k: 0.72, x: 12, y: -8 }),
+    ).toBe(true);
+    expect(k).toBe(0.72);
+    expect(x).toBe(12);
+    expect(y).toBe(-8);
+  });
+
+  it("leaves a non-heuristic camera alone", () => {
+    let k = 0.72;
+    const fg = {
+      zoom: (next?: number) => {
+        if (next === undefined) return k;
+        k = next;
+        return k;
+      },
       centerAt: vi.fn(),
     };
-    expect(undoLibraryAutoZoom(fg, 1878)).toBe(false);
-    expect(k).toBe(1);
+    expect(undoLibraryAutoZoom(fg, 1878, { k: 0.72, x: 0, y: 0 })).toBe(false);
+    expect(k).toBe(0.72);
     expect(fg.centerAt).not.toHaveBeenCalled();
   });
 });
