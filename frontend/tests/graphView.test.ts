@@ -246,6 +246,71 @@ describe("link and neighbor helpers", () => {
   });
 });
 
+describe("graphLayoutProfile huge tier is non-degenerate", () => {
+  it("keeps enough charge and link force to pull leaves inward", () => {
+    const huge = graphLayoutProfile(1867, 24025);
+    expect(huge.chargeStrength).toBeLessThan(-80);
+    expect(huge.chargeStrength).toBeGreaterThan(-260);
+    expect(huge.chargeDistanceMax).toBeGreaterThanOrEqual(320);
+    expect(huge.linkDistance).toBeGreaterThanOrEqual(50);
+    expect(huge.linkStrength).toBeGreaterThanOrEqual(0.22);
+    expect(huge.useCollision).toBe(false);
+    expect(huge.showArrows).toBe(false);
+    expect(huge.maxIdleEdges).toBeGreaterThan(0);
+    expect(huge.maxIdleEdges).toBeLessThan(1200);
+    expect(huge.maxLayoutEdges).toBeGreaterThan(0);
+    expect(huge.warmupTicks).toBeLessThan(10);
+    expect(huge.cooldownTicks).toBeLessThanOrEqual(40);
+  });
+
+  it("large tier is stronger than the pre-fix huge regress but still capped", () => {
+    const large = graphLayoutProfile(800, 6000);
+    expect(large.chargeStrength).toBeLessThan(-90);
+    expect(large.chargeDistanceMax).toBeGreaterThan(300);
+    expect(large.maxIdleEdges).toBeLessThan(Number.POSITIVE_INFINITY);
+    expect(large.maxLayoutEdges).toBeLessThan(Number.POSITIVE_INFINITY);
+  });
+});
+
+describe("sparsifyEdges hub backbone and isolated coverage", () => {
+  it("preserves hub-to-hub backbone under a tight cap", () => {
+    const nodes = [
+      { slug: "hub-a", degree: 80 },
+      { slug: "hub-b", degree: 75 },
+      { slug: "leaf-1", degree: 1 },
+      { slug: "leaf-2", degree: 1 },
+      { slug: "orphan", degree: 1 },
+    ];
+    const edges = [
+      { source: "leaf-1", target: "leaf-2" },
+      { source: "hub-a", target: "hub-b" },
+      { source: "hub-a", target: "leaf-1" },
+      { source: "hub-b", target: "leaf-2" },
+      { source: "hub-a", target: "orphan" },
+    ];
+    const kept = sparsifyEdges(nodes, edges, 2);
+    expect(kept).toHaveLength(2);
+    expect(kept.some((e) => (e.source === "hub-a" && e.target === "hub-b") || (e.source === "hub-b" && e.target === "hub-a"))).toBe(true);
+  });
+
+  it("covers an isolated node even when higher-score edges compete", () => {
+    const nodes = [
+      { slug: "h1", degree: 30 },
+      { slug: "h2", degree: 28 },
+      { slug: "h3", degree: 26 },
+      { slug: "loner", degree: 1 },
+    ];
+    const edges = [
+      { source: "h1", target: "h2" },
+      { source: "h2", target: "h3" },
+      { source: "h1", target: "h3" },
+      { source: "h1", target: "loner" },
+    ];
+    const kept = sparsifyEdges(nodes, edges, 3);
+    expect(kept.some((e) => e.source === "loner" || e.target === "loner")).toBe(true);
+  });
+});
+
 describe("label collision", () => {
   it("picks the first non-overlapping anchor and skips the rest when unforced", () => {
     const occupied = [labelBox({ x: 0, y: 10, ax: "center", ay: "top" }, 40, 10, 2, 1)];

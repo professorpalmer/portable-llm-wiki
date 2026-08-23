@@ -12,11 +12,13 @@ import {
 import { useTenant } from "@/lib/useTenant";
 import {
   graphLayoutProfile,
+  linkEndpointId,
   neighborSlugSet,
   nodeRadius,
   paintFocusEdges,
   pickLabelAnchor,
   requestGraphRedraw,
+  shouldPaintLink,
   sparsifyEdges,
   tryZoomToFit,
   type LabelRect,
@@ -443,11 +445,18 @@ export default function GraphPage() {
                   width: selectedSlug ? 1.6 : 1,
                 });
               }}
-              linkVisibility={() =>
-                layoutPhase === "settled" &&
-                !selectedSlug &&
-                !hoveredSlugRef.current
-              }
+              linkVisibility={(link: unknown) => {
+                if (layoutPhase !== "settled") return false;
+                if (selectedSlug || hoveredSlugRef.current) return false;
+                const typed = link as { source?: unknown; target?: unknown };
+                const s = linkEndpointId(typed.source);
+                const tId = linkEndpointId(typed.target);
+                return shouldPaintLink(s, tId, {
+                  edgeCount: fullEdgesRef.current.length,
+                  focusSlug: null,
+                  maxIdleEdges: profile.maxIdleEdges,
+                });
+              }}
               linkColor={() => "rgba(14,14,16,0.12)"}
               linkWidth={0.6}
               linkDirectionalArrowLength={0}
@@ -489,10 +498,24 @@ export default function GraphPage() {
                 ctx.globalAlpha =
                   selectedSlug && !(isSelected || isNeighbor) ? 0.18 : 1.0;
                 ctx.fill();
-                ctx.lineWidth = isSelected ? 3 : isHovered ? 2 : 1.5;
-                ctx.strokeStyle = isSelected ? "#0e0e10" : ring;
-                ctx.stroke();
                 ctx.globalAlpha = 1.0;
+                // Suppress confetti rings on huge graphs: only paint rings for
+                // focused / neighbor nodes or when the node is large enough on
+                // screen. Ring width scales with 1/scale like labels do.
+                const isHugeTier = profile.maxIdleEdges <= 900;
+                const shouldPaintRing =
+                  isSelected || isHovered || isNeighbor || !isHugeTier;
+                if (shouldPaintRing) {
+                  const baseWidth = isSelected ? 3 : isHovered ? 2 : 1.5;
+                  const scaledWidth = baseWidth / Math.max(0.85, scale);
+                  // On huge tier at low zoom, skip faint background rings when
+                  // the node itself is sub-pixel small.
+                  if (!isHugeTier || isSelected || isHovered || isNeighbor || radius * scale >= 2.4) {
+                    ctx.lineWidth = scaledWidth;
+                    ctx.strokeStyle = isSelected ? "#0e0e10" : ring;
+                    ctx.stroke();
+                  }
+                }
 
                 const shouldLabel =
                   isSelected ||
