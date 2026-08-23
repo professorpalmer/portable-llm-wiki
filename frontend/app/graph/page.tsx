@@ -14,6 +14,7 @@ import {
   graphLayoutProfile,
   linkEndpointId,
   neighborSlugSet,
+  shouldAutoRelaxOnInitialStop,
   nodeRadius,
   paintFocusEdges,
   pickLabelAnchor,
@@ -89,6 +90,11 @@ export default function GraphPage() {
   const [labelMode, setLabelMode] = useState<LabelMode>("off");
   const [layoutPhase, setLayoutPhase] = useState<"running" | "settled">("running");
   const wrapperRef = useRef<HTMLDivElement | null>(null);
+  // Large graphs need one extra pass to reach the same polished equilibrium
+  // that the manual Relax button produces. These refs keep it exactly once per
+  // graph/filter load and distinguish it from a user-triggered Relax.
+  const autoRelaxUsedRef = useRef(false);
+  const manualRelaxRequestedRef = useRef(false);
   // The ForceGraph2D instance exposes d3Force(...) and zoomToFit() — keep a ref.
   // The library's exported type is loose; using `any` here is intentional.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -180,6 +186,8 @@ export default function GraphPage() {
   fullEdgesRef.current = filtered?.edges ?? [];
 
   useEffect(() => {
+    autoRelaxUsedRef.current = false;
+    manualRelaxRequestedRef.current = false;
     setLayoutPhase("running");
   }, [graphKey]);
 
@@ -392,6 +400,7 @@ export default function GraphPage() {
           </button>
           <button
             onClick={() => {
+              manualRelaxRequestedRef.current = true;
               setLayoutPhase("running");
               fgRef.current?.d3ReheatSimulation?.();
             }}
@@ -432,6 +441,23 @@ export default function GraphPage() {
               autoPauseRedraw
               enablePointerInteraction={layoutPhase === "settled"}
               onEngineStop={() => {
+                const largeGraph =
+                  data.nodes.length >= 600 || data.links.length >= 4000;
+                if (
+                  shouldAutoRelaxOnInitialStop({
+                    isLargeOrHuge: largeGraph,
+                    autoRelaxUsed: autoRelaxUsedRef.current,
+                    manualRelaxRequested: manualRelaxRequestedRef.current,
+                  })
+                ) {
+                  // A large graph looks noticeably better after the same second
+                  // pass that the Relax button provides. Keep the canvas in its
+                  // running state until that one automatic pass finishes.
+                  autoRelaxUsedRef.current = true;
+                  setLayoutPhase("running");
+                  fgRef.current?.d3ReheatSimulation?.();
+                  return;
+                }
                 setLayoutPhase("settled");
                 tryZoomToFit(fgRef.current, nodesRef.current, 60, 500);
                 labelRectsRef.current = [];

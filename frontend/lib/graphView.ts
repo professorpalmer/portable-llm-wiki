@@ -55,6 +55,18 @@ const HUGE_EDGES = 12000;
 const LARGE_NODES = 600;
 const LARGE_EDGES = 4000;
 
+export function shouldAutoRelaxOnInitialStop(opts: {
+  isLargeOrHuge: boolean;
+  autoRelaxUsed: boolean;
+  manualRelaxRequested: boolean;
+}): boolean {
+  return (
+    opts.isLargeOrHuge &&
+    !opts.autoRelaxUsed &&
+    !opts.manualRelaxRequested
+  );
+}
+
 export function graphLayoutProfile(
   nodeCount: number,
   edgeCount: number,

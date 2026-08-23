@@ -12,9 +12,46 @@ import {
   shouldPaintLink,
   paintFocusEdges,
   requestGraphRedraw,
+  shouldAutoRelaxOnInitialStop,
   sparsifyEdges,
   tryZoomToFit,
 } from "@/lib/graphView";
+
+describe("initial graph relax decision", () => {
+  it("requests one automatic second pass for a large graph, then settles", () => {
+    expect(
+      shouldAutoRelaxOnInitialStop({
+        isLargeOrHuge: true,
+        autoRelaxUsed: false,
+        manualRelaxRequested: false,
+      }),
+    ).toBe(true);
+    expect(
+      shouldAutoRelaxOnInitialStop({
+        isLargeOrHuge: true,
+        autoRelaxUsed: true,
+        manualRelaxRequested: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("does not auto-relax small graphs or follow a manual Relax", () => {
+    expect(
+      shouldAutoRelaxOnInitialStop({
+        isLargeOrHuge: false,
+        autoRelaxUsed: false,
+        manualRelaxRequested: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldAutoRelaxOnInitialStop({
+        isLargeOrHuge: true,
+        autoRelaxUsed: false,
+        manualRelaxRequested: true,
+      }),
+    ).toBe(false);
+  });
+});
 
 describe("graphLayoutProfile", () => {
   it("keeps collision and arrows on a small sparse graph", () => {
