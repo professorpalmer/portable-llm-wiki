@@ -69,8 +69,12 @@ export function graphLayoutProfile(
       warmupTicks: 4,
       cooldownTicks: 300,
       cooldownTime: 12000,
-      alphaDecay: 0.045,
-      alphaMin: 0.008,
+      // Slow alpha decay so the simulation keeps ticking long enough to fully
+      // separate nodes. With a fast decay alpha hits alphaMin after ~100 ticks
+      // and the layout stops while still a clump — that is the first-load
+      // clump. d3's default alphaDecay (~0.023) reaches alphaMin over ~300 ticks.
+      alphaDecay: 0.023,
+      alphaMin: 0.001,
       velocityDecay: 0.4,
       linkDistance: 82,
       linkStrength: 0.34,
@@ -94,10 +98,10 @@ export function graphLayoutProfile(
   if (large) {
     return {
       warmupTicks: 6,
-      cooldownTicks: 260,
-      cooldownTime: 10000,
-      alphaDecay: 0.04,
-      alphaMin: 0.007,
+      cooldownTicks: 280,
+      cooldownTime: 11000,
+      alphaDecay: 0.026,
+      alphaMin: 0.001,
       velocityDecay: 0.38,
       linkDistance: 74,
       linkStrength: 0.32,

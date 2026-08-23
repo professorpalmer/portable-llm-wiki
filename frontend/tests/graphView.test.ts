@@ -276,6 +276,11 @@ describe("graphLayoutProfile huge tier is compact and non-degenerate", () => {
     expect(huge.warmupTicks).toBeLessThan(10);
     // Enough cooldown budget for the layout to reach a spread equilibrium on load.
     expect(huge.cooldownTicks).toBeGreaterThanOrEqual(200);
+    // Slow alpha decay so the sim keeps ticking (alpha reaches alphaMin near
+    // cooldownTicks, not early). Fast decay stops at ~100 ticks while still a
+    // clump on cold first-load; the old working graph used ~d3 default decay.
+    expect(huge.alphaDecay).toBeLessThanOrEqual(0.03);
+    expect(huge.alphaMin).toBeLessThanOrEqual(0.002);
   });
 
   it("large tier also uses the full edge set and keeps collision on", () => {
