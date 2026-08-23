@@ -261,6 +261,34 @@ def revoke_token(token_id: str) -> bool:
     return False
 
 
+def purge_tokens(ids: Optional[list[str]] = None) -> int:
+    """Remove ONLY revoked tokens from the identity store.
+
+    With ids given, purge just those (silently skipping unknown or
+    still-active ids); with ids None, purge all revoked. Returns the
+    count removed. Active tokens are never deleted through this path.
+    """
+    with _LOCK:
+        tokens = _load()
+        if ids is None:
+            remaining = [t for t in tokens if t.revoked_at is None]
+            removed = len(tokens) - len(remaining)
+            if removed:
+                _save(remaining)
+            return removed
+        wanted = set(ids)
+        remaining: list[ShareToken] = []
+        removed = 0
+        for t in tokens:
+            if t.id in wanted and t.revoked_at is not None:
+                removed += 1
+                continue
+            remaining.append(t)
+        if removed:
+            _save(remaining)
+        return removed
+
+
 def resolve(token: str) -> Optional[str]:
     """Return the viewer tier if the token is valid and not revoked/expired.
 

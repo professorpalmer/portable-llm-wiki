@@ -63,40 +63,45 @@ export function graphLayoutProfile(
   // that blocks the main thread, so keep warmup small and make live ticks cheap.
   if (huge) {
     return {
-      warmupTicks: 2,
-      cooldownTicks: 28,
-      cooldownTime: 1600,
-      alphaDecay: 0.1,
-      alphaMin: 0.025,
-      velocityDecay: 0.45,
-      linkDistance: 34,
-      linkStrength: 0.16,
-      chargeStrength: -40,
-      chargeDistanceMax: 180,
-      chargeTheta: 1.15,
+      warmupTicks: 4,
+      cooldownTicks: 120,
+      cooldownTime: 3000,
+      alphaDecay: 0.045,
+      alphaMin: 0.008,
+      velocityDecay: 0.4,
+      linkDistance: 82,
+      linkStrength: 0.38,
+      chargeStrength: -360,
+      chargeDistanceMax: 560,
+      chargeTheta: 0.85,
       useCollision: false,
       showArrows: false,
-      maxIdleEdges: 800,
-      maxLayoutEdges: 800,
+      maxIdleEdges: 850,
+      // Lay out over the FULL edge set. Sparsifying to a hub backbone is what
+      // produced the hollow donut: ~1k degree-1 leaves got no layout link and
+      // pure repulsion ejected them into a ring. The force layout needs to see
+      // every edge to converge into a compact web; painting stays sampled
+      // (maxIdleEdges) so frames remain cheap.
+      maxLayoutEdges: Number.POSITIVE_INFINITY,
     };
   }
   if (large) {
     return {
-      warmupTicks: 8,
-      cooldownTicks: 40,
-      cooldownTime: 2500,
-      alphaDecay: 0.055,
-      alphaMin: 0.018,
-      velocityDecay: 0.4,
-      linkDistance: 48,
-      linkStrength: 0.24,
-      chargeStrength: -90,
-      chargeDistanceMax: 280,
-      chargeTheta: 0.95,
+      warmupTicks: 6,
+      cooldownTicks: 120,
+      cooldownTime: 3000,
+      alphaDecay: 0.04,
+      alphaMin: 0.007,
+      velocityDecay: 0.38,
+      linkDistance: 74,
+      linkStrength: 0.36,
+      chargeStrength: -320,
+      chargeDistanceMax: 520,
+      chargeTheta: 0.88,
       useCollision: false,
       showArrows: false,
-      maxIdleEdges: 1400,
-      maxLayoutEdges: 1400,
+      maxIdleEdges: 1500,
+      maxLayoutEdges: Number.POSITIVE_INFINITY,
     };
   }
   return {

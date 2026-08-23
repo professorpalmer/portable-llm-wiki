@@ -578,6 +578,16 @@ export async function ownerRevokeShareToken(id: string, tenant?: string) {
   );
 }
 
+export async function ownerPurgeRevokedShareTokens(ids: string[] | undefined, tenant?: string) {
+  return asJson<{ removed: number; sync?: SyncVerdict }>(
+    await apiFetch(`${wikiBase(tenant)}/owner/share-tokens/purge-revoked`, {
+      method: "POST",
+      headers: ownerHeaders(),
+      body: JSON.stringify(ids !== undefined ? { ids } : {}),
+    })
+  );
+}
+
 export async function ownerCaptureConfig(tenant?: string): Promise<CaptureConfig> {
   return asJson<CaptureConfig>(
     await apiFetch(`${wikiBase(tenant)}/owner/capture/config`, {

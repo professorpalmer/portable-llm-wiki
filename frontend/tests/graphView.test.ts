@@ -24,24 +24,24 @@ describe("graphLayoutProfile", () => {
     expect(profile.maxIdleEdges).toBe(Number.POSITIVE_INFINITY);
   });
 
-  it("drops arrows and collision on a dense wiki-scale graph", () => {
+  it("drops arrows and collision but lays out the full edge set on a wiki-scale graph", () => {
     const profile = graphLayoutProfile(1854, 23739);
     expect(profile.useCollision).toBe(false);
     expect(profile.showArrows).toBe(false);
     expect(profile.maxIdleEdges).toBeLessThan(1200);
-    expect(profile.maxLayoutEdges).toBeLessThanOrEqual(800);
-    expect(profile.warmupTicks).toBeLessThan(8);
-    expect(profile.cooldownTicks).toBeLessThanOrEqual(32);
-    expect(profile.alphaDecay).toBeGreaterThan(0.08);
-    expect(profile.chargeTheta).toBeGreaterThan(1);
+    expect(profile.maxLayoutEdges).toBe(Number.POSITIVE_INFINITY);
+    expect(profile.warmupTicks).toBeLessThan(10);
+    expect(profile.chargeStrength).toBeLessThan(-320);
+    expect(profile.chargeDistanceMax).toBeGreaterThanOrEqual(500);
   });
 
-  it("caps idle edges once the graph crosses the large threshold", () => {
+  it("caps painted idle edges but uses the full edge set on a large graph", () => {
     const profile = graphLayoutProfile(700, 5000);
     expect(profile.useCollision).toBe(false);
     expect(profile.showArrows).toBe(false);
     expect(profile.maxIdleEdges).toBeLessThan(graphLayoutProfile(40, 80).maxIdleEdges);
-    expect(profile.maxLayoutEdges).toBeLessThan(graphLayoutProfile(40, 80).maxLayoutEdges);
+    // Layout sees every edge (prevents the hollow donut); only painting is sampled.
+    expect(profile.maxLayoutEdges).toBe(Number.POSITIVE_INFINITY);
   });
 });
 
@@ -243,6 +243,69 @@ describe("link and neighbor helpers", () => {
     expect(nodeRadius(1)).toBeGreaterThanOrEqual(4);
     expect(nodeRadius(100)).toBeLessThanOrEqual(14);
     expect(nodeRadius(100)).toBeGreaterThan(nodeRadius(4));
+  });
+});
+
+describe("graphLayoutProfile huge tier is compact and non-degenerate", () => {
+  it("lays out over the full edge set with strong charge so leaves are not ejected into a donut", () => {
+    const huge = graphLayoutProfile(1867, 24025);
+    // Full-edge layout is what prevents the hollow donut (sparsifyEdges stranding
+    // degree-1 leaves with no link force). The cap must never bind.
+    expect(huge.maxLayoutEdges).toBe(Number.POSITIVE_INFINITY);
+    expect(huge.maxIdleEdges).toBeGreaterThan(0);
+    expect(huge.maxIdleEdges).toBeLessThan(1200);
+    expect(huge.chargeStrength).toBeLessThan(-320);
+    expect(huge.chargeStrength).toBeGreaterThan(-420);
+    expect(huge.chargeDistanceMax).toBeGreaterThanOrEqual(500);
+    expect(huge.useCollision).toBe(false);
+    expect(huge.showArrows).toBe(false);
+    expect(huge.warmupTicks).toBeLessThan(10);
+  });
+
+  it("large tier also uses the full edge set and keeps a finite paint cap", () => {
+    const large = graphLayoutProfile(800, 6000);
+    expect(large.maxLayoutEdges).toBe(Number.POSITIVE_INFINITY);
+    expect(large.maxIdleEdges).toBeLessThan(Number.POSITIVE_INFINITY);
+    expect(large.chargeStrength).toBeLessThan(-90);
+  });
+});
+
+describe("sparsifyEdges hub backbone and isolated coverage", () => {
+  it("preserves hub-to-hub backbone under a tight cap", () => {
+    const nodes = [
+      { slug: "hub-a", degree: 80 },
+      { slug: "hub-b", degree: 75 },
+      { slug: "leaf-1", degree: 1 },
+      { slug: "leaf-2", degree: 1 },
+      { slug: "orphan", degree: 1 },
+    ];
+    const edges = [
+      { source: "leaf-1", target: "leaf-2" },
+      { source: "hub-a", target: "hub-b" },
+      { source: "hub-a", target: "leaf-1" },
+      { source: "hub-b", target: "leaf-2" },
+      { source: "hub-a", target: "orphan" },
+    ];
+    const kept = sparsifyEdges(nodes, edges, 2);
+    expect(kept).toHaveLength(2);
+    expect(kept.some((e) => (e.source === "hub-a" && e.target === "hub-b") || (e.source === "hub-b" && e.target === "hub-a"))).toBe(true);
+  });
+
+  it("covers an isolated node even when higher-score edges compete", () => {
+    const nodes = [
+      { slug: "h1", degree: 30 },
+      { slug: "h2", degree: 28 },
+      { slug: "h3", degree: 26 },
+      { slug: "loner", degree: 1 },
+    ];
+    const edges = [
+      { source: "h1", target: "h2" },
+      { source: "h2", target: "h3" },
+      { source: "h1", target: "h3" },
+      { source: "h1", target: "loner" },
+    ];
+    const kept = sparsifyEdges(nodes, edges, 3);
+    expect(kept.some((e) => e.source === "loner" || e.target === "loner")).toBe(true);
   });
 });
 

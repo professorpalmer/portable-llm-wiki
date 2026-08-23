@@ -29,7 +29,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Literal, Optional
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile, status
+from fastapi import Body, Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
@@ -73,6 +73,7 @@ from .drafter import (
 from .share_tokens import (
     list_tokens as list_share_tokens,
     mint_token as mint_share_token,
+    purge_tokens as purge_share_tokens,
     revoke_token as revoke_share_token,
 )
 from .wiki import (
@@ -2298,6 +2299,21 @@ def owner_revoke_share_token(
     from . import persistence as _persistence
     _persistence.flush_async(f"revoke share token {token_id}")
     return _with_sync({"ok": True, "id": token_id})
+
+
+class PurgeRevokedShareTokensRequest(BaseModel):
+    ids: Optional[list[str]] = None
+
+
+@app.post("/owner/share-tokens/purge-revoked")
+def owner_purge_revoked_share_tokens(
+    req: Optional[PurgeRevokedShareTokensRequest] = Body(default=None),
+    _: Viewer = Depends(require_owner),
+) -> dict:
+    removed = purge_share_tokens(req.ids if req and req.ids is not None else None)
+    from . import persistence as _persistence
+    _persistence.flush_async("purge revoked share tokens")
+    return _with_sync({"removed": removed})
 
 
 @app.get("/owner/capture/config")
