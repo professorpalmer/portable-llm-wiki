@@ -228,41 +228,69 @@ Hard rules:
 """
 
 
+# Index and Log are catalogs: a hop from any leaf includes them. Never dump
+# those bodies into the synthesizer; they stay available via read_page.
+CATALOG_SLUGS = frozenset({"index", "log"})
+MAX_PAGE_CHARS = 8_000
+MAX_CONTEXT_PAGES = 12
+_TRUNCATION_NOTE = "\n\n[truncated]"
+
+
+def _is_catalog_slug(slug: str) -> bool:
+    return slug in CATALOG_SLUGS
+
+
 def _select_context_pages(
     question: str,
     viewer_tier: str,
     max_anchors: int = 3,
     hops: int = 1,
-    max_total: int = 12,
+    max_total: int = MAX_CONTEXT_PAGES,
 ) -> tuple[list[Page], dict]:
     """Graph-aware retrieval.
 
     Strategy:
-      1. Keyword-score visible pages → take top `max_anchors` as ANCHORS.
-      2. Expand each anchor `hops` steps along wikilinks (in/out) → SUBGRAPH.
+      1. Keyword-score visible pages → take top `max_anchors` as ANCHORS,
+         skipping catalog hubs (index, log).
+      2. Expand each anchor `hops` steps along wikilinks (in/out) → SUBGRAPH,
+         still skipping catalog hubs.
       3. If subgraph is thin (<3 pages), backfill with foundational pages
          (tagged 'foundational' or in projects/overview).
       4. Hard-cap at `max_total` pages so we don't blow the LLM context.
 
     Returns (pages_in_order, retrieval_debug_dict). Anchors come first.
     """
-    scored = index.keyword_search(question, viewer_tier=viewer_tier, limit=max_anchors * 3)
-    anchors: list[Page] = [p for p, _ in scored][:max_anchors]
+    scored = index.keyword_search(
+        question, viewer_tier=viewer_tier, limit=max_anchors * 8
+    )
+    score_by_slug = {p.slug: score for p, score in scored}
+    anchors: list[Page] = []
+    for p, _score in scored:
+        if _is_catalog_slug(p.slug):
+            continue
+        anchors.append(p)
+        if len(anchors) >= max_anchors:
+            break
     anchor_slugs = [p.slug for p in anchors]
 
     if anchors:
-        subgraph = index.subgraph(anchor_slugs=anchor_slugs, viewer_tier=viewer_tier, hops=hops)
-        expanded_slugs = [n["slug"] for n in subgraph["nodes"] if n["slug"] not in anchor_slugs]
+        subgraph = index.subgraph(
+            anchor_slugs=anchor_slugs, viewer_tier=viewer_tier, hops=hops
+        )
+        expanded_slugs = [
+            n["slug"]
+            for n in subgraph["nodes"]
+            if n["slug"] not in anchor_slugs and not _is_catalog_slug(n["slug"])
+        ]
     else:
         subgraph = {"nodes": [], "edges": [], "anchors": []}
         expanded_slugs = []
 
     ordered_slugs: list[str] = anchor_slugs + expanded_slugs
 
-    # Backfill if we still don't have enough
     if len(ordered_slugs) < 3:
         for page in index.visible_pages(viewer_tier):
-            if page.slug in ordered_slugs:
+            if page.slug in ordered_slugs or _is_catalog_slug(page.slug):
                 continue
             tags_lower = [t.lower() for t in page.tags]
             if (
@@ -280,21 +308,46 @@ def _select_context_pages(
         if p is not None:
             chosen.append(p)
 
+    subgraph_slugs = {n["slug"] for n in subgraph.get("nodes", [])}
+    omitted_catalog: list[dict] = []
+    for slug in sorted(CATALOG_SLUGS):
+        if slug not in score_by_slug and slug not in subgraph_slugs:
+            continue
+        hit = index.get(slug)
+        omitted_catalog.append(
+            {"slug": slug, "title": hit.title if hit is not None else slug}
+        )
+
     retrieval_debug = {
-        "strategy": "graph-aware (keyword anchors + N-hop expansion)",
+        "strategy": (
+            "graph-aware (keyword anchors + N-hop expansion; catalog hubs omitted)"
+        ),
         "hops": hops,
         "anchors": [
-            {"slug": p.slug, "title": p.title, "score": round(score, 2)}
-            for p, score in scored[:max_anchors]
+            {
+                "slug": p.slug,
+                "title": p.title,
+                "score": round(score_by_slug.get(p.slug, 0.0), 2),
+            }
+            for p in anchors
         ],
         "expanded": [
-            {"slug": s, "title": (index.get(s).title if index.get(s) else s)}
-            for s in expanded_slugs
+            {"slug": p.slug, "title": p.title}
+            for p in chosen
+            if p.slug not in anchor_slugs
         ],
+        "omitted_catalog": omitted_catalog,
         "total_pages_in_context": len(chosen),
         "edge_count": len(subgraph.get("edges", [])),
     }
     return chosen, retrieval_debug
+
+
+def _page_body_for_context(page: Page) -> str:
+    body = page.body.strip()
+    if len(body) <= MAX_PAGE_CHARS:
+        return body
+    return body[:MAX_PAGE_CHARS].rstrip() + _TRUNCATION_NOTE
 
 
 def _build_context_block(pages: Iterable[Page]) -> str:
@@ -302,7 +355,7 @@ def _build_context_block(pages: Iterable[Page]) -> str:
     for p in pages:
         chunks.append(
             f"===== PAGE: {p.title} (slug: {p.slug}, section: {p.section}, tier: {p.tier}) =====\n"
-            f"{p.body.strip()}\n"
+            f"{_page_body_for_context(p)}\n"
         )
     return "\n".join(chunks)
 

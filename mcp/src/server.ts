@@ -247,7 +247,7 @@ server.registerTool(
   {
     title: "Ask a natural-language question, get a sourced answer",
     description:
-      "The primary tool. Does graph-aware retrieval (keyword anchors + 1-hop wikilink expansion) and returns a synthesized answer grounded in wiki pages, with citations. Prefer this over `search_wiki` + manual stitching.",
+      "The primary tool. Does graph-aware retrieval (keyword anchors + 1-hop wikilink expansion, Index/Log catalogs omitted) and returns a synthesized answer grounded in wiki pages, with citations. Prefer this over `search_wiki` + manual stitching.",
     inputSchema: {
       question: z
         .string()
