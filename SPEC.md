@@ -327,9 +327,13 @@ markdown links).
 
 ### `GET /wiki/search?q={query}&limit={n}`
 
-Keyword search across visible pages. The reference implementation scores
-title hits at 5×, tag hits at 2×, and body-occurrence hits at 1× (capped
-at 5 per term). Servers MAY substitute a different ranker.
+Keyword search across visible pages. The reference implementation folds
+punctuation, scores title-token hits at 5×, tag-token hits at 2×, and
+body-token hits at 1× (capped at 5 per term), then adds a bonus when a
+multi-word title or slug phrase appears in the query. Query context
+reserves those keyword hits (and a few outbound neighbors of the top
+hit) before filling remaining slots by keyword score, then importance.
+Servers MAY substitute a different ranker.
 
 Query parameters:
 
