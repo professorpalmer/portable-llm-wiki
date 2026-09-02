@@ -56,8 +56,10 @@ export type QueryRetrievalDebug = {
   hops: number;
   anchors: { slug: string; title: string; score: number }[];
   expanded: { slug: string; title: string }[];
+  omitted_catalog?: { slug: string; title: string }[];
   total_pages_in_context: number;
   edge_count: number;
+  importance?: { slug: string; score: number }[];
 };
 
 export type QueryResponse = {
@@ -88,6 +90,16 @@ export type LintReport = {
   missing_pages: { title: string; mentions: number }[];
   broken_provenance: { slug: string; title: string; missing_source: string }[];
   missing_index_entries: { slug?: string; title?: string; section?: string; reason?: string }[];
+  dormant?: {
+    slug: string;
+    title: string;
+    section: string;
+    score: number;
+    hits: number;
+    degree: number;
+    last_accessed_at: string | null;
+    last_dated: string | null;
+  }[];
   generated_at: string;
 };
 

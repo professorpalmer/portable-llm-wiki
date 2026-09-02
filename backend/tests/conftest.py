@@ -238,3 +238,17 @@ def _reset_share_tokens(wiki_root: Path):
     for path in (store, stats):
         if path.exists():
             path.unlink()
+
+
+@pytest.fixture(autouse=True)
+def _reset_page_access(wiki_root: Path):
+    """Each test starts with a clean page-access sidecar."""
+    path = wiki_root / ".page-access.json"
+    tmp = wiki_root / ".page-access.json.tmp"
+    for candidate in (path, tmp):
+        if candidate.exists():
+            candidate.unlink()
+    yield
+    for candidate in (path, tmp):
+        if candidate.exists():
+            candidate.unlink()

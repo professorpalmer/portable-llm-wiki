@@ -48,6 +48,7 @@ from .capture import (
     capture_paste,
 )
 from .config import VALID_TIERS, settings
+from .importance import record_access
 from .lint import lint_wiki
 from .llm import run_query
 from .orchestrator import (
@@ -638,6 +639,7 @@ def manifest(viewer: Viewer = Depends(current_viewer)) -> ManifestResponse:
 def get_page(slug: str, viewer: Viewer = Depends(current_viewer)) -> dict:
     _refresh()
     page = _page_or_404(slug, viewer)
+    record_access((page.slug,))
     rendered_body = render_page_html_safe(page.body)
     base = _api_base_url()
     return {

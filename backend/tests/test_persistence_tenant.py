@@ -165,6 +165,9 @@ def test_clone_into_repo_with_existing_gitignore_appends_tenant_rule(
     assert any(
         line.strip() == ".share-token-stats.json" for line in gi_text.splitlines()
     ), f"share-token stats must be gitignored after bootstrap; got:\n{gi_text}"
+    assert any(
+        line.strip() == ".page-access.json" for line in gi_text.splitlines()
+    ), f"page-access sidecar must be gitignored after bootstrap; got:\n{gi_text}"
 
 
 def test_clone_already_has_tenant_json_rule_no_duplicate_append(
