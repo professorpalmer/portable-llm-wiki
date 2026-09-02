@@ -757,7 +757,11 @@ def _ensure_tenant_gitignore(root: Path) -> None:
     gi = root / ".gitignore"
     existing = gi.read_text(encoding="utf-8") if gi.exists() else ""
     existing_rules = {line.strip() for line in existing.splitlines()}
-    required_rules = ("tenant.json", ".share-token-stats.json")
+    required_rules = (
+        "tenant.json",
+        ".share-token-stats.json",
+        ".page-access.json",
+    )
     missing_rules = [rule for rule in required_rules if rule not in existing_rules]
     if not missing_rules:
         return
@@ -777,6 +781,13 @@ def _ensure_tenant_gitignore(root: Path) -> None:
             [
                 "# Share-token hit counters are runtime bookkeeping, not wiki content.",
                 ".share-token-stats.json",
+            ]
+        )
+    if ".page-access.json" in missing_rules:
+        addendum_lines.extend(
+            [
+                "# Page access counters are runtime bookkeeping, not wiki content.",
+                ".page-access.json",
             ]
         )
     addendum = (
@@ -1183,8 +1194,11 @@ def _split_porcelain_dirt(cwd: Path) -> tuple[list[str], list[str]]:
 # Paths whose only meaningful dirt is share-token hit bookkeeping.
 # ``.share-token-stats.json`` is gitignored in normal setups; included
 # so a mis-tracked sidecar never alone blocks a fast-forward.
+_RUNTIME_SIDECAR_PATHS = frozenset(
+    {".share-token-stats.json", ".page-access.json"}
+)
 _SHARE_TOKEN_BOOKKEEPING_PATHS = frozenset(
-    {".share-tokens.json", ".share-token-stats.json"}
+    {".share-tokens.json"} | _RUNTIME_SIDECAR_PATHS
 )
 
 
@@ -1262,7 +1276,7 @@ def _is_share_tokens_hits_only_dirt(cwd: Path, tracked_paths: list[str]) -> bool
     if not normalized or not normalized.issubset(_SHARE_TOKEN_BOOKKEEPING_PATHS):
         return False
     # Sidecar-only dirt (if somehow tracked) is always bookkeeping.
-    if normalized == {".share-token-stats.json"}:
+    if normalized.issubset(_RUNTIME_SIDECAR_PATHS):
         return True
     if ".share-tokens.json" not in normalized:
         return False

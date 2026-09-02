@@ -1,14 +1,15 @@
 name: CI
 
-# Runs on every PR + every push to main. Tests must be green before
+# Runs on every PR + every push to main or dev. Tests must be green before
 # anything merges — this is part of how we signal "this OSS project is
-# real, not a weekend prototype."
+# real, not a weekend prototype." Dev is the working branch; main is the
+# production deploy line (Render autoDeploy + Vercel).
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
 
 # Cancel superseded runs to save minutes on rapid push cycles.
 concurrency:

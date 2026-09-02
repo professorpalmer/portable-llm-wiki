@@ -1,5 +1,5 @@
 """Wiki lint: surface contradictions, stale claims, orphans, missing pages,
-broken provenance, missing index entries.
+broken provenance, missing index entries, and dormant (low-importance) pages.
 
 The prototype implements deterministic structural checks. Semantic checks
 (contradictions, stale claims that need LLM judgment) are left as a v2.
@@ -10,8 +10,15 @@ import re
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Mapping
 
 from .config import settings
+from .importance import (
+    DORMANT_SCORE_MAX,
+    AccessRecord,
+    load_access,
+    score_pages,
+)
 from .wiki import LinkResolver, Page, _slugify, _strip_date_prefix, index
 
 
@@ -55,6 +62,62 @@ def _stale_pages(pages: list[Page], days: int = 30) -> list[dict]:
             )
     out.sort(key=lambda r: r["age_days"], reverse=True)
     return out
+
+
+_CATALOG_SLUGS = frozenset({"index", "log"})
+_DORMANT_EXCLUDED_SECTIONS = frozenset({"root", "queries"})
+_DORMANT_CAP = 50
+
+
+def _dormant_pages(
+    pages: list[Page],
+    access_map: Mapping[str, AccessRecord | dict] | None = None,
+    now: datetime | None = None,
+    *,
+    min_score: float = DORMANT_SCORE_MAX,
+    limit: int = _DORMANT_CAP,
+) -> list[dict]:
+    """Low-importance tail (paper s_min). Suggestion to review, not a delete list."""
+    records = access_map if access_map is not None else load_access()
+    breakdowns = score_pages(pages, records, now=now)
+    out: list[dict] = []
+    for p in pages:
+        if p.slug in _CATALOG_SLUGS:
+            continue
+        if p.section in _DORMANT_EXCLUDED_SECTIONS:
+            continue
+        if any(t.lower() == "foundational" for t in p.tags):
+            continue
+        breakdown = breakdowns.get(p.slug)
+        if breakdown is None or breakdown.score >= min_score:
+            continue
+        rec = records.get(p.slug)
+        if isinstance(rec, AccessRecord):
+            hits = rec.hits
+            last_accessed = rec.last_accessed_at
+        elif isinstance(rec, dict):
+            try:
+                hits = int(rec.get("hits") or 0)
+            except (TypeError, ValueError):
+                hits = 0
+            last_accessed = rec.get("last_accessed_at")
+        else:
+            hits = 0
+            last_accessed = None
+        out.append(
+            {
+                "slug": p.slug,
+                "title": p.title,
+                "section": p.section,
+                "score": round(breakdown.score, 3),
+                "hits": hits,
+                "degree": len(p.links_in) + len(p.links_out),
+                "last_accessed_at": last_accessed,
+                "last_dated": p.updated or p.created,
+            }
+        )
+    out.sort(key=lambda r: r["score"])
+    return out[:limit]
 
 
 _WIKILINK_RE = re.compile(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]")
@@ -144,5 +207,6 @@ def lint_wiki() -> dict:
         "missing_pages": _missing_pages(pages),
         "broken_provenance": _broken_provenance(pages),
         "missing_index_entries": _missing_index_entries(pages),
+        "dormant": _dormant_pages(pages),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }

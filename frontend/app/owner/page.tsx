@@ -912,6 +912,10 @@ function OwnerPageInner({ tenant }: { tenant?: string }) {
                   <div className="text-xs text-ink-muted">stale</div>
                 </div>
                 <div>
+                  <div className="font-semibold">{(lint.dormant ?? []).length}</div>
+                  <div className="text-xs text-ink-muted">dormant</div>
+                </div>
+                <div>
                   <div className="font-semibold">{lint.missing_pages.length}</div>
                   <div className="text-xs text-ink-muted">missing</div>
                 </div>
@@ -930,6 +934,18 @@ function OwnerPageInner({ tenant }: { tenant?: string }) {
                 title="Stale (>30d since updated/created)"
                 items={lint.stale.map((s) => `${s.title} · ${s.age_days}d (${s.last_dated})`)}
               />
+              <LintGroup
+                title="Dormant (low importance — recency, access, centrality)"
+                items={(lint.dormant ?? []).map(
+                  (d) =>
+                    `${d.title} · score=${d.score.toFixed(3)} · hits=${d.hits} · degree=${d.degree}`
+                )}
+              />
+              {(lint.dormant ?? []).length > 0 && (
+                <p className="mt-2 text-xs text-ink-muted">
+                  Dormant pages are a suggestion to review, not a delete list.
+                </p>
+              )}
               <LintGroup
                 title="Missing pages (≥3 mentions, no page)"
                 items={lint.missing_pages.map((m) => `${m.title} · ${m.mentions}×`)}

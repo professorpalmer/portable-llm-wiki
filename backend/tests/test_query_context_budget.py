@@ -1,7 +1,7 @@
 """Query synthesizer must not dump catalog hubs or unbounded page bodies.
 
 Index and Log are catalogs (they link to, or accumulate, the whole corpus).
-Bidirectional 1-hop expansion therefore pulls them into almost every query.
+Bidirectional expansion therefore pulls them into almost every query.
 Their full bodies are what blew a 200k-token Anthropic limit in production.
 """
 from __future__ import annotations
@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app import llm
+from app.importance import record_access
 from app.main import index as wiki_index
 
 
@@ -40,6 +41,7 @@ def test_select_context_pages_skips_catalog_hubs(client):
     assert "public-entity" in slugs
     assert "index" not in slugs
     assert "log" not in slugs
+    assert debug["hops"] == 2
     omitted = {item["slug"] for item in debug.get("omitted_catalog") or []}
     assert "index" in omitted
 
@@ -66,4 +68,61 @@ def test_context_block_caps_page_bodies(wiki_root: Path):
         assert len(block) < llm.MAX_PAGE_CHARS * (llm.MAX_CONTEXT_PAGES + 1)
     finally:
         entity.write_text(original, encoding="utf-8")
+        wiki_index.reload()
+
+
+def test_expanded_neighbors_prefer_higher_importance(wiki_root: Path, client):
+    """When the cap cannot keep every neighbor, rank by importance.score."""
+    hub = wiki_root / "wiki" / "entities" / "importance-hub.md"
+    high = wiki_root / "wiki" / "entities" / "importance-high.md"
+    low = wiki_root / "wiki" / "entities" / "importance-low.md"
+    page = """---
+type: entity
+title: {title}
+tier: public
+created: 2020-01-01
+updated: 2020-01-01
+---
+
+{body}
+"""
+    hub.write_text(
+        page.format(
+            title="Importance Hub",
+            body="UNIQUEIMPORTANCEANCHOR see [[Importance High]] and [[Importance Low]].",
+        ),
+        encoding="utf-8",
+    )
+    high.write_text(
+        page.format(title="Importance High", body="High neighbor."),
+        encoding="utf-8",
+    )
+    low.write_text(
+        page.format(title="Importance Low", body="Low neighbor."),
+        encoding="utf-8",
+    )
+    try:
+        wiki_index.reload()
+        record_access(["importance-high"])
+        pages, debug = llm._select_context_pages(
+            "UNIQUEIMPORTANCEANCHOR",
+            viewer_tier="public",
+            max_total=2,
+        )
+        slugs = [p.slug for p in pages]
+        assert slugs[0] == "importance-hub"
+        assert "importance-high" in slugs
+        assert "importance-low" not in slugs
+        assert debug["hops"] == 2
+        chosen_importance = {item["slug"]: item["score"] for item in debug["importance"]}
+        assert chosen_importance["importance-high"] > chosen_importance.get(
+            "importance-low", -1.0
+        )
+        block = llm._build_context_block(pages)
+        assert "UNIQUEIMPORTANCEANCHOR" in block
+        assert "===== PAGE:" in block
+    finally:
+        for path in (hub, high, low):
+            if path.exists():
+                path.unlink()
         wiki_index.reload()

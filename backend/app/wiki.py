@@ -20,6 +20,7 @@ from typing import Iterable
 import frontmatter
 
 from .config import TIER_ORDER, VALID_TIERS, settings
+from .importance import load_access, score_pages
 
 # How long a freshness verdict is trusted before we re-walk the corpus.
 # Under load, ``reload_if_stale`` would otherwise rglob+stat every markdown
@@ -451,7 +452,18 @@ class WikiIndex:
                 score += min(count, 5) * 1.0
             if score > 0:
                 results.append((page, score))
-        results.sort(key=lambda r: r[1], reverse=True)
+        if not results:
+            return []
+        # Keyword term weights stay primary. Importance is a secondary key
+        # among pages that already matched — it must not swamp the query.
+        breakdowns = score_pages((p for p, _ in results), load_access())
+        results.sort(
+            key=lambda r: (
+                r[1],
+                breakdowns[r[0].slug].score if r[0].slug in breakdowns else 0.0,
+            ),
+            reverse=True,
+        )
         return results[:limit]
 
     # ---------- internals ----------

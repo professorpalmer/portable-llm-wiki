@@ -44,6 +44,7 @@ from typing import AsyncIterator, Awaitable, Callable, Iterable
 import httpx
 
 from .config import settings
+from .importance import load_access, record_access, score_pages
 from .wiki import Page, index
 
 logger = logging.getLogger(__name__)
@@ -244,7 +245,7 @@ def _select_context_pages(
     question: str,
     viewer_tier: str,
     max_anchors: int = 3,
-    hops: int = 1,
+    hops: int = 2,
     max_total: int = MAX_CONTEXT_PAGES,
 ) -> tuple[list[Page], dict]:
     """Graph-aware retrieval.
@@ -253,10 +254,14 @@ def _select_context_pages(
       1. Keyword-score visible pages → take top `max_anchors` as ANCHORS,
          skipping catalog hubs (index, log).
       2. Expand each anchor `hops` steps along wikilinks (in/out) → SUBGRAPH,
-         still skipping catalog hubs.
-      3. If subgraph is thin (<3 pages), backfill with foundational pages
+         still skipping catalog hubs. Default hops=2 (1-hop is too shallow;
+         3+ explodes through hubs).
+      3. Rank non-anchor expanded slugs by importance.score descending and
+         keep only the remaining context slots.
+      4. If chosen is still thin (<3 pages), backfill with foundational pages
          (tagged 'foundational' or in projects/overview).
-      4. Hard-cap at `max_total` pages so we don't blow the LLM context.
+      5. Hard-cap at `max_total` pages so we don't blow the LLM context.
+      6. Record access on the chosen slugs (fail-soft sidecar).
 
     Returns (pages_in_order, retrieval_debug_dict). Anchors come first.
     """
@@ -286,6 +291,14 @@ def _select_context_pages(
         subgraph = {"nodes": [], "edges": [], "anchors": []}
         expanded_slugs = []
 
+    breakdowns = score_pages(index.visible_pages(viewer_tier), load_access())
+    remaining_slots = max(0, max_total - len(anchor_slugs))
+    expanded_slugs.sort(
+        key=lambda s: breakdowns[s].score if s in breakdowns else 0.0,
+        reverse=True,
+    )
+    expanded_slugs = expanded_slugs[:remaining_slots]
+
     ordered_slugs: list[str] = anchor_slugs + expanded_slugs
 
     if len(ordered_slugs) < 3:
@@ -307,6 +320,8 @@ def _select_context_pages(
         p = index.get(s)
         if p is not None:
             chosen.append(p)
+
+    record_access(p.slug for p in chosen)
 
     subgraph_slugs = {n["slug"] for n in subgraph.get("nodes", [])}
     omitted_catalog: list[dict] = []
@@ -339,6 +354,16 @@ def _select_context_pages(
         "omitted_catalog": omitted_catalog,
         "total_pages_in_context": len(chosen),
         "edge_count": len(subgraph.get("edges", [])),
+        "importance": [
+            {
+                "slug": p.slug,
+                "score": round(
+                    breakdowns[p.slug].score if p.slug in breakdowns else 0.0,
+                    3,
+                ),
+            }
+            for p in chosen
+        ],
     }
     return chosen, retrieval_debug
 
