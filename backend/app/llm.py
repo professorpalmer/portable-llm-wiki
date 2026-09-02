@@ -217,7 +217,9 @@ Answer the user's question using ONLY the wiki pages provided as CONTEXT
 below. Each page is delimited by "===== PAGE: <title> (slug: <slug>) =====".
 
 Hard rules:
-- Cite specific pages inline by their title in brackets, e.g. [[Calibrated Honesty]].
+- Cite specific pages inline by their title in brackets, e.g. [[Calibrated Honesty]],
+  and only pages present in CONTEXT. If a named work is not among those pages,
+  say it was not in this retrieval set — do not conclude the wiki lacks it.
 - If the wiki does not contain enough information to answer, say so explicitly
   and suggest what source the user could ingest to close the gap.
 - Do not invent biographical or factual claims that are not in the context.
@@ -234,6 +236,12 @@ Hard rules:
 CATALOG_SLUGS = frozenset({"index", "log"})
 MAX_PAGE_CHARS = 8_000
 MAX_CONTEXT_PAGES = 12
+# Keep extra keyword hits beyond graph-walk anchors so a named title that
+# ranks 4th still reaches the synthesizer. Importance fill uses the rest.
+KEYWORD_RESERVE = 6
+# After a named hit, keep a few of its direct wikilink neighbors so the
+# matching bench/entity page is not evicted by high-centrality hubs.
+TOP_NEIGHBOR_RESERVE = 2
 _TRUNCATION_NOTE = "\n\n[truncated]"
 
 
@@ -252,12 +260,15 @@ def _select_context_pages(
 
     Strategy:
       1. Keyword-score visible pages → take top `max_anchors` as ANCHORS,
-         skipping catalog hubs (index, log).
+         skipping catalog hubs (index, log). Also reserve additional
+         high-scoring keyword hits so a named title cannot be evicted by
+         hub expansion. Reserve a few 1-hop neighbors of the top hit so
+         the matching entity/bench page survives hub fill.
       2. Expand each anchor `hops` steps along wikilinks (in/out) → SUBGRAPH,
          still skipping catalog hubs. Default hops=2 (1-hop is too shallow;
          3+ explodes through hubs).
-      3. Rank non-anchor expanded slugs by importance.score descending and
-         keep only the remaining context slots.
+      3. Rank non-reserved expanded slugs by keyword score, then
+         importance.score, and keep only the remaining context slots.
       4. If chosen is still thin (<3 pages), backfill with foundational pages
          (tagged 'foundational' or in projects/overview).
       5. Hard-cap at `max_total` pages so we don't blow the LLM context.
@@ -266,17 +277,41 @@ def _select_context_pages(
     Returns (pages_in_order, retrieval_debug_dict). Anchors come first.
     """
     scored = index.keyword_search(
-        question, viewer_tier=viewer_tier, limit=max_anchors * 8
+        question, viewer_tier=viewer_tier, limit=max(max_anchors * 8, KEYWORD_RESERVE * 2)
     )
     score_by_slug = {p.slug: score for p, score in scored}
-    anchors: list[Page] = []
+    reserved: list[Page] = []
     for p, _score in scored:
         if _is_catalog_slug(p.slug):
             continue
-        anchors.append(p)
-        if len(anchors) >= max_anchors:
+        reserved.append(p)
+        if len(reserved) >= min(max(max_anchors, KEYWORD_RESERVE), max_total):
             break
+    anchors = reserved[:max_anchors]
     anchor_slugs = [p.slug for p in anchors]
+    reserved_slugs = [p.slug for p in reserved]
+    breakdowns = score_pages(index.visible_pages(viewer_tier), load_access())
+
+    neighbor_budget = min(TOP_NEIGHBOR_RESERVE, max(0, max_total - len(reserved_slugs)))
+    if neighbor_budget and reserved:
+        top = reserved[0]
+        neighbor_candidates = []
+        seen_neighbors = set(reserved_slugs)
+        for slug in top.links_out:
+            if slug in seen_neighbors or _is_catalog_slug(slug):
+                continue
+            if index.get(slug) is None:
+                continue
+            seen_neighbors.add(slug)
+            neighbor_candidates.append(slug)
+        neighbor_candidates.sort(
+            key=lambda s: (
+                score_by_slug.get(s, 0.0),
+                breakdowns[s].score if s in breakdowns else 0.0,
+            ),
+            reverse=True,
+        )
+        reserved_slugs.extend(neighbor_candidates[:neighbor_budget])
 
     if anchors:
         subgraph = index.subgraph(
@@ -290,16 +325,18 @@ def _select_context_pages(
     else:
         subgraph = {"nodes": [], "edges": [], "anchors": []}
         expanded_slugs = []
-
-    breakdowns = score_pages(index.visible_pages(viewer_tier), load_access())
-    remaining_slots = max(0, max_total - len(anchor_slugs))
+    remaining_slots = max(0, max_total - len(reserved_slugs))
+    expanded_slugs = [s for s in expanded_slugs if s not in reserved_slugs]
     expanded_slugs.sort(
-        key=lambda s: breakdowns[s].score if s in breakdowns else 0.0,
+        key=lambda s: (
+            score_by_slug.get(s, 0.0),
+            breakdowns[s].score if s in breakdowns else 0.0,
+        ),
         reverse=True,
     )
     expanded_slugs = expanded_slugs[:remaining_slots]
 
-    ordered_slugs: list[str] = anchor_slugs + expanded_slugs
+    ordered_slugs: list[str] = reserved_slugs + expanded_slugs
 
     if len(ordered_slugs) < 3:
         for page in index.visible_pages(viewer_tier):

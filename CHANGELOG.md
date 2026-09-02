@@ -8,6 +8,29 @@ ordered newest-first.
 
 ## Unreleased
 
+## 0.2.3. Named titles survive query retrieval
+
+`query_wiki` could answer a question that named *State, Not Tokens* from
+Marionette hub pages and never load `state-not-tokens-research`. Long
+questions kept commas on terms (`State,`), scored unigrams in huge hub
+bodies above the named title, then importance-ranked 2-hop expansion
+evicted the paper. Agents read that as "the wiki does not have the paper."
+
+- **Phrase-aware keyword rank.** Tokens are alphanumeric-folded. A
+  multi-word title or slug phrase in the query outranks hub bag-of-words
+  matches.
+- **Reserved keyword hits.** Top keyword pages stay in synthesizer
+  context even when they are not the three graph-walk anchors.
+- **Outbound neighbors of the top hit.** A linked bench/entity page is
+  not dropped solely because a high-centrality hub scores higher.
+- **Synthesizer contract.** A named work missing from CONTEXT is a
+  retrieval miss, not proof the wiki lacks it.
+- Patch bump to **0.2.3**.
+
+## 0.2.2. Hosted health, tokens, and index ranking
+
+Shipped on `main` ahead of this tag.
+
 - **Public `/healthz` is liveness-only.** The footer status link and
   Render/Docker probes no longer return `page_count`, process RSS, or
   tenant-volume disk bytes. Those are shared-service fingerprints, not

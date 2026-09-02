@@ -199,7 +199,7 @@ def _maybe_start_tenant_pull_poller(_persistence):
 
 app = FastAPI(
     title="Portable LLM Wiki",
-    version="0.2.2",
+    version="0.2.3",
     description=(
         "Vendor-neutral HTTP transport for a Karpathy-style personal LLM wiki. "
         "Any LLM client that can fetch URLs can read the wiki via this API."

@@ -11,7 +11,7 @@ import os
 import re
 import threading
 import time
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +33,9 @@ _STALE_CHECK_INTERVAL_S: float = float(
 )
 
 WIKILINK_RE = re.compile(r"\[\[([^\]\|]+?)(?:\|([^\]]+))?\]\]")
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_TITLE_PHRASE_PER_WORD = 40.0
+_SLUG_PHRASE_BONUS = 40.0
 PAGE_TYPES = (
     "entity",
     "concept",
@@ -48,6 +51,40 @@ def _slugify(title: str) -> str:
     s = title.strip().lower()
     s = re.sub(r"[^a-z0-9]+", "-", s)
     return s.strip("-")
+
+
+def _tokens(text: str) -> list[str]:
+    return _TOKEN_RE.findall(text.lower())
+
+
+def _folded_text(text: str) -> str:
+    return " ".join(_tokens(text))
+
+
+def _best_ngram_bonus(query_folded: str, words: list[str]) -> float:
+    for n in range(min(4, len(words)), 1, -1):
+        for i in range(len(words) - n + 1):
+            phrase = " ".join(words[i : i + n])
+            if phrase in query_folded:
+                return _TITLE_PHRASE_PER_WORD * n
+    return 0.0
+
+
+def _phrase_bonus(query_folded: str, title: str, slug: str) -> float:
+    """Boost pages whose multi-word title or slug appears in the query.
+
+    Unigram scoring on long questions otherwise ranks huge hub bodies
+    above the page the question named.
+    """
+    if not query_folded:
+        return 0.0
+    bonus = _best_ngram_bonus(query_folded, _tokens(title))
+    slug_words = [part for part in slug.lower().split("-") if part]
+    if len(slug_words) >= 2 and " ".join(slug_words) in query_folded:
+        bonus = max(bonus, _SLUG_PHRASE_BONUS)
+    elif slug_words:
+        bonus = max(bonus, _best_ngram_bonus(query_folded, slug_words))
+    return bonus
 
 
 # Dated pages (decisions, sources) carry a ``YYYY-MM-DD`` filename/slug prefix
@@ -431,25 +468,22 @@ class WikiIndex:
         return out[:limit]
 
     def keyword_search(self, query: str, viewer_tier: str, limit: int = 20) -> list[tuple[Page, float]]:
-        q = query.strip().lower()
-        if not q:
-            return []
-        terms = [t for t in re.split(r"\s+", q) if t]
+        query_folded = _folded_text(query)
+        terms = _tokens(query)
         if not terms:
             return []
         results: list[tuple[Page, float]] = []
         for page in self.visible_pages(viewer_tier):
-            score = 0.0
-            haystack_title = page.title.lower()
-            haystack_body = page.body.lower()
-            haystack_tags = " ".join(page.tags).lower()
+            score = _phrase_bonus(query_folded, page.title, page.slug)
+            title_tokens = set(_tokens(page.title))
+            tag_tokens = set(_tokens(" ".join(page.tags)))
+            body_counts = Counter(_tokens(page.body))
             for term in terms:
-                if term in haystack_title:
+                if term in title_tokens:
                     score += 5.0
-                if term in haystack_tags:
+                if term in tag_tokens:
                     score += 2.0
-                count = haystack_body.count(term)
-                score += min(count, 5) * 1.0
+                score += min(body_counts.get(term, 0), 5) * 1.0
             if score > 0:
                 results.append((page, score))
         if not results:
