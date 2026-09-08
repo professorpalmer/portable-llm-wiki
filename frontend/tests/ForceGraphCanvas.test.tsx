@@ -184,6 +184,19 @@ beforeEach(() => {
 });
 
 describe("ForceGraphCanvas", () => {
+  it("reveals the first graph only after final positions and camera fit are ready", () => {
+    render(<ForceGraphCanvas graph={graph} sectionFilter="" selectedSlug={null} labelMode="off" onSelect={vi.fn()} />);
+    act(() => { flushFrames(); });
+    expect(context.arc).not.toHaveBeenCalled();
+    expect(context.fillText).toHaveBeenCalledWith("Preparing graph…", 400, 300);
+    const worker = MockWorker.instances[0];
+    act(() => { worker.emit(finalPositions(startMessage(worker).generation)); });
+    expect(rafCallbacks.size).toBe(1);
+    act(() => { flushFrames(); });
+    expect(context.arc).toHaveBeenCalled();
+    expect(rafCallbacks.size).toBe(0);
+  });
+
   it("consumes wheel zoom instead of also scrolling the document", () => {
     const view = render(<ForceGraphCanvas graph={graph} sectionFilter="" selectedSlug={null} labelMode="off" onSelect={vi.fn()} />);
     const canvas = view.getByRole("application");
@@ -204,8 +217,13 @@ describe("ForceGraphCanvas", () => {
   it("gives a dragged node priority over pending layout and batches pointer updates into one frame", () => {
     const ref = createRef<ForceGraphCanvasHandle>();
     const view = render(<ForceGraphCanvas ref={ref} graph={graph} sectionFilter="" selectedSlug={null} labelMode="off" onSelect={vi.fn()} />);
-    act(() => { flushFrames(); });
-    const first = MockWorker.instances[0];
+    const initial = MockWorker.instances[0];
+    act(() => {
+      initial.emit(finalPositions(startMessage(initial).generation));
+      flushFrames();
+      ref.current?.relax();
+    });
+    const first = MockWorker.instances[1];
     const start = startMessage(first);
     const [cameraX, cameraY] = context.translate.mock.lastCall ?? [];
     const [scale] = context.scale.mock.lastCall ?? [];
@@ -228,7 +246,7 @@ describe("ForceGraphCanvas", () => {
       flushFrames();
       ref.current?.relax();
     });
-    const next = startMessage(MockWorker.instances[1]).nodes.find((candidate) => candidate.id === node.id);
+    const next = startMessage(MockWorker.instances[2]).nodes.find((candidate) => candidate.id === node.id);
     expect(next?.x).toBeCloseTo(node.x + 50 / scale);
   });
 

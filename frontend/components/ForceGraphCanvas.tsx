@@ -241,6 +241,14 @@ const ForceGraphCanvas = forwardRef<ForceGraphCanvasHandle, ForceGraphCanvasProp
       context.clearRect(0, 0, viewport.width, viewport.height);
       context.fillStyle = "#fafaf7";
       context.fillRect(0, 0, viewport.width, viewport.height);
+      if (!layoutReadyRef.current) {
+        context.font = "14px sans-serif";
+        context.fillStyle = "#525258";
+        context.textAlign = "center";
+        context.textBaseline = "middle";
+        context.fillText("Preparing graph…", viewport.width / 2, viewport.height / 2);
+        return;
+      }
       context.save();
       context.translate(camera.x, camera.y);
       context.scale(camera.scale, camera.scale);
@@ -364,6 +372,7 @@ const ForceGraphCanvas = forwardRef<ForceGraphCanvasHandle, ForceGraphCanvasProp
       generationRef.current += 1;
       workerRef.current?.terminate();
       workerRef.current = null;
+      const firstLayout = !layoutReadyRef.current;
       layoutReadyRef.current = true;
       if (response.kind === "error") {
         if (!userNavigatedRef.current) recenter(false);
@@ -381,9 +390,9 @@ const ForceGraphCanvas = forwardRef<ForceGraphCanvasHandle, ForceGraphCanvasProp
         positionsRef.current = target;
         rebuildPositionIndexes();
         requestDraw();
-        if (!userNavigatedRef.current) recenter(false);
+        if (firstLayout || !userNavigatedRef.current) recenter(false);
       };
-      if (reducedMotionRef.current) {
+      if (firstLayout || reducedMotionRef.current) {
         applyFinal();
         return;
       }
@@ -542,6 +551,7 @@ const ForceGraphCanvas = forwardRef<ForceGraphCanvasHandle, ForceGraphCanvasProp
     }, []);
 
     const hitTest = useCallback((point: GraphPosition) => {
+      if (!layoutReadyRef.current) return null;
       const world = screenToWorld(point, cameraRef.current);
       return hitTestSpatialGrid(
         spatialGridRef.current,
