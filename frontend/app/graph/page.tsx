@@ -1,18 +1,69 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import dynamic from "next/dynamic";
+import { useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 import Link from "next/link";
-import ForceGraphCanvas, {
-  type ForceGraphCanvasHandle,
-  type GraphLabelMode,
-} from "@/components/ForceGraphCanvas";
 import {
   fetchGraph,
   fetchManifest,
   type GraphResponse,
   type GraphNode,
 } from "@/lib/api";
+import {
+  captureCamera,
+  fitForceGraphCamera,
+  undoLibraryAutoZoom,
+  type CameraPose,
+} from "@/lib/graphCamera";
 import { useTenant } from "@/lib/useTenant";
+
+function settleGraphCamera(
+  fg: {
+    graphData?: () => { nodes?: { degree?: number; x?: number; y?: number }[] };
+    zoom?: (k?: number, ms?: number) => number | unknown;
+    centerAt?: (x?: number, y?: number, ms?: number) => unknown;
+    zoomToFit?: (
+      ms?: number,
+      px?: number,
+      nodeFilter?: (node: { degree?: number; x?: number; y?: number }) => boolean,
+    ) => void;
+  } | null,
+  autoFitDoneRef: MutableRefObject<boolean>,
+  fittedPoseRef: MutableRefObject<CameraPose | null>,
+) {
+  if (!fg) return;
+  const nodeCount = fg.graphData?.()?.nodes?.length ?? 0;
+  if (autoFitDoneRef.current) {
+    undoLibraryAutoZoom(fg, nodeCount, fittedPoseRef.current);
+    return;
+  }
+  if (fitForceGraphCamera(fg, 40, 0)) {
+    autoFitDoneRef.current = true;
+    fittedPoseRef.current = captureCamera(fg);
+  }
+}
+
+// react-force-graph-2d is canvas-based, so it must be loaded client-side
+// only. ``next/dynamic`` returns a ``LoadableComponent`` HOC that does
+// NOT forward refs to the wrapped component — which silently breaks the
+// "recenter" / "relax" buttons (``fgRef.current`` never gets
+// ``zoomToFit`` / ``d3ReheatSimulation``). Wrapping the dynamic import in
+// ``forwardRef`` does not help because the ref still lands on the
+// LoadableComponent wrapper. Instead we dynamically import
+// ``ForceGraphCanvas``, a thin client component that statically imports
+// ForceGraph2D and accepts ``graphRef`` as a regular prop.
+//
+// See https://nextjs.org/docs/app/api-reference/functions/dynamic-imports
+// — "ref attribute" caveat.
+const ForceGraphCanvas = dynamic(
+  () => import("@/components/ForceGraphCanvas"),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="text-sm text-ink-muted p-4">loading graph…</div>
+    ),
+  },
+);
 
 const SECTION_COLORS: Record<string, string> = {
   entities: "#3b82f6",
@@ -32,8 +83,15 @@ const TIER_RING: Record<string, string> = {
   private: "#ef4444",
 };
 
-const LABEL_MODE_ORDER: GraphLabelMode[] = ["hubs", "all", "off"];
-const LABEL_MODE_TEXT: Record<GraphLabelMode, string> = {
+// How permanent (always-painted) labels are chosen. Cycles in this order so a
+// single button can reach every state:
+//   hubs — top-degree nodes + current selection (the calm default)
+//   all  — every node labelled (busy, but complete)
+//   off  — no permanent labels at all; only hover/selection reveal a name
+type LabelMode = "hubs" | "all" | "off";
+
+const LABEL_MODE_ORDER: LabelMode[] = ["hubs", "all", "off"];
+const LABEL_MODE_TEXT: Record<LabelMode, string> = {
   hubs: "labels: hubs only",
   all: "labels: all",
   off: "labels: off",
@@ -41,46 +99,51 @@ const LABEL_MODE_TEXT: Record<GraphLabelMode, string> = {
 
 export default function GraphPage() {
   const tenant = useTenant();
-  const tenantScope = tenant ?? "";
-  const [loadedGraph, setLoadedGraph] = useState<{
-    tenantScope: string;
-    value: GraphResponse;
-  } | null>(null);
-  const graph = loadedGraph?.tenantScope === tenantScope ? loadedGraph.value : null;
+  const [graph, setGraph] = useState<GraphResponse | null>(null);
   const [viewerTier, setViewerTier] = useState<string>("public");
   const [isOwner, setIsOwner] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [hoveredSlug, setHoveredSlug] = useState<string | null>(null);
   const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
   const [sectionFilter, setSectionFilter] = useState<string>("");
-  const [labelMode, setLabelMode] = useState<GraphLabelMode>("off");
-  const graphRef = useRef<ForceGraphCanvasHandle | null>(null);
+  const [labelMode, setLabelMode] = useState<LabelMode>("off");
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+  // The ForceGraph2D instance exposes d3Force(...) and zoomToFit() — keep a ref.
+  // The library's exported type is loose; using `any` here is intentional.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const fgRef = useRef<any>(null);
+  // Per-frame accumulator for painted label rectangles so collision avoidance
+  // can skip labels that would overlap already-painted ones. Reset every frame
+  // in onRenderFramePre.
+  const labelRectsRef = useRef<Array<{ x: number; y: number; w: number; h: number }>>([]);
+  const autoFitDoneRef = useRef(false);
+  const fittedPoseRef = useRef<ReturnType<typeof captureCamera>>(null);
+  const [size, setSize] = useState({ w: 800, h: 600 });
 
   useEffect(() => {
-    let cancelled = false;
-    setError(null);
-    setSelectedSlug(null);
-    setSectionFilter("");
     fetchGraph(tenant)
-      .then((value) => {
-        if (!cancelled) setLoadedGraph({ tenantScope, value });
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) {
-          setError(error instanceof Error ? error.message : "failed to load graph");
-        }
-      });
+      .then(setGraph)
+      .catch((e) => setError((e as Error).message));
     fetchManifest(tenant)
       .then((m) => {
-        if (!cancelled) {
-          setViewerTier(m.viewer_tier);
-          setIsOwner(m.viewer_is_owner);
-        }
+        setViewerTier(m.viewer_tier);
+        setIsOwner(m.viewer_is_owner);
       })
       .catch(() => {
         /* badge already surfaces this */
       });
-    return () => { cancelled = true; };
-  }, [tenant, tenantScope]);
+  }, [tenant]);
+
+  useEffect(() => {
+    if (!wrapperRef.current) return;
+    const ro = new ResizeObserver((entries) => {
+      const r = entries[0]?.contentRect;
+      if (!r) return;
+      setSize({ w: r.width, h: Math.max(500, r.height) });
+    });
+    ro.observe(wrapperRef.current);
+    return () => ro.disconnect();
+  }, []);
 
   const filtered = useMemo(() => {
     if (!graph) return null;
@@ -94,6 +157,14 @@ export default function GraphPage() {
       anchors: graph.anchors,
     };
   }, [graph, sectionFilter]);
+
+  const data = useMemo(() => {
+    if (!filtered) return { nodes: [], links: [] };
+    return {
+      nodes: filtered.nodes.map((n) => ({ ...n, id: n.slug })),
+      links: filtered.edges.map((e) => ({ source: e.source, target: e.target })),
+    };
+  }, [filtered]);
 
   const selectedNode = useMemo(
     () => filtered?.nodes.find((n) => n.slug === selectedSlug) ?? null,
@@ -116,6 +187,59 @@ export default function GraphPage() {
     for (const n of graph.nodes) out[n.section] = (out[n.section] || 0) + 1;
     return out;
   }, [graph]);
+
+  // Decide which nodes get a permanent label vs. hover-only.
+  //   off  — nothing permanent; hover/selection still reveal a name.
+  //   all  — every node labelled.
+  //   hubs — top-degree nodes plus the current selection's neighborhood.
+  // The hubs default avoids the "labels piled on top of each other" problem on
+  // dense graphs while keeping the view readable.
+  const labelSet = useMemo(() => {
+    if (!filtered || labelMode === "off") return new Set<string>();
+    if (labelMode === "all") return new Set(filtered.nodes.map((n) => n.slug));
+    const set = new Set<string>();
+    const sorted = [...filtered.nodes].sort((a, b) => b.degree - a.degree);
+    // Show top 6 by degree as permanent labels.
+    for (const n of sorted.slice(0, 6)) set.add(n.slug);
+    if (selectedSlug) {
+      set.add(selectedSlug);
+      for (const n of selectedNeighbors) set.add(n.slug);
+    }
+    return set;
+  }, [filtered, selectedSlug, selectedNeighbors, labelMode]);
+
+  useEffect(() => {
+    autoFitDoneRef.current = false;
+    fittedPoseRef.current = null;
+    if (!filtered?.nodes.length) return;
+    // Engine stop is the real settle; this is only a backup if it never fires.
+    const t = window.setTimeout(
+      () => settleGraphCamera(fgRef.current, autoFitDoneRef, fittedPoseRef),
+      5500,
+    );
+    return () => window.clearTimeout(t);
+  }, [filtered]);
+
+  // Tune the d3-force layout when graph data changes. Defaults are tuned for
+  // sparse graphs; our wiki graph has avg degree ~9, which collapses without
+  // stronger repulsion + a collision force.
+  useEffect(() => {
+    if (!fgRef.current || !filtered || filtered.nodes.length === 0) return;
+    const fg = fgRef.current;
+    const linkF = fg.d3Force("link");
+    if (linkF) linkF.distance(90).strength(0.4);
+    const chargeF = fg.d3Force("charge");
+    if (chargeF) chargeF.strength(-420).distanceMax(600);
+    // Inject a collision force keyed to node radius so nodes don't overlap.
+    import("d3-force").then(({ forceCollide }) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      fg.d3Force("collision", forceCollide((d: any) => {
+        const r = 4 + Math.sqrt(d.degree || 1) * 1.6;
+        return r + 14; // generous radius so labels also have room
+      }).strength(0.9));
+      fg.d3ReheatSimulation();
+    });
+  }, [filtered]);
 
   return (
     <div className="max-w-7xl mx-auto px-5 py-6">
@@ -180,7 +304,7 @@ export default function GraphPage() {
       <div className="mt-4 flex gap-2 flex-wrap items-center">
         <span className="text-xs text-ink-muted uppercase tracking-wider">Filter:</span>
         <button
-          onClick={() => { setSectionFilter(""); setSelectedSlug(null); }}
+          onClick={() => setSectionFilter("")}
           className={`text-xs px-2 py-1 rounded border ${
             sectionFilter === ""
               ? "border-ink text-ink"
@@ -192,7 +316,7 @@ export default function GraphPage() {
         {Object.entries(sectionCounts).map(([s, n]) => (
           <button
             key={s}
-            onClick={() => { setSectionFilter(s); setSelectedSlug(null); }}
+            onClick={() => setSectionFilter(s)}
             className={`text-xs px-2 py-1 rounded border flex items-center gap-1.5 ${
               sectionFilter === s
                 ? "border-ink text-ink"
@@ -227,37 +351,222 @@ export default function GraphPage() {
             {LABEL_MODE_TEXT[labelMode]}
           </button>
           <button
-            onClick={() => graphRef.current?.recenter()}
+            onClick={() => {
+              if (fitForceGraphCamera(fgRef.current, 40, 400)) {
+                autoFitDoneRef.current = true;
+                fittedPoseRef.current = captureCamera(fgRef.current);
+              }
+            }}
             className="text-xs px-2 py-1 rounded border border-paper-soft text-ink-muted hover:border-ink hover:text-ink"
             title="Fit graph to view"
           >
-            recenter
+            ⤢ recenter
           </button>
           <button
-            onClick={() => graphRef.current?.relax()}
+            onClick={() => fgRef.current?.d3ReheatSimulation?.()}
             className="text-xs px-2 py-1 rounded border border-paper-soft text-ink-muted hover:border-ink hover:text-ink"
             title="Re-run layout simulation"
           >
-            relax
+            ↻ relax
           </button>
         </span>
       </div>
 
-      <div className="mt-4 grid lg:grid-cols-[minmax(0,1fr)_320px] gap-5">
-        <div className="min-w-0 bg-white border border-paper-soft rounded-xl overflow-hidden h-[78vh] min-h-[600px]">
-          {!graph || filtered?.nodes.length === 0 ? (
+      <div className="mt-4 grid lg:grid-cols-[1fr_320px] gap-5">
+        <div
+          ref={wrapperRef}
+          className="bg-white border border-paper-soft rounded-xl overflow-hidden"
+          style={{ height: "78vh", minHeight: 600 }}
+        >
+          {data.nodes.length === 0 ? (
             <div className="h-full flex items-center justify-center text-sm text-ink-muted">
               {graph ? "no pages match the current filter" : "loading…"}
             </div>
           ) : (
             <ForceGraphCanvas
-              ref={graphRef}
-              graph={graph}
-              tenant={tenant}
-              sectionFilter={sectionFilter}
-              selectedSlug={selectedSlug}
-              labelMode={labelMode}
-              onSelect={setSelectedSlug}
+              graphRef={fgRef}
+              width={size.w}
+              height={size.h}
+              graphData={data}
+              backgroundColor="#fafaf7"
+              nodeRelSize={6}
+              cooldownTicks={300}
+              d3AlphaDecay={0.018}
+              d3VelocityDecay={0.35}
+              warmupTicks={80}
+              onEngineStop={() => {
+                settleGraphCamera(fgRef.current, autoFitDoneRef, fittedPoseRef);
+                labelRectsRef.current = [];
+              }}
+              onRenderFramePre={() => {
+                labelRectsRef.current = [];
+                if (autoFitDoneRef.current) {
+                  settleGraphCamera(
+                    fgRef.current,
+                    autoFitDoneRef,
+                    fittedPoseRef,
+                  );
+                }
+              }}
+              linkColor={(link: unknown) => {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const l = link as any;
+                const sSlug = typeof l.source === "object" ? l.source.slug : l.source;
+                const tSlug = typeof l.target === "object" ? l.target.slug : l.target;
+                if (
+                  selectedSlug &&
+                  (sSlug === selectedSlug || tSlug === selectedSlug)
+                ) {
+                  return "rgba(255,106,0,0.55)";
+                }
+                if (selectedSlug) return "rgba(14,14,16,0.06)";
+                return "rgba(14,14,16,0.12)";
+              }}
+              linkWidth={(link: unknown) => {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const l = link as any;
+                const sSlug = typeof l.source === "object" ? l.source.slug : l.source;
+                const tSlug = typeof l.target === "object" ? l.target.slug : l.target;
+                if (
+                  selectedSlug &&
+                  (sSlug === selectedSlug || tSlug === selectedSlug)
+                ) {
+                  return 1.6;
+                }
+                return 0.6;
+              }}
+              linkDirectionalArrowLength={3}
+              linkDirectionalArrowRelPos={0.92}
+              onNodeHover={(node: unknown) => {
+                const n = node as { slug?: string } | null;
+                setHoveredSlug(n?.slug ?? null);
+                if (wrapperRef.current) {
+                  wrapperRef.current.style.cursor = n ? "pointer" : "default";
+                }
+              }}
+              onNodeClick={(node: unknown) => {
+                const n = node as { slug?: string } | null;
+                if (n?.slug) setSelectedSlug(n.slug);
+              }}
+              onBackgroundClick={() => setSelectedSlug(null)}
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              nodeCanvasObject={(node: any, ctx: CanvasRenderingContext2D, scale: number) => {
+                const radius = Math.max(4, Math.min(14, 4 + Math.sqrt(node.degree || 1) * 1.6));
+                const isSelected = node.slug === selectedSlug;
+                const isHovered = node.slug === hoveredSlug;
+                const isNeighbor =
+                  !!selectedSlug &&
+                  selectedNeighbors.some((nb) => nb.slug === node.slug);
+                const fill = SECTION_COLORS[node.section] || SECTION_COLORS.other;
+                const ring = TIER_RING[node.tier] || "#999";
+
+                ctx.beginPath();
+                ctx.arc(node.x, node.y, radius, 0, 2 * Math.PI, false);
+                ctx.fillStyle = fill;
+                ctx.globalAlpha =
+                  selectedSlug && !(isSelected || isNeighbor) ? 0.18 : 1.0;
+                ctx.fill();
+                ctx.lineWidth = isSelected ? 3 : isHovered ? 2 : 1.5;
+                ctx.strokeStyle = isSelected ? "#0e0e10" : ring;
+                ctx.stroke();
+                ctx.globalAlpha = 1.0;
+
+                const shouldLabel =
+                  isSelected ||
+                  isHovered ||
+                  labelSet.has(node.slug) ||
+                  (labelMode !== "off" && scale > 1.6);
+                if (shouldLabel) {
+                  const fullTitle = node.title as string;
+                  const label =
+                    isSelected || isHovered || scale > 2 || fullTitle.length <= 26
+                      ? fullTitle
+                      : fullTitle.slice(0, 24) + "…";
+                  const fontSize = Math.max(9, 11 / Math.max(0.6, scale));
+                  ctx.font = `${isSelected || isHovered ? "600 " : ""}${fontSize}px ui-sans-serif`;
+                  const padX = 4 / scale;
+                  const padY = 2 / scale;
+                  const textW = ctx.measureText(label).width;
+                  const textH = fontSize;
+                  const gap = 4 / scale;
+
+                  // Try several anchor positions around the node, in priority
+                  // order: below, above, right, left. Pick the first that
+                  // doesn't overlap an already-painted label this frame.
+                  // Selected/hovered always paints (and dominates everything).
+                  const candidates = [
+                    { x: node.x, y: node.y + radius + gap, ax: "center" as const, ay: "top" as const },
+                    { x: node.x, y: node.y - radius - gap, ax: "center" as const, ay: "bottom" as const },
+                    { x: node.x + radius + gap, y: node.y, ax: "left" as const, ay: "middle" as const },
+                    { x: node.x - radius - gap, y: node.y, ax: "right" as const, ay: "middle" as const },
+                  ];
+
+                  function rectFor(c: (typeof candidates)[number]) {
+                    let rx = c.x;
+                    let ry = c.y;
+                    if (c.ax === "center") rx -= textW / 2;
+                    else if (c.ax === "right") rx -= textW;
+                    if (c.ay === "middle") ry -= textH / 2;
+                    else if (c.ay === "bottom") ry -= textH;
+                    return {
+                      x: rx - padX,
+                      y: ry - padY,
+                      w: textW + padX * 2,
+                      h: textH + padY * 2,
+                    };
+                  }
+
+                  function overlaps(
+                    a: { x: number; y: number; w: number; h: number },
+                    b: { x: number; y: number; w: number; h: number }
+                  ) {
+                    return !(
+                      a.x + a.w < b.x ||
+                      b.x + b.w < a.x ||
+                      a.y + a.h < b.y ||
+                      b.y + b.h < a.y
+                    );
+                  }
+
+                  const forced = isSelected || isHovered;
+                  let chosen: { rect: { x: number; y: number; w: number; h: number }; c: (typeof candidates)[number] } | null = null;
+                  for (const c of candidates) {
+                    const r = rectFor(c);
+                    const collision = labelRectsRef.current.some((other) => overlaps(r, other));
+                    if (!collision) {
+                      chosen = { rect: r, c };
+                      break;
+                    }
+                  }
+                  // If everything collides and the label isn't forced (selected/
+                  // hovered), skip drawing it — keeps dense clusters readable.
+                  if (!chosen && forced) {
+                    chosen = { rect: rectFor(candidates[0]), c: candidates[0] };
+                  }
+
+                  if (chosen) {
+                    const { rect, c } = chosen;
+                    ctx.fillStyle = forced
+                      ? "rgba(250,250,247,0.95)"
+                      : "rgba(250,250,247,0.85)";
+                    ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+                    ctx.fillStyle = forced ? "#0e0e10" : "#525258";
+                    ctx.textAlign = c.ax;
+                    ctx.textBaseline = c.ay;
+                    ctx.fillText(label, c.x, c.y);
+                    labelRectsRef.current.push(rect);
+                  }
+                }
+              }}
+              // Increase the painted hit-area so clicks/hovers are forgiving.
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              nodePointerAreaPaint={(node: any, color: string, ctx: CanvasRenderingContext2D) => {
+                const radius = Math.max(8, 6 + Math.sqrt(node.degree || 1) * 1.6);
+                ctx.fillStyle = color;
+                ctx.beginPath();
+                ctx.arc(node.x, node.y, radius, 0, 2 * Math.PI, false);
+                ctx.fill();
+              }}
             />
           )}
         </div>
