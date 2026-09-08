@@ -3,7 +3,14 @@ import { render } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import ForceGraphCanvas, { type ForceGraphCanvasHandle } from "@/components/ForceGraphCanvas";
 import type { GraphResponse } from "@/lib/api";
-import { clearLayoutCacheForTests, type LayoutResponse, type LayoutStart } from "@/lib/graphLayout";
+import { fitCamera } from "@/lib/graphGeometry";
+import {
+  clearLayoutCacheForTests,
+  type LayoutFinal,
+  type LayoutProgress,
+  type LayoutResponse,
+  type LayoutStart,
+} from "@/lib/graphLayout";
 
 const graph: GraphResponse = {
   nodes: [
@@ -84,6 +91,12 @@ function flushFrames(time = performance.now() + 500): void {
   }
 }
 
+function flushOneFrame(time: number): void {
+  const callbacks = [...rafCallbacks.values()];
+  rafCallbacks = new Map();
+  for (const callback of callbacks) callback(time);
+}
+
 function isLayoutStart(message: unknown): message is LayoutStart {
   return Boolean(
     message &&
@@ -107,16 +120,21 @@ function startMessage(worker: MockWorker): LayoutStart {
   return message;
 }
 
-function finalPositions(generation: number, offset = 0): LayoutResponse {
+function progressPositions(generation: number, sequence = 0, offset = 0): LayoutProgress {
   return {
-    kind: "positions",
+    kind: "progress",
     generation,
+    sequence,
     positions: graph.nodes.map((node, index) => ({
       id: node.slug,
       x: index * 100 + offset,
       y: index * 50 + offset,
     })),
   };
+}
+
+function finalPositions(generation: number, sequence = 1, offset = 0): LayoutFinal {
+  return { ...progressPositions(generation, sequence, offset), kind: "final" };
 }
 
 beforeEach(() => {
@@ -184,16 +202,39 @@ beforeEach(() => {
 });
 
 describe("ForceGraphCanvas", () => {
-  it("reveals the first graph only after final positions and camera fit are ready", () => {
+  it("requests final-only worker delivery when reduced motion is enabled", () => {
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: () => ({
+        matches: true,
+        media: "(prefers-reduced-motion: reduce)",
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      }),
+    });
+    render(<ForceGraphCanvas graph={graph} sectionFilter="" selectedSlug={null} labelMode="off" onSelect={vi.fn()} />);
+    expect(startMessage(MockWorker.instances[0]).delivery).toBe("final-only");
+  });
+
+  it("reveals the fitted warmup layout on first progress and streams through final", () => {
     render(<ForceGraphCanvas graph={graph} sectionFilter="" selectedSlug={null} labelMode="off" onSelect={vi.fn()} />);
     act(() => { flushFrames(); });
     expect(context.arc).not.toHaveBeenCalled();
     expect(context.fillText).toHaveBeenCalledWith("Preparing graph…", 400, 300);
     const worker = MockWorker.instances[0];
-    act(() => { worker.emit(finalPositions(startMessage(worker).generation)); });
+    const generation = startMessage(worker).generation;
+    act(() => { worker.emit(progressPositions(generation)); });
     expect(rafCallbacks.size).toBe(1);
     act(() => { flushFrames(); });
     expect(context.arc).toHaveBeenCalled();
+    expect(worker.terminated).toBe(false);
+    act(() => { worker.emit(finalPositions(generation)); });
+    expect(worker.terminated).toBe(true);
+    act(() => { flushFrames(); });
     expect(rafCallbacks.size).toBe(0);
   });
 
@@ -209,7 +250,12 @@ describe("ForceGraphCanvas", () => {
     render(<StrictMode><ForceGraphCanvas graph={graph} sectionFilter="" selectedSlug={null} labelMode="off" onSelect={vi.fn()} /></StrictMode>);
     const active = MockWorker.instances.at(-1);
     if (!active) throw new Error("no active worker");
-    act(() => { active.emit(finalPositions(startMessage(active).generation)); flushFrames(); });
+    act(() => {
+      const generation = startMessage(active).generation;
+      active.emit(progressPositions(generation));
+      active.emit(finalPositions(generation));
+      flushFrames();
+    });
     expect(context.stroke).toHaveBeenCalled();
     expect(rafCallbacks.size).toBe(0);
   });
@@ -219,7 +265,9 @@ describe("ForceGraphCanvas", () => {
     const view = render(<ForceGraphCanvas ref={ref} graph={graph} sectionFilter="" selectedSlug={null} labelMode="off" onSelect={vi.fn()} />);
     const initial = MockWorker.instances[0];
     act(() => {
-      initial.emit(finalPositions(startMessage(initial).generation));
+      const generation = startMessage(initial).generation;
+      initial.emit(progressPositions(generation));
+      initial.emit(finalPositions(generation));
       flushFrames();
       ref.current?.relax();
     });
@@ -242,7 +290,7 @@ describe("ForceGraphCanvas", () => {
     expect(MockPath2D.instances.length).toBe(pathCount);
     act(() => {
       canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 1, clientX: x + 50, clientY: y }));
-      first.emit(finalPositions(start.generation, 999));
+      first.emit(finalPositions(start.generation, 1, 999));
       flushFrames();
       ref.current?.relax();
     });
@@ -272,6 +320,7 @@ describe("ForceGraphCanvas", () => {
     expect(Math.max(...MockPath2D.instances.map((path) => path.lineCount))).toBe(3);
 
     act(() => {
+      first.emit(progressPositions(firstStart.generation));
       first.emit(finalPositions(firstStart.generation));
       flushFrames();
     });
@@ -298,10 +347,17 @@ describe("ForceGraphCanvas", () => {
     const second = MockWorker.instances[1];
     const secondStart = startMessage(second);
     expect(secondStart.generation).toBeGreaterThan(firstStart.generation);
-    act(() => { first.emit(finalPositions(firstStart.generation, 999)); });
+    expect(secondStart.mode).toBe("relax");
+    expect(secondStart.nodes.map(({ x, y }) => ({ x, y }))).toEqual([
+      { x: 0, y: 0 },
+      { x: 100, y: 50 },
+      { x: 200, y: 100 },
+    ]);
+    act(() => { first.emit(finalPositions(firstStart.generation, 1, 999)); });
     expect(second.terminated).toBe(false);
     act(() => {
-      second.emit(finalPositions(secondStart.generation, 10));
+      second.emit(progressPositions(secondStart.generation, 0, 10));
+      second.emit(finalPositions(secondStart.generation, 1, 10));
       flushFrames();
     });
     expect(second.terminated).toBe(true);
@@ -319,6 +375,37 @@ describe("ForceGraphCanvas", () => {
       />,
     );
     expect(MockWorker.instances).toHaveLength(2);
+  });
+
+  it("keeps every edge during streamed interpolation and never snaps the camera on final", () => {
+    render(<ForceGraphCanvas graph={graph} sectionFilter="" selectedSlug={null} labelMode="off" onSelect={vi.fn()} />);
+    const worker = MockWorker.instances[0];
+    const generation = startMessage(worker).generation;
+    act(() => {
+      worker.emit(progressPositions(generation));
+      flushFrames();
+    });
+    const cameraBeforeFinal = context.translate.mock.lastCall;
+    const pathIndex = MockPath2D.instances.length;
+    act(() => { worker.emit(finalPositions(generation, 1, 200)); });
+    expect(context.translate.mock.lastCall).toEqual(cameraBeforeFinal);
+    expect(worker.terminated).toBe(true);
+    const midpoint = performance.now() + 350;
+    act(() => {
+      flushOneFrame(midpoint);
+      flushOneFrame(midpoint);
+    });
+    const streamedPaths = MockPath2D.instances.slice(pathIndex);
+    expect(streamedPaths.length).toBeGreaterThan(0);
+    expect(streamedPaths.every((path) => path.lineCount === graph.edges.length)).toBe(true);
+    expect(context.translate.mock.lastCall).not.toEqual(cameraBeforeFinal);
+    const finalMap = new Map(
+      finalPositions(generation, 1, 200).positions.map(({ id, x, y }) => [id, { x, y }]),
+    );
+    const targetCamera = fitCamera(graph.nodes, finalMap, { width: 800, height: 600 });
+    const [midX, midY] = context.translate.mock.lastCall ?? [];
+    expect(midX).not.toBeCloseTo(targetCamera.x);
+    expect(midY).not.toBeCloseTo(targetCamera.y);
   });
 
   it("stays usable after worker failure and terminates an active worker on unmount", () => {
