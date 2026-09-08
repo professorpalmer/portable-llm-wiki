@@ -3,23 +3,29 @@ import type { GraphEdge, GraphResponse } from "@/lib/api";
 export type GraphPosition = Readonly<{ x: number; y: number }>;
 export type GraphPositions = ReadonlyMap<string, GraphPosition>;
 export type LayoutNode = Readonly<{ id: string; degree: number; x: number; y: number }>;
+export type LayoutMode = "initial" | "relax";
+export type LayoutDelivery = "stream" | "final-only";
 export type LayoutStart = Readonly<{
   kind: "start";
   generation: number;
+  mode: LayoutMode;
+  delivery: LayoutDelivery;
   nodes: LayoutNode[];
   links: GraphEdge[];
 }>;
-export type LayoutSuccess = Readonly<{
-  kind: "positions";
+type LayoutPositions = Readonly<{
   generation: number;
+  sequence: number;
   positions: Array<Readonly<{ id: string; x: number; y: number }>>;
 }>;
+export type LayoutProgress = LayoutPositions & Readonly<{ kind: "progress" }>;
+export type LayoutFinal = LayoutPositions & Readonly<{ kind: "final" }>;
 export type LayoutFailure = Readonly<{
   kind: "error";
   generation: number;
   message: string;
 }>;
-export type LayoutResponse = LayoutSuccess | LayoutFailure;
+export type LayoutResponse = LayoutProgress | LayoutFinal | LayoutFailure;
 
 const CACHE_LIMIT = 4;
 const SINGLE_TENANT_SCOPE = "single-tenant";
@@ -111,7 +117,7 @@ export function layoutNodes(graph: GraphResponse, positions: GraphPositions): La
   });
 }
 
-export function positionsFromResponse(response: LayoutSuccess): Map<string, GraphPosition> {
+export function positionsFromResponse(response: LayoutProgress | LayoutFinal): Map<string, GraphPosition> {
   return new Map(
     response.positions
       .filter((position) => Number.isFinite(position.x) && Number.isFinite(position.y))

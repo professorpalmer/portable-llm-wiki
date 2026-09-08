@@ -32,6 +32,7 @@ import {
   visibleLinks,
   writeCachedLayout,
   type GraphPosition,
+  type LayoutMode,
   type LayoutResponse,
   type LayoutStart,
 } from "@/lib/graphLayout";
@@ -78,8 +79,8 @@ const TIER_RING: Readonly<Record<string, string>> = {
   private: "#ef4444",
 };
 
-const LAYOUT_MOTION_MS = 220;
-const CAMERA_MOTION_MS = 220;
+const LAYOUT_MOTION_MS = 80;
+const CAMERA_MOTION_MS = 700;
 const TEXT_CACHE_LIMIT = 512;
 
 function edgePath(edges: ReadonlyArray<GraphEdge>, positions: ReadonlyMap<string, GraphPosition>): Path2D {
@@ -137,6 +138,7 @@ const ForceGraphCanvas = forwardRef<ForceGraphCanvasHandle, ForceGraphCanvasProp
     const hoverRef = useRef<string | null>(null);
     const workerRef = useRef<Worker | null>(null);
     const generationRef = useRef(0);
+    const layoutSequenceRef = useRef(-1);
     const drawFrameRef = useRef<number | null>(null);
     const positionIndexesDirtyRef = useRef(false);
     const motionFrameRef = useRef<number | null>(null);
@@ -149,7 +151,7 @@ const ForceGraphCanvas = forwardRef<ForceGraphCanvasHandle, ForceGraphCanvasProp
     const topologyRef = useRef("");
     const tenantRef = useRef(tenant);
     const drawRef = useRef<() => void>(() => undefined);
-    const startLayoutRef = useRef<() => void>(() => undefined);
+    const startLayoutRef = useRef<(mode: LayoutMode) => void>(() => undefined);
 
     const fingerprint = useMemo(() => topologyFingerprint(graph), [graph]);
     const nodesById = useMemo(
@@ -367,58 +369,74 @@ const ForceGraphCanvas = forwardRef<ForceGraphCanvasHandle, ForceGraphCanvasProp
       }
     }, [animateCamera, requestDraw]);
 
-    const finishLayout = useCallback((response: LayoutResponse) => {
+    const acceptLayoutResponse = useCallback((response: LayoutResponse) => {
       if (response.generation !== generationRef.current) return;
-      generationRef.current += 1;
-      workerRef.current?.terminate();
-      workerRef.current = null;
-      const firstLayout = !layoutReadyRef.current;
-      layoutReadyRef.current = true;
       if (response.kind === "error") {
+        generationRef.current += 1;
+        workerRef.current?.terminate();
+        workerRef.current = null;
+        layoutReadyRef.current = true;
         if (!userNavigatedRef.current) recenter(false);
         requestDraw();
         return;
       }
+      if (response.sequence <= layoutSequenceRef.current) return;
       const target = positionsFromResponse(response);
-      if (target.size !== graph.nodes.length || graph.nodes.some((node) => !target.has(node.slug))) {
-        if (!userNavigatedRef.current) recenter(false);
-        return;
-      }
-      writeCachedLayout(tenantRef.current, topologyRef.current, target);
+      if (target.size !== graph.nodes.length || graph.nodes.some((node) => !target.has(node.slug))) return;
+      layoutSequenceRef.current = response.sequence;
+      const firstReveal = !layoutReadyRef.current;
+      layoutReadyRef.current = true;
       const start = new Map(positionsRef.current);
-      const applyFinal = () => {
+      const applyTarget = () => {
         positionsRef.current = target;
         rebuildPositionIndexes();
         requestDraw();
-        if (firstLayout || !userNavigatedRef.current) recenter(false);
       };
-      if (firstLayout || reducedMotionRef.current) {
-        applyFinal();
-        return;
+      if (firstReveal || reducedMotionRef.current) applyTarget();
+      else {
+        if (motionFrameRef.current !== null) window.cancelAnimationFrame(motionFrameRef.current);
+        const startedAt = performance.now();
+        const step = (now: number) => {
+          const progress = Math.min(1, (now - startedAt) / LAYOUT_MOTION_MS);
+          positionsRef.current = interpolatePositions(start, target, progress);
+          rebuildPositionIndexes();
+          requestDraw();
+          if (progress < 1) motionFrameRef.current = window.requestAnimationFrame(step);
+          else {
+            motionFrameRef.current = null;
+            applyTarget();
+          }
+        };
+        motionFrameRef.current = window.requestAnimationFrame(step);
       }
-      if (motionFrameRef.current !== null) window.cancelAnimationFrame(motionFrameRef.current);
-      const startedAt = performance.now();
-      const step = (now: number) => {
-        const progress = Math.min(1, (now - startedAt) / LAYOUT_MOTION_MS);
-        positionsRef.current = interpolatePositions(start, target, progress);
-        rebuildPositionIndexes();
-        requestDraw();
-        if (progress < 1) motionFrameRef.current = window.requestAnimationFrame(step);
-        else {
-          motionFrameRef.current = null;
-          applyFinal();
+      if (!userNavigatedRef.current) {
+        const targetCamera = fitCamera(visibleNodesRef.current, target, viewportRef.current);
+        if (firstReveal) {
+          cameraRef.current = targetCamera;
+          requestDraw();
+        } else {
+          const camera = cameraRef.current;
+          const scaleChange = Math.abs(targetCamera.scale / camera.scale - 1);
+          const centerChange = Math.hypot(targetCamera.x - camera.x, targetCamera.y - camera.y);
+          if (scaleChange > 0.08 || centerChange > 24) animateCamera(targetCamera);
         }
-      };
-      motionFrameRef.current = window.requestAnimationFrame(step);
-    }, [graph.nodes, rebuildPositionIndexes, recenter, requestDraw]);
+      }
+      if (response.kind === "final") {
+        writeCachedLayout(tenantRef.current, topologyRef.current, target);
+        generationRef.current += 1;
+        workerRef.current?.terminate();
+        workerRef.current = null;
+      }
+    }, [animateCamera, graph.nodes, rebuildPositionIndexes, recenter, requestDraw]);
 
-    const startLayout = useCallback(() => {
+    const startLayout = useCallback((mode: LayoutMode) => {
       if (motionFrameRef.current !== null) window.cancelAnimationFrame(motionFrameRef.current);
       motionFrameRef.current = null;
       workerRef.current?.terminate();
       workerRef.current = null;
       generationRef.current += 1;
       const generation = generationRef.current;
+      layoutSequenceRef.current = -1;
       if (typeof Worker === "undefined") {
         layoutReadyRef.current = true;
         if (!userNavigatedRef.current) recenter(false);
@@ -428,19 +446,21 @@ const ForceGraphCanvas = forwardRef<ForceGraphCanvasHandle, ForceGraphCanvasProp
       try {
         const worker = new Worker(new URL("../workers/graphLayout.worker.ts", import.meta.url), { type: "module" });
         workerRef.current = worker;
-        worker.onmessage = (event: MessageEvent<LayoutResponse>) => finishLayout(event.data);
-        worker.onerror = () => finishLayout({ kind: "error", generation, message: "layout worker failed" });
+        worker.onmessage = (event: MessageEvent<LayoutResponse>) => acceptLayoutResponse(event.data);
+        worker.onerror = () => acceptLayoutResponse({ kind: "error", generation, message: "layout worker failed" });
         const message: LayoutStart = {
           kind: "start",
           generation,
+          mode,
+          delivery: reducedMotionRef.current ? "final-only" : "stream",
           nodes: layoutNodes(graph, positionsRef.current),
           links: graph.edges.map((edge) => ({ source: edge.source, target: edge.target })),
         };
         worker.postMessage(message);
       } catch {
-        finishLayout({ kind: "error", generation, message: "layout worker unavailable" });
+        acceptLayoutResponse({ kind: "error", generation, message: "layout worker unavailable" });
       }
-    }, [finishLayout, graph, recenter, requestDraw]);
+    }, [acceptLayoutResponse, graph, recenter, requestDraw]);
     startLayoutRef.current = startLayout;
 
     useImperativeHandle(ref, () => ({
@@ -448,7 +468,7 @@ const ForceGraphCanvas = forwardRef<ForceGraphCanvasHandle, ForceGraphCanvasProp
         userNavigatedRef.current = true;
         recenter(true);
       },
-      relax: () => startLayoutRef.current(),
+      relax: () => startLayoutRef.current("relax"),
     }), [recenter]);
 
     useEffect(() => {
@@ -487,7 +507,7 @@ const ForceGraphCanvas = forwardRef<ForceGraphCanvasHandle, ForceGraphCanvasProp
       rankedNodesRef.current = rankedNodes;
       visibleEdgesRef.current = visibleEdges;
       rebuildPositionIndexes();
-      if (layoutReadyRef.current) recenter(true);
+      if (layoutReadyRef.current && !userNavigatedRef.current) recenter(true);
       else requestDraw();
     }, [rankedNodes, rebuildPositionIndexes, recenter, requestDraw, visibleEdges, visibleNodes]);
 
@@ -500,7 +520,7 @@ const ForceGraphCanvas = forwardRef<ForceGraphCanvasHandle, ForceGraphCanvasProp
       layoutReadyRef.current = cached !== null;
       rebuildPositionIndexes();
       if (cached) recenter(false);
-      else startLayout();
+      else startLayout("initial");
       return () => {
         generationRef.current += 1;
         workerRef.current?.terminate();
