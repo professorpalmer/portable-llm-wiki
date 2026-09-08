@@ -180,7 +180,7 @@ export default function GraphPage() {
       <div className="mt-4 flex gap-2 flex-wrap items-center">
         <span className="text-xs text-ink-muted uppercase tracking-wider">Filter:</span>
         <button
-          onClick={() => setSectionFilter("")}
+          onClick={() => { setSectionFilter(""); setSelectedSlug(null); }}
           className={`text-xs px-2 py-1 rounded border ${
             sectionFilter === ""
               ? "border-ink text-ink"
@@ -192,7 +192,7 @@ export default function GraphPage() {
         {Object.entries(sectionCounts).map(([s, n]) => (
           <button
             key={s}
-            onClick={() => setSectionFilter(s)}
+            onClick={() => { setSectionFilter(s); setSelectedSlug(null); }}
             className={`text-xs px-2 py-1 rounded border flex items-center gap-1.5 ${
               sectionFilter === s
                 ? "border-ink text-ink"
