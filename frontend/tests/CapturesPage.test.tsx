@@ -21,11 +21,12 @@ vi.mock("@/lib/api", () => ({
   ownerReingestRaw: vi.fn(),
 }));
 
-import { ownerListRaw, ownerReadRaw } from "@/lib/api";
+import { ownerListRaw, ownerReadRaw, ownerReingestRaw } from "@/lib/api";
 import CapturesPage from "@/app/owner/captures/page";
 
 const mockedList = vi.mocked(ownerListRaw);
 const mockedRead = vi.mocked(ownerReadRaw);
+const mockedReingest = vi.mocked(ownerReingestRaw);
 
 const SAMPLE_ROWS = [
   {
@@ -55,6 +56,7 @@ describe("CapturesPage", () => {
   beforeEach(() => {
     mockedList.mockReset();
     mockedRead.mockReset();
+    mockedReingest.mockReset();
     window.localStorage.setItem("llmwiki:ownerToken", "fake-test-token");
   });
 
@@ -140,5 +142,31 @@ describe("CapturesPage", () => {
     expect(
       screen.getByText("raw/conversations/2024-01-01-paste.md"),
     ).toBeInTheDocument();
+  });
+
+  it("reports pages drafted by the hosted re-ingest fallback", async () => {
+    mockedList.mockResolvedValue([SAMPLE_ROWS[0]]);
+    mockedReingest.mockResolvedValue({
+      rel_path: SAMPLE_ROWS[0].rel_path,
+      orchestrator: { error: "puppetmaster binary not found" },
+      drafted: {
+        pages_created: 2,
+        pages: [
+          { slug: "one", title: "One", section: "concepts" },
+          { slug: "two", title: "Two", section: "decisions" },
+        ],
+        backend: "openai",
+        model: "test-model",
+        warnings: [],
+      },
+    });
+    const user = userEvent.setup();
+
+    render(<CapturesPage />);
+    await user.click(await screen.findByRole("button", { name: "re-ingest" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/re-ingest drafted 2 pages/i)).toBeInTheDocument();
+    });
   });
 });

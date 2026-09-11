@@ -353,8 +353,19 @@ export type IngestResult = {
     started_at?: string;
     error?: string;
   } | null;
+  drafted?: DirectDraftResult | null;
   /** Durability verdict — present on all content-create responses. */
   sync?: SyncVerdict;
+};
+
+export type DirectDraftResult = {
+  pages_created?: number;
+  pages?: Array<{ slug: string; title: string; section: string }>;
+  backend?: string;
+  model?: string;
+  warnings?: string[];
+  error?: string;
+  kind?: "no_llm_configured" | "draft_failed";
 };
 
 export async function ownerIngest(input: {
@@ -1059,17 +1070,26 @@ export async function ownerDeleteRaw(
   return r.json() as Promise<{ ok: boolean; rel_path: string; sync?: SyncVerdict }>;
 }
 
-export async function ownerReingestRaw(relPath: string, tenant?: string): Promise<{
-  tracking_id: string;
-  kind: string;
-  started_at: string;
-}> {
+export type ReingestRawResult = {
+  tracking_id?: string;
+  kind?: string;
+  started_at?: string;
+  rel_path?: string;
+  orchestrator?: { error?: string };
+  drafted?: DirectDraftResult | null;
+  sync?: SyncVerdict;
+};
+
+export async function ownerReingestRaw(
+  relPath: string,
+  tenant?: string,
+): Promise<ReingestRawResult> {
   const stripped = relPath.startsWith("raw/") ? relPath.slice(4) : relPath;
   const r = await apiFetch(
     `${wikiBase(tenant)}/owner/raw/${encodeRawPath(stripped)}/reingest`,
     { method: "POST", headers: ownerHeaders() }
   );
-  return asJson(r);
+  return asJson<ReingestRawResult>(r);
 }
 
 // Encode path segments of a raw rel_path but preserve the slashes so the

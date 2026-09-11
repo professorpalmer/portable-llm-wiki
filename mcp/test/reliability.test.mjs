@@ -338,6 +338,32 @@ test("formatIngestReport distinguishes orchestrator running from raw save", () =
   assert.match(report, /will_sync/);
 });
 
+test("formatIngestReport reports completed direct drafting after orchestrator fallback", () => {
+  const report = formatIngestReport(
+    {
+      ok: true,
+      rel_path: "raw/conversations/x.md",
+      size: 10,
+      orchestrator: { error: "puppetmaster binary not found" },
+      drafted: {
+        pages_created: 2,
+        pages: [
+          { slug: "one", title: "One", section: "concepts" },
+          { slug: "two", title: "Two", section: "decisions" },
+        ],
+        backend: "openai",
+        model: "test-model",
+        warnings: [],
+      },
+    },
+    true
+  );
+  assert.match(report, /orchestrator: failed/);
+  assert.match(report, /wiki_graph_pages: updated_by_direct_drafter \(2 pages\)/);
+  assert.match(report, /direct_drafter: completed/);
+  assert.doesNotMatch(report, /wiki_graph_pages: not_updated_by_raw_save/);
+});
+
 test("normalizeOrchestratorState covers pending/failed/completed", () => {
   assert.equal(
     normalizeOrchestratorState({ tracking_id: "t1", status: "pending" }, true)

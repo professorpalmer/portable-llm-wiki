@@ -8,6 +8,24 @@ ordered newest-first.
 
 ## Unreleased
 
+## 0.2.4. Hosted ingest completes without Puppetmaster
+
+Hosted owner ingest could save a raw source but fail to produce wiki pages
+because the Render backend does not include the `puppetmaster` executable.
+The capture-paste path already fell back to the configured direct LLM; the
+MCP ingest and capture-history re-ingest paths did not.
+
+- **Direct hosted fallback.** Fresh owner ingest and single raw-file re-ingest
+  now draft private pages through the existing direct drafter when
+  Puppetmaster cannot start.
+- **Honest response contracts.** Backend responses retain the orchestrator
+  error and separately report direct drafting results and durable sync state.
+- **Visible outcomes.** Capture history reports drafted-page counts instead
+  of rendering an undefined job ID. The MCP connector distinguishes raw-only,
+  queued orchestrator, successful direct drafting, and drafting failure.
+- **Connector patch.** The MCP package advances to **0.1.5**.
+- Backend, frontend, and MCP regression suites cover the hosted fallback.
+
 ## 0.2.3. Named titles survive query retrieval
 
 `query_wiki` could answer a question that named *State, Not Tokens* from

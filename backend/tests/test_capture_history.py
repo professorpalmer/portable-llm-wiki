@@ -5,8 +5,8 @@ Covers:
   frontmatter, and excerpt_chars is clamped to [0, 1000]
 - `/owner/raw/{path}` and `DELETE /owner/raw/{path}` honor path-traversal
   guards (the most security-sensitive bit)
-- `/owner/raw/{path}/reingest` 404s on missing files and 503s when the
-  orchestrator isn't installed (which is the case in CI)
+- `/owner/raw/{path}/reingest` 404s on missing files and reports the hosted
+  direct-drafter fallback when the orchestrator is unavailable
 - `/owner/import/extract-pdf` rejects garbage, validates size, and
   returns text + page_count when given a real PDF
 
@@ -123,11 +123,11 @@ def test_reingest_raw_404_when_missing(client, owner_headers):
     assert r.status_code == 404
 
 
-def test_reingest_raw_responds_with_either_503_or_job_id(
+def test_reingest_raw_reports_hosted_fallback_when_worker_is_missing(
     client, owner_headers, wiki_root, monkeypatch
 ):
-    """The reingest endpoint returns a clean 503 (not a 500/NameError) when
-    the orchestrator can't be spawned.
+    """The reingest endpoint exposes the direct fallback result when the
+    orchestrator can't be spawned.
 
     We force PUPPETMASTER_BIN to a path that can't exist so the test is
     deterministic AND never spawns a real billable Cursor agent. Without
@@ -145,9 +145,10 @@ def test_reingest_raw_responds_with_either_503_or_job_id(
 
     rel = _write_raw(wiki_root, "conversations", "queue-me.md", "body")
     r = client.post(f"/owner/{rel}/reingest", headers=owner_headers)
-    assert r.status_code == 503
-    detail = r.json()["detail"].lower()
-    assert "orchestrator" in detail or "puppetmaster" in detail
+    assert r.status_code == 200
+    body = r.json()
+    assert "puppetmaster" in body["orchestrator"]["error"].lower()
+    assert body["drafted"]["kind"] == "no_llm_configured"
 
 
 # ---------------------------------------------------------------------------

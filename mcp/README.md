@@ -126,7 +126,7 @@ API (`/wiki/manifest.json` returns 404).
 | `search_wiki` | Fast keyword search across visible pages. | no |
 | `query_wiki` | The primary tool. Natural-language question → graph-aware retrieval → sourced answer with citations. | no |
 | `get_neighbors` | All pages within N hops of a slug along the wikilink graph. | no |
-| `ingest_source` | Save a new raw source + optionally kick off the ingest orchestrator. Fails closed if not owner-capable. | **yes** |
+| `ingest_source` | Save a new raw source, then optionally start the orchestrator or hosted direct drafter. Fails closed if not owner-capable. | **yes** |
 | `ingest_job_status` | Bounded polling of `GET /owner/jobs/{tracking_id}` (+ optional persistence). Verifies orchestrator outcome honestly. | **yes** |
 | `lint_wiki` | Structural lint report (orphans, stale, broken provenance, etc.). | **yes** |
 
@@ -144,12 +144,14 @@ API (`/wiki/manifest.json` returns 404).
 1. Call `connection_status` — confirm `capabilities.write` is true.
 2. Call `ingest_source` — response separates:
    - `raw_file: saved` (disk write only)
-   - `wiki_graph_pages: not_updated_by_raw_save`
+   - `wiki_graph_pages: not_updated_by_raw_save | updated_by_direct_drafter`
    - `orchestrator: not_requested | pending | running | failed | completed | skipped`
+   - `direct_drafter: completed | failed` when the hosted fallback runs
    - `durable_sync: will_sync | local_only` (from the backend sync verdict)
-3. If you passed `run_orchestrator=true`, call `ingest_job_status` with the
-   `tracking_id` and optional bounded `poll_attempts` / `poll_interval_ms`
-   (caps: 20 attempts, 5000 ms). Do not treat a raw save as a graph update.
+3. When the response includes a `tracking_id`, call `ingest_job_status` with
+   optional bounded `poll_attempts` / `poll_interval_ms` (caps: 20 attempts,
+   5000 ms). A successful synchronous direct-drafter result needs no polling.
+   Do not treat a raw save by itself as a graph update.
 
 Without an owner-capable token, owner-only tools return an actionable error
 explaining that browser OAuth cookies are unavailable to stdio and that a
