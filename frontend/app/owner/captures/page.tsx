@@ -108,9 +108,21 @@ export default function CapturesPage() {
     setActionMsg(null);
     try {
       const result = await ownerReingestRaw(rel);
-      setActionMsg(
-        `re-ingest queued (job ${result.tracking_id}). watch /owner for status`,
-      );
+      setSync(result.sync ?? null);
+      if (result.drafted?.error) {
+        setActionMsg(`failed: ${result.drafted.error}`);
+      } else if (result.drafted) {
+        const count = result.drafted.pages_created ?? 0;
+        setActionMsg(
+          `re-ingest drafted ${count} page${count === 1 ? "" : "s"}`,
+        );
+      } else if (result.tracking_id) {
+        setActionMsg(
+          `re-ingest queued (job ${result.tracking_id}). watch /owner for status`,
+        );
+      } else {
+        setActionMsg("failed: re-ingest returned no job or drafted pages");
+      }
     } catch (e) {
       setActionMsg(`failed: ${(e as Error).message}`);
     }

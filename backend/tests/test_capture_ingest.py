@@ -40,7 +40,7 @@ def _orchestrator_always_fails(monkeypatch):
     OrchestratorUnavailable from start_ingest_job. We also stub the
     main module's import binding because it caches the function."""
 
-    def boom(_rel_path, _note=""):
+    def boom(_rel_path, _note="", **_kwargs):
         raise _orchestrator.OrchestratorUnavailable(
             "puppetmaster binary not found"
         )
@@ -197,6 +197,127 @@ def test_paste_with_ingest_falls_back_to_direct_drafter(
     decisions = list((wiki / "decisions").glob("*use-postgres-for-events.md"))
     assert decisions, list((wiki / "decisions").iterdir())
     assert (wiki / "projects" / "events-table.md").exists()
+
+
+def test_owner_ingest_falls_back_to_direct_drafter(
+    client, owner_headers, wiki_root, monkeypatch
+):
+    """The MCP-facing ingest endpoint must work on hosted Render too.
+
+    ``/owner/ingest`` predates the capture endpoint and used to report the
+    missing Puppetmaster binary without attempting the direct drafter.
+    """
+    _orchestrator_always_fails(monkeypatch)
+    _stub_drafter_returns(
+        monkeypatch,
+        pages=[
+            {
+                "slug": "hosted-ingest-decision",
+                "title": "Hosted Ingest Decision",
+                "section": "decisions",
+                "tier": "private",
+                "tags": ["ingest"],
+                "body": "## Decision\n\nUse the hosted direct drafter fallback.",
+            }
+        ],
+    )
+
+    r = client.post(
+        "/owner/ingest",
+        headers=owner_headers,
+        json={
+            "slug": "hosted-ingest-fallback",
+            "content": _MIN_BODY,
+            "subdir": "conversations",
+            "note": "MCP capture",
+            "run_orchestrator": True,
+        },
+    )
+
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert "error" in body["orchestrator"]
+    assert body["drafted"]["pages_created"] == 1
+    assert list(
+        (wiki_root / "wiki" / "decisions").glob("*hosted-ingest-decision.md")
+    )
+
+
+def test_owner_ingest_does_not_mask_an_unexpected_start_failure(
+    client, owner_headers, wiki_root, monkeypatch
+):
+    def fail_unexpectedly(_rel_path, _note=""):
+        raise RuntimeError("unexpected startup failure")
+
+    async def fail_if_called(**_kwargs):
+        raise AssertionError("direct drafter must only replace an unavailable worker")
+
+    monkeypatch.setattr("app.main.start_ingest_job", fail_unexpectedly)
+    monkeypatch.setattr(
+        "app.main._draft_capture_without_orchestrator", fail_if_called
+    )
+
+    r = client.post(
+        "/owner/ingest",
+        headers=owner_headers,
+        json={
+            "slug": "unexpected-start-failure",
+            "content": _MIN_BODY,
+            "subdir": "conversations",
+            "run_orchestrator": True,
+        },
+    )
+
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["orchestrator"] == {"error": "unexpected startup failure"}
+    assert body["drafted"] is None
+
+
+def test_existing_raw_reingest_falls_back_to_direct_drafter(
+    client, owner_headers, wiki_root, monkeypatch
+):
+    """A saved raw source remains processable after a hosted PM failure."""
+    saved = client.post(
+        "/owner/ingest",
+        headers=owner_headers,
+        json={
+            "slug": "reingest-fallback",
+            "content": _MIN_BODY,
+            "subdir": "conversations",
+            "run_orchestrator": False,
+        },
+    )
+    assert saved.status_code == 201, saved.text
+    rel_path = saved.json()["rel_path"]
+
+    _orchestrator_always_fails(monkeypatch)
+    _stub_drafter_returns(
+        monkeypatch,
+        pages=[
+            {
+                "slug": "reingested-source",
+                "title": "Reingested Source",
+                "section": "projects",
+                "tier": "private",
+                "tags": ["ingest"],
+                "body": "## Source\n\nRecovered through the direct drafter.",
+            }
+        ],
+    )
+
+    stripped = rel_path.removeprefix("raw/")
+    r = client.post(
+        f"/owner/raw/{stripped}/reingest",
+        headers=owner_headers,
+    )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["rel_path"] == rel_path
+    assert "error" in body["orchestrator"]
+    assert body["drafted"]["pages_created"] == 1
+    assert (wiki_root / "wiki" / "projects" / "reingested-source.md").exists()
 
 
 def test_paste_drafted_pages_default_to_private_tier(

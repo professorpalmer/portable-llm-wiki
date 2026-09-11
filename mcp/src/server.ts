@@ -53,7 +53,7 @@ function asError(err: unknown): {
 const server = new McpServer(
   {
     name: "portable-llm-wiki",
-    version: "0.1.4",
+    version: "0.1.5",
   },
   {
     instructions: `You are connected to a Portable LLM Wiki via stdio MCP at ${wiki.baseUrl}.
@@ -70,8 +70,8 @@ Typical flow:
 2. For specific questions, call \`query_wiki\` — graph-aware retrieval with sources.
 3. For exploration, use \`search_wiki\` (keyword) or \`get_neighbors\` (graph walk).
 4. \`read_page\` returns the full body of a single page when you need quotes.
-5. Owner-only: \`ingest_source\` saves a raw file and may start an orchestrator job;
-   it does NOT mean wiki graph pages are updated. Use \`ingest_job_status\` to verify.
+5. Owner-only: \`ingest_source\` saves a raw file and may start an orchestrator job
+   or draft pages synchronously. Trust the returned status; poll a tracking ID when present.
 
 Every page has a tier (\`public\`/\`recruiter\`/\`friend\`/\`private\`). Pages above
 your tier are invisible — don't synthesize claims about them.`,
@@ -337,7 +337,7 @@ server.registerTool(
   {
     title: "Ingest a new source into the wiki (owner-only)",
     description:
-      "Owner-only. Probes owner capability BEFORE sending content (stdio has no browser cookies). Saves raw content under raw/<subdir>/YYYY-MM-DD-<slug>.md and optionally starts the ingest orchestrator. Reports raw_file vs orchestrator vs durable_sync separately — never claims graph pages are updated merely because a raw file was saved. Use ingest_job_status with the returned tracking_id to verify orchestrator progress.",
+      "Owner-only. Probes owner capability BEFORE sending content (stdio has no browser cookies). Saves raw content under raw/<subdir>/YYYY-MM-DD-<slug>.md and optionally starts the ingest orchestrator. Hosted backends may draft pages synchronously when Puppetmaster is unavailable. Reports raw_file, graph pages, orchestrator, direct drafter, and durable sync separately. Use ingest_job_status when a tracking_id is returned.",
     inputSchema: {
       slug: z
         .string()
@@ -354,7 +354,7 @@ server.registerTool(
         .boolean()
         .optional()
         .describe(
-          "If true, kick off the ingest orchestrator (costs LLM tokens). Default false. Graph updates only happen if/when that job completes."
+          "If true, process the source with the ingest orchestrator or the hosted direct drafter fallback (costs LLM tokens). Default false."
         ),
     },
   },

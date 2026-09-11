@@ -199,7 +199,7 @@ def _maybe_start_tenant_pull_poller(_persistence):
 
 app = FastAPI(
     title="Portable LLM Wiki",
-    version="0.2.3",
+    version="0.2.4",
     description=(
         "Vendor-neutral HTTP transport for a Karpathy-style personal LLM wiki. "
         "Any LLM client that can fetch URLs can read the wiki via this API."
@@ -1402,8 +1402,37 @@ def owner_persistence_flush(_: Viewer = Depends(require_owner)) -> dict:
     return _persistence.flush_now("manual sync from owner console")
 
 
+async def _draft_capture_without_orchestrator(
+    *, source_label: str, source_content: str
+) -> dict:
+    """Draft captured material when the Puppetmaster process cannot start."""
+    from . import direct_drafter
+    from .tenants import current_tenant
+
+    try:
+        draft = await direct_drafter.draft_capture_pages(
+            source_label=source_label,
+            source_content=source_content,
+            tenant=current_tenant(),
+        )
+        return {
+            "pages_created": len(draft.pages),
+            "pages": [
+                {"slug": p.slug, "title": p.title, "section": p.section}
+                for p in draft.pages
+            ],
+            "backend": draft.backend,
+            "model": draft.model,
+            "warnings": draft.warnings,
+        }
+    except direct_drafter.NoLLMConfigured as exc:
+        return {"error": str(exc), "kind": "no_llm_configured"}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)[:300], "kind": "draft_failed"}
+
+
 @app.post("/owner/ingest", status_code=status.HTTP_201_CREATED)
-def owner_ingest(req: IngestRequest, _: Viewer = Depends(require_owner)) -> dict:
+async def owner_ingest(req: IngestRequest, _: Viewer = Depends(require_owner)) -> dict:
     slug = _safe_slug(req.slug)
     today = date.today().isoformat()
     raw_dir = settings.raw_dir / req.subdir
@@ -1422,6 +1451,7 @@ def owner_ingest(req: IngestRequest, _: Viewer = Depends(require_owner)) -> dict
         "rel_path": rel_path,
         "size": file_path.stat().st_size,
         "orchestrator": None,
+        "drafted": None,
     }
 
     if req.run_orchestrator:
@@ -1432,6 +1462,12 @@ def owner_ingest(req: IngestRequest, _: Viewer = Depends(require_owner)) -> dict
                 "status": job.status,
                 "started_at": job.started_at,
             }
+        except OrchestratorUnavailable as exc:
+            response["orchestrator"] = {"error": str(exc)}
+            response["drafted"] = await _draft_capture_without_orchestrator(
+                source_label=req.note or slug,
+                source_content=req.content,
+            )
         except Exception as exc:  # noqa: BLE001
             response["orchestrator"] = {"error": str(exc)}
 
@@ -2857,27 +2893,40 @@ def owner_raw_bulk(
 
 
 @app.post("/owner/raw/{rel_path:path}/reingest")
-def owner_reingest_raw(
+async def owner_reingest_raw(
     rel_path: str, _: Viewer = Depends(require_owner)
 ) -> dict:
-    """Re-run the Puppetmaster ingest on an existing raw file.
+    """Reprocess an existing raw file.
 
     Useful when:
       - The original ingest was interrupted or errored
       - You've improved your prompt templates and want fresher drafts
       - The raw file is a long-form import that produced incomplete pages
 
-    Returns the tracking_id so the UI can poll /owner/jobs/{id} for status.
+    Returns a tracking ID when Puppetmaster starts, or a synchronous direct
+    drafting result on hosted deployments where the binary is unavailable.
     """
     full_rel = f"raw/{rel_path}" if not rel_path.startswith("raw/") else rel_path
-    if read_raw_file(full_rel) is None:
+    source_content = read_raw_file(full_rel)
+    if source_content is None:
         raise HTTPException(
             status_code=404, detail="Not found or path outside raw/"
         )
     try:
         job = start_ingest_job(full_rel, note="reingest from capture history")
     except OrchestratorUnavailable as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        drafted = await _draft_capture_without_orchestrator(
+            source_label=Path(full_rel).stem,
+            source_content=source_content,
+        )
+        from . import persistence as _persistence
+
+        _persistence.flush_async(f"direct reingest {full_rel}")
+        return _with_sync({
+            "rel_path": full_rel,
+            "orchestrator": {"error": str(exc)},
+            "drafted": drafted,
+        })
     return {
         "tracking_id": job.tracking_id,
         "kind": job.kind,

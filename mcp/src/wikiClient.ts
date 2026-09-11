@@ -54,6 +54,15 @@ export interface IngestApiResult {
     started_at?: string;
     error?: string;
   } | null;
+  drafted?: {
+    pages_created?: number;
+    pages?: Array<{ slug: string; title: string; section: string }>;
+    backend?: string;
+    model?: string;
+    warnings?: string[];
+    error?: string;
+    kind?: string;
+  } | null;
   sync?: SyncVerdict;
 }
 
@@ -248,12 +257,24 @@ export function formatIngestReport(
   runOrchestrator: boolean
 ): string {
   const orch = normalizeOrchestratorState(result.orchestrator, runOrchestrator);
+  const draftedPages = result.drafted?.pages_created;
+  const draftedSuccessfully =
+    !result.drafted?.error && typeof draftedPages === "number";
   const lines = [
     "Ingest result (honest status):",
     `- raw_file: saved (${result.rel_path}, ${result.size} bytes)`,
-    `- wiki_graph_pages: not_updated_by_raw_save`,
+    draftedSuccessfully && draftedPages > 0
+      ? `- wiki_graph_pages: updated_by_direct_drafter (${draftedPages} pages)`
+      : `- wiki_graph_pages: not_updated_by_raw_save`,
     `- orchestrator: ${orch.state} — ${orch.detail}`,
   ];
+  if (result.drafted) {
+    lines.push(
+      result.drafted.error
+        ? `- direct_drafter: failed (${result.drafted.kind ?? "draft_failed"}) — ${result.drafted.error}`
+        : `- direct_drafter: completed (${draftedPages ?? 0} pages)`
+    );
+  }
   if (orch.tracking_id) {
     lines.push(
       `- tracking_id: ${orch.tracking_id} (use ingest_job_status to verify progress)`

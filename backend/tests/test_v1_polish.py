@@ -162,11 +162,10 @@ def test_orchestrator_unavailable_raised_when_binary_missing(monkeypatch):
         orchestrator.start_ingest_job("raw/test.md", note="testing")
 
 
-def test_reingest_endpoint_returns_503_when_orchestrator_missing(
+def test_reingest_endpoint_reports_direct_fallback_when_orchestrator_missing(
     client, owner_headers, wiki_root
 ):
-    """End-to-end: hit /owner/raw/<path>/reingest with the orchestrator
-    binary missing. Expected: 503, not 500 (or NameError)."""
+    """Missing Puppetmaster is reported while the hosted fallback runs."""
     # Create a raw file so the endpoint gets past the existence check.
     raw_dir = wiki_root / "raw" / "conversations"
     raw_dir.mkdir(parents=True, exist_ok=True)
@@ -187,7 +186,7 @@ def test_reingest_endpoint_returns_503_when_orchestrator_missing(
             headers=owner_headers,
         )
 
-    # 503 = orchestrator unavailable. The detail message tells the
-    # caller exactly what's wrong (no NameError, no opaque 500).
-    assert r.status_code == 503
-    assert "puppetmaster" in r.json()["detail"].lower()
+    assert r.status_code == 200
+    body = r.json()
+    assert "puppetmaster" in body["orchestrator"]["error"].lower()
+    assert body["drafted"]["kind"] == "no_llm_configured"
