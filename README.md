@@ -368,6 +368,14 @@ Sealing panel in the owner console) with a passphrase. From then on:
 - Lose the passphrase and nobody can recover those pages, including the
   operator.
 
+What sealing does not do: it does not rewrite git history. Pages that
+existed as plaintext before you sealed them are still plaintext in
+earlier commits of the wiki repository until you rotate that history
+(for example, start a fresh repository). Sealing existing pages keeps
+their file names, so title-derived slugs remain visible; pages created
+after sealing get opaque slugs. Raw captures under `raw/` are not
+sealed.
+
 Public pages and unsealed wikis behave exactly as before.
 
 ## API

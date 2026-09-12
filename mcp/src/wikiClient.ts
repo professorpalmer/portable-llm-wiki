@@ -47,7 +47,7 @@ export interface SyncVerdict {
 }
 
 export interface ManifestSealing {
-  enabled: true;
+  enabled: boolean;
   tiers: string[];
   keyring_url: string;
   bundle_url: string;
@@ -312,13 +312,13 @@ export function connectionSealingFromState(
       return { enabled: false, tiers: [], unlocked: false };
     case "locked":
       return {
-        enabled: true,
+        enabled: state.tiers.length > 0,
         tiers: state.tiers,
         unlocked: false,
         reason: state.reason,
       };
     case "unlocked":
-      return { enabled: true, tiers: state.tiers, unlocked: true };
+      return { enabled: state.tiers.length > 0, tiers: state.tiers, unlocked: true };
     default: {
       const _never: never = state;
       return _never;
@@ -381,12 +381,16 @@ export function buildConnectionStatus(
       break;
     case "locked":
       notes.push(
-        `Sealed tiers enabled (${sealing.tiers.join(", ")}) but locked: ${sealing.reason}. Set WIKI_SEAL_PASSPHRASE in the MCP env to read and write sealed pages. The server operator cannot recover pages if the passphrase is lost.`
+        sealing.tiers.length > 0
+          ? `Sealed tiers enabled (${sealing.tiers.join(", ")}) but locked: ${sealing.reason}. Set WIKI_SEAL_PASSPHRASE in the MCP env to read and write sealed pages. The server operator cannot recover pages if the passphrase is lost.`
+          : `Sealing is disabled but a keyring remains for leftover sealed pages; locked: ${sealing.reason}. Set WIKI_SEAL_PASSPHRASE to read or unseal them.`
       );
       break;
     case "unlocked":
       notes.push(
-        `Sealed tiers unlocked locally (${sealing.tiers.join(", ")}). Titles and bodies for those tiers are decrypted in this process; the server stores ciphertext only.`
+        sealing.tiers.length > 0
+          ? `Sealed tiers unlocked locally (${sealing.tiers.join(", ")}). Titles and bodies for those tiers are decrypted in this process; the server stores ciphertext only.`
+          : "Sealing is disabled; leftover sealed pages are decrypted locally with the remaining keyring. Use unseal_page to convert them to plaintext."
       );
       break;
     default: {
@@ -600,8 +604,8 @@ function parseManifestSealing(value: unknown): ManifestSealing | undefined {
   if (!isRecord(value)) {
     throw new Error("manifest.sealing: expected an object");
   }
-  if (value.enabled !== true) {
-    throw new Error("manifest.sealing: enabled must be true when present");
+  if (typeof value.enabled !== "boolean") {
+    throw new Error("manifest.sealing: enabled must be a boolean");
   }
   if (!Array.isArray(value.tiers) || !value.tiers.every((t) => typeof t === "string")) {
     throw new Error("manifest.sealing: tiers must be an array of strings");
@@ -612,10 +616,9 @@ function parseManifestSealing(value: unknown): ManifestSealing | undefined {
   if (typeof value.bundle_url !== "string" || value.bundle_url.length === 0) {
     throw new Error("manifest.sealing: bundle_url must be a non-empty string");
   }
-  if (value.tiers.length === 0) return undefined;
   return {
-    enabled: true,
-    tiers: value.tiers,
+    enabled: value.enabled && value.tiers.length > 0,
+    tiers: value.enabled ? value.tiers : [],
     keyring_url: value.keyring_url,
     bundle_url: value.bundle_url,
   };
@@ -1247,7 +1250,7 @@ export class WikiClient {
   private async sealingFromManifest(
     manifest: ManifestSnapshot
   ): Promise<SealingState> {
-    if (!manifest.sealing || manifest.sealing.tiers.length === 0) {
+    if (!manifest.sealing) {
       return { kind: "not_enabled" };
     }
     const tiers = manifest.sealing.tiers;
@@ -1968,7 +1971,7 @@ export class WikiClient {
   async sealPageBySlug(slug: string): Promise<{ report: string; result: ReplacePageResult }> {
     await this.requireOwnerCapability();
     const state = await this.sealingState();
-    if (state.kind === "not_enabled") {
+    if (state.kind === "not_enabled" || state.tiers.length === 0) {
       throw new Error("seal_page: sealing is not enabled. Call seal_init first.");
     }
     if (state.kind === "locked") {

@@ -35,6 +35,18 @@ Backend **0.3.0**, MCP connector **0.3.0**.
   - Frontend: unlock control in the nav, decrypted page/browse/graph/search
     rendering, and an owner Sealing panel (enable, seal existing pages in
     place, disable).
+  - Hardening from review: a `sealed: v1` marker with a body that is not
+    a well-formed envelope is refused (no plaintext smuggling); sealed
+    verbatim writes return `409 sealed_slug_exists` instead of a
+    renamed file, since the envelope is bound to its slug; after
+    `DELETE /owner/sealing` the keyring stays readable (manifest
+    `sealing.enabled: false`) so leftover sealed pages still unlock and
+    can be unsealed; PATCH of a sealed page across the boundary is
+    refused regardless of enabled state; `/wiki/sealed/bundle` is 403
+    at the public tier; the lint swarm, lint drafts, image/audio
+    orchestrator kicks, reingest, and hosted onboarding imports all
+    return `409 sealing_enabled`. Documented that git history and
+    pre-existing file names are not rewritten.
   - With no keyring every response is byte-identical to before (verified
     against the baseline on a 2632-page corpus), so Marionette and other
     clients see no change until a wiki opts in.

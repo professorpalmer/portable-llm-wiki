@@ -241,6 +241,13 @@ Slugs are opaque (`s-<hmac>`) except root pages `index`, `log`, and
 If you lose the passphrase, nobody can recover the pages — not you,
 not the server operator.
 
+Sealing does not rewrite git history: pages that were plaintext before
+`seal_page` remain plaintext in earlier commits until that history is
+rotated. `seal_page` keeps the existing file name; only pages created
+through `write_pages` after sealing get opaque slugs. `raw/` captures
+are not sealed. After `seal_disable` the keyring stays on the server so
+leftover sealed pages can still be read and `unseal_page`d.
+
 ## Smoke test / unit tests
 
 No live credentials required (uses an embedded mock backend):

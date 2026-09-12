@@ -639,9 +639,9 @@ def manifest(viewer: Viewer = Depends(current_viewer)) -> dict:
             "citations, POST {\"question\": \"...\"} to the query endpoint."
         ),
     ).model_dump()
-    if index.sealing.enabled:
+    if index.sealing.keyring is not None:
         payload["sealing"] = {
-            "enabled": True,
+            "enabled": index.sealing.enabled,
             "tiers": list(index.sealing.tiers),
             "keyring_url": "/wiki/sealing",
             "bundle_url": "/wiki/sealed/bundle",
@@ -738,7 +738,7 @@ async def query(req: QueryRequest, viewer: Viewer = Depends(current_viewer)) -> 
 def wiki_sealing(viewer: Viewer = Depends(current_viewer)) -> dict:
     _refresh()
     state = index.sealing
-    if not state.enabled or not state.keyring:
+    if not state.keyring:
         raise HTTPException(status_code=404, detail="sealing is not enabled")
     if not viewer.is_owner and viewer.tier == "public":
         raise HTTPException(
@@ -751,6 +751,11 @@ def wiki_sealing(viewer: Viewer = Depends(current_viewer)) -> dict:
 @app.get("/wiki/sealed/bundle")
 def wiki_sealed_bundle(viewer: Viewer = Depends(current_viewer)) -> dict:
     _refresh()
+    if not viewer.is_owner and viewer.tier == "public":
+        raise HTTPException(
+            status_code=403,
+            detail="sealed bundle is not visible at the public tier",
+        )
     pages = []
     for page in index.sealed_pages(viewer.tier):
         pages.append(
@@ -1756,9 +1761,15 @@ class CaptureIngestRequest(BaseModel):
     note: Optional[str] = None
 
 
+def _refuse_if_sealed() -> None:
+    if index.sealing.enabled:
+        raise sealing.sealing_conflict("sealing_enabled", _SEALING_LLM_DISABLED)
+
+
 def _maybe_kick_orchestrator(rel_path: str, note: str | None, *, run: bool) -> dict | None:
     if not run:
         return None
+    _refuse_if_sealed()
     try:
         job = start_ingest_job(rel_path, note or "")
         return {
@@ -2269,6 +2280,21 @@ def owner_capture_verbatim(
         raise sealing.sealing_conflict("plaintext_into_sealed_tier", violation)
 
     tenant = current_tenant()
+    if sealing.is_sealed_markdown(content) and not force_overwrite:
+        try:
+            _, _, _, section, _, slug = _verbatim.parse_and_validate(
+                content=content, slug_override=slug_override
+            )
+        except _verbatim.VerbatimValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        existing = tenant.wiki_root / "wiki" / section / f"{slug}.md"
+        if existing.exists():
+            raise sealing.sealing_conflict(
+                "sealed_slug_exists",
+                f"A page already exists at {section}/{slug}. Sealed envelopes "
+                "are bound to their slug, so the file cannot be renamed on "
+                "conflict. Pass force_overwrite=true to replace it.",
+            )
     try:
         result = _verbatim.write_verbatim(
             content=content,
@@ -2666,16 +2692,15 @@ def owner_patch_tier(slug: str, req: TierPatchRequest, _: Viewer = Depends(requi
     page = index.get(slug)
     if not page:
         raise HTTPException(status_code=404, detail=f"No page with slug {slug!r}")
-    if index.sealing.enabled:
-        sealed_tiers = set(index.sealing.tiers)
-        if (page.sealed and new_tier not in sealed_tiers) or (
-            not page.sealed and new_tier in sealed_tiers
-        ):
-            raise sealing.sealing_conflict(
-                "seal_boundary_crossing",
-                "Cannot cross the seal boundary with PATCH. Use a single PUT "
-                "that changes tier and content together.",
-            )
+    sealed_tiers = set(index.sealing.tiers)
+    if (page.sealed and new_tier not in sealed_tiers) or (
+        not page.sealed and new_tier in sealed_tiers
+    ):
+        raise sealing.sealing_conflict(
+            "seal_boundary_crossing",
+            "Cannot cross the seal boundary with PATCH. Use a single PUT "
+            "that changes tier and content together.",
+        )
     target = settings.wiki_root / page.rel_path
     text = target.read_text(encoding="utf-8")
     new_text = _set_tier_in_frontmatter(text, new_tier)
@@ -2745,6 +2770,7 @@ def owner_start_lint_swarm(
     Returns a swarm_id immediately. The frontend polls
     /owner/lint/swarm/{swarm_id} for live worker progress + aggregated findings.
     """
+    _refuse_if_sealed()
     try:
         record = start_lint_swarm(workers=req.workers)
     except ValueError as exc:
@@ -2802,6 +2828,7 @@ async def owner_draft_missing_page(
     ``"direct-llm"`` so the UI knows there's nothing to poll — the
     page is already on disk by the time this returns.
     """
+    _refuse_if_sealed()
     try:
         job = start_draft_missing_page(
             proposed_title=req.proposed_title,
@@ -2863,6 +2890,7 @@ async def owner_draft_contradiction(
     """Draft a reconciliation page for a semantic-lint contradiction
     finding. Falls back to direct-LLM the same way
     ``/owner/lint/draft/missing-page`` does — see its docstring."""
+    _refuse_if_sealed()
     try:
         job = start_draft_contradiction(
             page_a=req.page_a,

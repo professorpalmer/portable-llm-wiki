@@ -118,7 +118,12 @@ def load_state(wiki_root: Path) -> SealingState:
         return _disabled()
     tiers_raw = raw.get("tiers")
     if isinstance(tiers_raw, list) and len(tiers_raw) == 0:
-        return _disabled(keyring=raw)
+        try:
+            keyring = validate_keyring({**raw, "tiers": ["private"]})
+        except ValueError:
+            logger.warning("malformed sealing keyring at %s; treating as disabled", path)
+            return _disabled()
+        return _disabled(keyring={**keyring, "tiers": []})
     try:
         keyring = validate_keyring(raw)
     except ValueError:
@@ -196,10 +201,43 @@ def frontmatter_tier(text: str) -> str | None:
     return None
 
 
+_MIN_ENVELOPE_BYTES = 12 + 16  # nonce || tag; ciphertext may be empty
+_B64_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
+
+_MALFORMED_ENVELOPE = (
+    "Sealed document body is not a well-formed envelope "
+    "(base64 of nonce||ciphertext||tag). Plaintext under a 'sealed: v1' "
+    "marker is refused."
+)
+
+
+def _sealed_body(text: str) -> str | None:
+    lines = text.splitlines()
+    if not lines or lines[0].rstrip("\r") != "---":
+        return None
+    for i in range(1, len(lines)):
+        if lines[i].rstrip("\r") == "---":
+            return "".join("\n".join(lines[i + 1 :]).split())
+    return None
+
+
+def is_well_formed_envelope(compact: str) -> bool:
+    if not compact or len(compact) % 4 != 0 or not _B64_RE.match(compact):
+        return False
+    try:
+        raw = base64.b64decode(compact, validate=True)
+    except Exception:
+        return False
+    return len(raw) >= _MIN_ENVELOPE_BYTES
+
+
 def plaintext_write_violation(
     state: SealingState, tier: str, markdown: str
 ) -> str | None:
-    if tier in state.tiers and not is_sealed_markdown(markdown):
+    sealed = is_sealed_markdown(markdown)
+    if sealed and not is_well_formed_envelope(_sealed_body(markdown) or ""):
+        return _MALFORMED_ENVELOPE
+    if tier in state.tiers and not sealed:
         return _PLAINTEXT_INTO_SEALED
     return None
 

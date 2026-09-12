@@ -48,7 +48,7 @@ export type PageFull = PageSummary & {
 };
 
 export type ManifestSealing = {
-  enabled: true;
+  enabled: boolean;
   tiers: string[];
   keyring_url: string;
   bundle_url: string;
@@ -315,13 +315,13 @@ function requireString(v: unknown, field: string): string {
 
 export function parseManifestSealing(raw: unknown): ManifestSealing {
   if (!isRecord(raw)) throw new Error("invalid sealing");
-  if (raw.enabled !== true) throw new Error("invalid sealing");
+  if (typeof raw.enabled !== "boolean") throw new Error("invalid sealing");
   if (!Array.isArray(raw.tiers) || !raw.tiers.every((t) => typeof t === "string")) {
     throw new Error("invalid sealing tiers");
   }
   return {
-    enabled: true,
-    tiers: raw.tiers,
+    enabled: raw.enabled && raw.tiers.length > 0,
+    tiers: raw.enabled ? raw.tiers : [],
     keyring_url: requireString(raw.keyring_url, "keyring_url"),
     bundle_url: requireString(raw.bundle_url, "bundle_url"),
   };

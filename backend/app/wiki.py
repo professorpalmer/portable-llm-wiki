@@ -21,7 +21,7 @@ import frontmatter
 
 from .config import TIER_ORDER, VALID_TIERS, settings
 from .importance import load_access, score_pages
-from .sealing import SealingState, load_state
+from .sealing import SealingState, is_well_formed_envelope, load_state
 
 # How long a freshness verdict is trusted before we re-walk the corpus.
 # Under load, ``reload_if_stale`` would otherwise rglob+stat every markdown
@@ -551,6 +551,7 @@ class WikiIndex:
 
         sealed_raw = meta.get("sealed")
         if sealed_raw is not None and str(sealed_raw).strip().lower() == "v1":
+            compact = "".join((body or "").split())
             page_type = _infer_type(section, str(meta.get("type")) if meta.get("type") else None)
             tier = _normalize_tier(meta.get("tier")) or settings.default_tier
             created = str(meta.get("created")) if meta.get("created") else None
@@ -573,7 +574,7 @@ class WikiIndex:
                 word_count=0,
                 mtime=md_path.stat().st_mtime,
                 sealed=True,
-                envelope="".join((body or "").split()),
+                envelope=compact if is_well_formed_envelope(compact) else "",
             )
 
         title = str(meta.get("title") or md_path.stem.replace("-", " ").title()).strip()

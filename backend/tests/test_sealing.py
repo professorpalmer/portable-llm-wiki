@@ -29,8 +29,11 @@ def valid_keyring(tiers: tuple[str, ...] = ("private",)) -> dict:
 
 
 SEALED_SLUG = "s-aaaabbbbccccdddd"
-SEALED_ENVELOPE_WRAPPED = "YWJjZGVm\n  Z2hpams=\n"
-SEALED_ENVELOPE_STRIPPED = "YWJjZGVmZ2hpams="
+# 12-byte nonce || 4-byte ciphertext || 16-byte tag, base64, wrapped like a client would.
+SEALED_ENVELOPE_STRIPPED = base64.b64encode(b"n" * 12 + b"ct!!" + b"t" * 16).decode()
+SEALED_ENVELOPE_WRAPPED = (
+    SEALED_ENVELOPE_STRIPPED[:20] + "\n  " + SEALED_ENVELOPE_STRIPPED[20:] + "\n"
+)
 
 SEALED_DOC = (
     "---\n"
@@ -384,8 +387,98 @@ def test_delete_sealing_disables_and_drops_manifest_key(client, owner_headers):
     assert r.status_code == 200
     assert r.json()["ok"] is True
     assert r.json()["enabled"] is False
-    assert "sealing" not in client.get("/wiki/manifest.json").json()
-    assert client.get("/wiki/sealing", headers=owner_headers).status_code == 404
+    after = client.get("/wiki/manifest.json").json()["sealing"]
+    assert after["enabled"] is False
+    assert after["tiers"] == []
+    keyring = client.get("/wiki/sealing", headers=owner_headers)
+    assert keyring.status_code == 200
+    assert keyring.json()["tiers"] == []
+    assert client.get("/wiki/sealing").status_code == 403
+    plain = client.post(
+        "/owner/capture/verbatim",
+        headers=owner_headers,
+        json={"content": "---\ntype: concept\ntitle: After Disable\ntier: private\n---\n\nplain again"},
+    )
+    assert plain.status_code == 201, plain.text
+
+
+def test_sealed_marker_with_plaintext_body_409(client, owner_headers):
+    _enable(client, owner_headers)
+    r = client.post(
+        "/owner/capture/verbatim",
+        headers=owner_headers,
+        json={
+            "content": (
+                "---\nsealed: v1\ntype: concept\ntier: private\nslug: s-1111222233334444\n---\n"
+                "This is plaintext hiding under a sealed marker."
+            ),
+            "force_overwrite": True,
+        },
+    )
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "plaintext_into_sealed_tier"
+
+
+def test_sealed_verbatim_conflict_is_409_not_suffix(client, owner_headers, wiki_root: Path):
+    _enable(client, owner_headers)
+    first = client.post(
+        "/owner/capture/verbatim", headers=owner_headers, json={"content": SEALED_DOC}
+    )
+    assert first.status_code == 201, first.text
+    second = client.post(
+        "/owner/capture/verbatim", headers=owner_headers, json={"content": SEALED_DOC}
+    )
+    assert second.status_code == 409
+    assert second.json()["detail"]["code"] == "sealed_slug_exists"
+    assert len(list((wiki_root / "wiki" / "concepts").glob(f"{SEALED_SLUG}*.md"))) == 1
+    forced = client.post(
+        "/owner/capture/verbatim",
+        headers=owner_headers,
+        json={"content": SEALED_DOC, "force_overwrite": True},
+    )
+    assert forced.status_code == 201
+    assert forced.json()["overwrote_existing"] is True
+
+
+def test_lint_swarm_and_drafts_409(client, owner_headers):
+    _enable(client, owner_headers)
+    for path, body in (
+        ("/owner/lint/swarm", {}),
+        (
+            "/owner/lint/draft/missing-page",
+            {"proposed_title": "Gap", "proposed_section": "concepts", "bootstrap_summary": "x"},
+        ),
+        (
+            "/owner/lint/draft/contradiction",
+            {"page_a": "index", "page_b": "log", "claim_a": "a", "claim_b": "b", "conflict": "c"},
+        ),
+    ):
+        r = client.post(path, headers=owner_headers, json=body)
+        assert r.status_code == 409, (path, r.text)
+        assert r.json()["detail"]["code"] == "sealing_enabled"
+
+
+def test_patch_sealed_page_refused_after_disable(client, owner_headers):
+    _enable(client, owner_headers)
+    written = client.post(
+        "/owner/capture/verbatim",
+        headers=owner_headers,
+        json={"content": SEALED_DOC, "force_overwrite": True},
+    ).json()["written"]
+    assert client.delete("/owner/sealing", headers=owner_headers).status_code == 200
+    r = client.patch(
+        f"/owner/page/{written['slug']}/tier",
+        headers=owner_headers,
+        json={"tier": "public"},
+    )
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "seal_boundary_crossing"
+
+
+def test_bundle_public_403(client, owner_headers):
+    _enable(client, owner_headers)
+    assert client.get("/wiki/sealed/bundle").status_code == 403
+    assert client.get("/wiki/sealed/bundle", headers=owner_headers).status_code == 200
 
 
 def test_delete_sealing_404_when_absent(client, owner_headers):
@@ -617,7 +710,7 @@ def test_put_with_sealed_marker_succeeds(client, owner_headers):
         json={
             "markdown": (
                 "---\nsealed: v1\ntype: concept\ntier: private\n"
-                f"slug: {slug}\n---\nYWJj\n"
+                f"slug: {slug}\n---\n{SEALED_ENVELOPE_STRIPPED}\n"
             )
         },
     )

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import {
   fetchManifest,
+  fetchSealingKeyring,
   ownerDeleteSealing,
   ownerGetPageRaw,
   ownerPutSealing,
@@ -11,7 +12,12 @@ import {
   type Manifest,
   type PageSummary,
 } from "@/lib/api";
-import { generateKeyring, parseWikiFrontmatter, sealMarkdown } from "@/lib/sealing";
+import {
+  generateKeyring,
+  parseWikiFrontmatter,
+  sealMarkdown,
+  unwrapDek,
+} from "@/lib/sealing";
 import { useSealing } from "@/lib/useSealing";
 
 const OFFERED_TIERS: { id: "private" | "friend" | "recruiter"; label: string }[] = [
@@ -107,8 +113,15 @@ export function SealingPanel({ tenant }: { tenant?: string } = {}) {
     }
     setEnabling(true);
     try {
-      const keyring = await generateKeyring(passphrase, tiers);
-      await ownerPutSealing({ keyring, force }, tenant);
+      const reuseKeyring = sealing.status !== "not_enabled" && !force;
+      if (reuseKeyring) {
+        const existing = await fetchSealingKeyring(tenant);
+        await unwrapDek(existing, passphrase);
+        await ownerPutSealing({ keyring: { ...existing, tiers }, force: true }, tenant);
+      } else {
+        const keyring = await generateKeyring(passphrase, tiers);
+        await ownerPutSealing({ keyring, force }, tenant);
+      }
       await sealing.unlock(passphrase);
       setPassphrase("");
       setConfirm("");
@@ -188,7 +201,9 @@ export function SealingPanel({ tenant }: { tenant?: string } = {}) {
 
       {sealing.status !== "not_enabled" && (
         <p className="mt-1 text-sm text-ink">
-          enabled ({sealing.tiers.join(", ") || "none"})
+          {sealing.tiers.length > 0
+            ? `enabled (${sealing.tiers.join(", ")})`
+            : "disabled, keyring kept for leftover sealed pages"}
           {sealing.status === "unlocked" ? " · unlocked" : " · locked"}
         </p>
       )}
@@ -199,7 +214,7 @@ export function SealingPanel({ tenant }: { tenant?: string } = {}) {
         </p>
       )}
 
-      {sealing.status === "not_enabled" && (
+      {(sealing.status === "not_enabled" || sealing.tiers.length === 0) && (
         <form onSubmit={onEnable} className="mt-4 space-y-3">
           <p className="text-sm text-ink-muted">
             Encrypt non-public pages in the browser. The hosted server stores
@@ -278,7 +293,7 @@ export function SealingPanel({ tenant }: { tenant?: string } = {}) {
         </form>
       )}
 
-      {sealing.status !== "not_enabled" && (
+      {sealing.status !== "not_enabled" && sealing.tiers.length > 0 && (
         <div className="mt-4 space-y-4">
           <p className="text-sm text-ink-muted leading-relaxed">
             While sealing is enabled the server-side ingest, import, and lint
@@ -291,6 +306,9 @@ export function SealingPanel({ tenant }: { tenant?: string } = {}) {
             </h3>
             <p className="mt-1 text-xs text-ink-muted">
               Existing file names are kept; only page contents are sealed.
+              Earlier plaintext versions remain in the wiki&apos;s git
+              history until you rotate it (for example, start a fresh
+              repository), so the operator can still read those commits.
             </p>
             {sealing.status === "locked" ? (
               <p className="mt-2 text-sm text-ink-muted">
