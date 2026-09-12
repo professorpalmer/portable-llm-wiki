@@ -108,6 +108,7 @@ Recommended first call in any agent session: `connection_status`.
 |---|---|---|
 | `WIKI_BASE_URL` | Path prefix before `/wiki` and `/owner` (preferred). Hosted: `https://portablellm.wiki/<tenant>`. Local single-tenant: `http://localhost:8000`. | `http://localhost:8000` |
 | `WIKI_OWNER_TOKEN` | Optional bearer. May be owner-capable, share/read-only, or invalid — always verified via the manifest. Never logged. | (none) |
+| `WIKI_SEAL_PASSPHRASE` | Passphrase that unwraps the sealed-tier keyring in this process. Required to read or write sealed tiers. Never logged, never sent to the server. | (none) |
 | `WIKI_API_BASE` | Legacy alias for `WIKI_BASE_URL`. Still works if `WIKI_BASE_URL` is unset. | — |
 
 When pointing at the hosted Vercel demo, use the tenant-scoped base URL
@@ -136,7 +137,12 @@ API (`/wiki/manifest.json` returns 404).
 | `set_page_tier` | Change a page's visibility tier. | **yes** |
 | `delete_page` | Delete a page file and reload the index. | **yes** |
 | `writeback_spec` | Public schema text for `write_pages`. | no |
-| `lint_wiki` | Structural lint report (orphans, stale, broken provenance, etc.). | **yes** |
+| `lint_wiki` | Structural lint report (orphans, stale, broken provenance, etc.). Refused by the server when sealing is enabled. | **yes** |
+| `seal_status` | Whether sealing is enabled, which tiers, and whether this process is unlocked. | no |
+| `seal_init` | Generate a keyring from `WIKI_SEAL_PASSPHRASE` and enable sealed tiers. | **yes** |
+| `seal_disable` | Clear keyring tiers (already-sealed pages stay encrypted). | **yes** |
+| `seal_page` | Encrypt an existing plaintext page in place (same slug). | **yes** |
+| `unseal_page` | Decrypt a sealed page to a non-sealed tier in one PUT. | **yes** |
 
 ## Write tools
 
@@ -201,6 +207,37 @@ exposing the master `OWNER_TOKEN`, use the **Share Tokens** panel in the
 owner console at `/owner`. The plaintext token is shown once at mint
 time — paste it into the recipient's `WIKI_OWNER_TOKEN` env var. That
 recipient should expect `auth_mode=share_read_only`, not owner writes.
+
+## Sealed tiers
+
+Sealing is opt-in. When the owner runs `seal_init`, chosen tiers
+(typically `private`; optionally `friend` / `recruiter`) are stored on
+the hosted server as ciphertext. Encryption and decryption happen in
+this MCP process on the user's machine — or in the browser. `public`
+can never be sealed.
+
+Set `WIKI_SEAL_PASSPHRASE` in the MCP env (the same `env` block as
+`WIKI_OWNER_TOKEN`). Call `connection_status` or `seal_status` to see
+`sealing: {enabled, tiers, unlocked}`. If the passphrase is missing or
+wrong, the process is locked: reads of sealed pages return a
+placeholder, and writes that would send plaintext to a sealed tier are
+refused before anything is posted.
+
+When `private` is sealed and the process is unlocked, `write_pages`
+seals each page locally (opaque slug, `sealed: v1` frontmatter) and
+writes through `/owner/capture/verbatim` instead of posting plaintext
+to `/owner/capture/structured`. `append_to_page` decrypts, appends,
+and re-seals. `search_wiki` / `query_wiki` merge local hits over the
+decrypted bundle (labelled "decrypted locally"); the MCP does not call
+an LLM. The server-side orchestrator is disabled on sealed wikis.
+
+What the server operator can see: tier, section, dates, page count,
+and ciphertext. Titles, tags, sources, and bodies are encrypted.
+Slugs are opaque (`s-<hmac>`) except root pages `index`, `log`, and
+`overview`.
+
+If you lose the passphrase, nobody can recover the pages — not you,
+not the server operator.
 
 ## Smoke test / unit tests
 

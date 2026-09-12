@@ -10,7 +10,13 @@ import {
   getPreviewAs,
   setPreviewAs,
   fetchManifest,
+  fetchSealedBundle,
+  fetchSealingKeyring,
+  ownerDeleteSealing,
+  ownerGetPageRaw,
   ownerLint,
+  ownerPutSealing,
+  ownerReplacePage,
 } from "@/lib/api";
 import { setShareToken } from "@/lib/shareToken";
 
@@ -200,5 +206,165 @@ describe("preview-as vs owner bootstrap headers", () => {
     const hdrs = init.headers as Record<string, string>;
     expect(hdrs["Authorization"]).toBe("Bearer owner-secret");
     expect(hdrs["X-Share-Token"]).toBeUndefined();
+  });
+});
+
+describe("sealing fetchers", () => {
+  const keyring = {
+    v: 1 as const,
+    tiers: ["private"],
+    kdf: "pbkdf2-sha256" as const,
+    iterations: 600000,
+    salt: "c2FsdHNhbHRzYWx0c2FsdA==",
+    wrapped_dek: "d3JhcHBlZGRla3dyYXBwZWRkZWs=",
+    check: "Y2hlY2tjaGVja2NoZWNrY2hlY2s=",
+    created: "2026-09-12T00:00:00.000Z",
+  };
+
+  beforeEach(() => {
+    window.localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("fetchSealingKeyring hits /wiki/sealing with browse headers", async () => {
+    setPreviewAs("friend");
+    setOwnerToken("owner-secret");
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => keyring,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const got = await fetchSealingKeyring();
+    expect(got.tiers).toEqual(["private"]);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/backend/wiki/sealing");
+    const hdrs = (fetchMock.mock.calls[0][1] as RequestInit).headers as Record<
+      string,
+      string
+    >;
+    expect(hdrs["X-Preview-As"]).toBe("friend");
+    expect(hdrs["Authorization"]).toBe("Bearer owner-secret");
+  });
+
+  it("fetchSealedBundle hits /wiki/sealed/bundle with browse headers", async () => {
+    setPreviewAs("recruiter");
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        count: 1,
+        pages: [
+          {
+            slug: "s-abc",
+            section: "concepts",
+            tier: "private",
+            updated: "2026-09-12",
+            envelope: "ZW52",
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const got = await fetchSealedBundle();
+    expect(got.count).toBe(1);
+    expect(got.pages[0].slug).toBe("s-abc");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/backend/wiki/sealed/bundle");
+    const hdrs = (fetchMock.mock.calls[0][1] as RequestInit).headers as Record<
+      string,
+      string
+    >;
+    expect(hdrs["X-Preview-As"]).toBe("recruiter");
+  });
+
+  it("ownerPutSealing PUTs /owner/sealing without preview headers", async () => {
+    setPreviewAs("public");
+    setOwnerToken("owner-secret");
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ok: true }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await ownerPutSealing({ keyring, force: true });
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/backend/owner/sealing");
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(init.method).toBe("PUT");
+    const hdrs = init.headers as Record<string, string>;
+    expect(hdrs["Authorization"]).toBe("Bearer owner-secret");
+    expect(hdrs["X-Preview-As"]).toBeUndefined();
+    expect(JSON.parse(String(init.body))).toEqual({ keyring, force: true });
+  });
+
+  it("ownerDeleteSealing DELETEs /owner/sealing with owner headers", async () => {
+    setPreviewAs("friend");
+    setOwnerToken("owner-secret");
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ok: true }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await ownerDeleteSealing();
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/backend/owner/sealing");
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(init.method).toBe("DELETE");
+    const hdrs = init.headers as Record<string, string>;
+    expect(hdrs["Authorization"]).toBe("Bearer owner-secret");
+    expect(hdrs["X-Preview-As"]).toBeUndefined();
+  });
+
+  it("ownerGetPageRaw GETs /owner/page/{slug}/raw with owner headers", async () => {
+    setPreviewAs("public");
+    setOwnerToken("owner-secret");
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        slug: "alpha",
+        rel_path: "wiki/concepts/alpha.md",
+        title: "Alpha",
+        section: "concepts",
+        tier: "private",
+        markdown: "---\n---\n",
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await ownerGetPageRaw("alpha");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/backend/owner/page/alpha/raw");
+    const hdrs = (fetchMock.mock.calls[0][1] as RequestInit).headers as Record<
+      string,
+      string
+    >;
+    expect(hdrs["Authorization"]).toBe("Bearer owner-secret");
+    expect(hdrs["X-Preview-As"]).toBeUndefined();
+  });
+
+  it("ownerReplacePage PUTs /owner/page/{slug} with owner headers", async () => {
+    setPreviewAs("friend");
+    setOwnerToken("owner-secret");
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ok: true,
+        slug: "alpha",
+        rel_path: "wiki/concepts/alpha.md",
+        tier: "private",
+        title: "Alpha",
+        size: 12,
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await ownerReplacePage("alpha", "---\n---\nbody");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/backend/owner/page/alpha");
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(init.method).toBe("PUT");
+    expect(JSON.parse(String(init.body))).toEqual({ markdown: "---\n---\nbody" });
+    const hdrs = init.headers as Record<string, string>;
+    expect(hdrs["X-Preview-As"]).toBeUndefined();
   });
 });

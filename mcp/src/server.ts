@@ -33,7 +33,14 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolve } from "node:path";
-import { WikiClient, startupAuthLabel } from "./wikiClient.js";
+import {
+  WikiClient,
+  formatListPagesReport,
+  formatQueryWikiReport,
+  formatReadPageReport,
+  formatSearchWikiReport,
+  startupAuthLabel,
+} from "./wikiClient.js";
 
 const wiki = WikiClient.fromEnv();
 
@@ -53,7 +60,7 @@ function asError(err: unknown): {
 const server = new McpServer(
   {
     name: "portable-llm-wiki",
-    version: "0.2.0",
+    version: "0.3.0",
   },
   {
     instructions: `You are connected to a Portable LLM Wiki via stdio MCP at ${wiki.baseUrl}.
@@ -93,7 +100,28 @@ server-side LLM over the content and should only be used when the client
 cannot draft pages itself.
 
 Every page has a tier (\`public\`/\`recruiter\`/\`friend\`/\`private\`). Pages above
-your tier are invisible — don't synthesize claims about them.`,
+your tier are invisible — don't synthesize claims about them.
+
+Sealed tiers
+The owner can enable sealing so chosen tiers (typically private) are stored
+as ciphertext on the hosted server. Encryption and decryption happen in this
+MCP process. The server operator never sees titles, tags, or bodies for
+sealed pages — only tier, section, dates, and ciphertext.
+
+WIKI_SEAL_PASSPHRASE must be set in the MCP env to read or write sealed
+tiers. If sealing is enabled and the passphrase is missing or wrong, writes
+that would send plaintext to a sealed tier are refused. Losing the
+passphrase means nobody can recover those pages.
+
+The server-side orchestrator is disabled on sealed wikis. Do not use
+\`run_orchestrator=true\`; draft locally and call \`write_pages\`. When private
+is a sealed tier, \`write_pages\` automatically seals each page (opaque slug,
+ciphertext via verbatim capture) instead of posting plaintext structured
+pages.
+
+Call \`seal_status\` / \`connection_status\` to see whether sealing is enabled
+and unlocked. Owner tools: \`seal_init\`, \`seal_disable\`, \`seal_page\`,
+\`unseal_page\`.`,
   }
 );
 
@@ -104,7 +132,7 @@ server.registerTool(
   {
     title: "Diagnose MCP ↔ wiki connection and capabilities",
     description:
-      "Non-secret diagnostic: probes the backend manifest and reports base URL, whether a bearer token is configured (never the token value), viewer tier, page count, auth_mode (public / share_read_only / owner / token_not_elevated), and read/write/lint capability. Call this before owner-only writes.",
+      "Non-secret diagnostic: probes the backend manifest and reports base URL, whether a bearer token is configured (never the token value), viewer tier, page count, auth_mode (public / share_read_only / owner / token_not_elevated), read/write/lint capability, and sealing {enabled, tiers, unlocked, reason}. Call this before owner-only writes.",
     inputSchema: {},
   },
   async () => {
@@ -122,40 +150,13 @@ server.registerTool(
   {
     title: "List all visible wiki pages",
     description:
-      "Returns the manifest: every page the current viewer can see, with title, slug, section, tier, tags, and a one-line excerpt. Call this first to learn what's in the wiki before asking specific questions.",
+      "Returns the manifest: every page the current viewer can see, with title, slug, section, tier, tags, and a one-line excerpt. When sealed tiers are unlocked, placeholder 'Sealed page' titles are replaced from the locally decrypted bundle. Call this first to learn what's in the wiki before asking specific questions.",
     inputSchema: {},
   },
   async () => {
     try {
-      const m = (await wiki.apiGet("/wiki/manifest.json")) as {
-        page_count: number;
-        sections: Record<string, number>;
-        viewer_tier: string;
-        viewer_is_owner: boolean;
-        pages: Array<{
-          slug: string;
-          title: string;
-          section: string;
-          tier: string;
-          tags: string[];
-          excerpt: string;
-          updated: string | null;
-        }>;
-      };
-      const summary = `Wiki has ${m.page_count} page(s) visible at tier=${m.viewer_tier}${
-        m.viewer_is_owner ? " (owner)" : ""
-      }. Sections: ${Object.entries(m.sections)
-        .map(([k, v]) => `${k}=${v}`)
-        .join(", ")}.`;
-      const pages = m.pages
-        .map(
-          (p) =>
-            `- ${p.title} [${p.section}/${p.tier}] (slug: ${p.slug})${
-              p.updated ? ` — updated ${p.updated}` : ""
-            }${p.excerpt ? `\n  ${p.excerpt}` : ""}`
-        )
-        .join("\n");
-      return asText(`${summary}\n\n${pages}`);
+      const m = await wiki.listPages();
+      return asText(formatListPagesReport(m));
     } catch (err) {
       return asError(err);
     }
@@ -167,7 +168,7 @@ server.registerTool(
   {
     title: "Read a wiki page in full",
     description:
-      "Returns the full markdown body + frontmatter + cross-references for one page, identified by its slug. Use when you need to quote from a page or follow its `[[wikilinks]]` to other pages.",
+      "Returns the full markdown body + frontmatter + cross-references for one page, identified by its slug. Sealed pages are decrypted locally when WIKI_SEAL_PASSPHRASE unlocks the keyring (report includes decrypted_locally: true). If sealing is locked, returns the sealed placeholder and the locked reason. Use when you need to quote from a page or follow its `[[wikilinks]]` to other pages.",
     inputSchema: {
       slug: z
         .string()
@@ -177,38 +178,8 @@ server.registerTool(
   },
   async ({ slug }) => {
     try {
-      const p = (await wiki.apiGet(`/wiki/page/${encodeURIComponent(slug)}`)) as {
-        title: string;
-        section: string;
-        tier: string;
-        created: string | null;
-        updated: string | null;
-        tags: string[];
-        body: string;
-        sources: string[];
-        links_out_resolved: Array<{ slug: string; title: string }>;
-        links_in_resolved: Array<{ slug: string; title: string }>;
-      };
-      const header =
-        `# ${p.title}\n` +
-        `_section: ${p.section} · tier: ${p.tier}` +
-        `${p.created ? ` · created: ${p.created}` : ""}` +
-        `${p.updated ? ` · updated: ${p.updated}` : ""}` +
-        `${p.tags.length ? ` · tags: ${p.tags.join(", ")}` : ""}_\n\n`;
-      const linksOut = p.links_out_resolved.length
-        ? `\n\n---\n**Links out:** ${p.links_out_resolved
-            .map((l) => `[[${l.title}]] (slug: ${l.slug})`)
-            .join(", ")}`
-        : "";
-      const linksIn = p.links_in_resolved.length
-        ? `\n**Links in:** ${p.links_in_resolved
-            .map((l) => `[[${l.title}]] (slug: ${l.slug})`)
-            .join(", ")}`
-        : "";
-      const sources = p.sources.length
-        ? `\n**Sources:** ${p.sources.join(", ")}`
-        : "";
-      return asText(header + p.body + linksOut + linksIn + sources);
+      const page = await wiki.readPage(slug);
+      return asText(formatReadPageReport(page));
     } catch (err) {
       return asError(err);
     }
@@ -220,7 +191,7 @@ server.registerTool(
   {
     title: "Keyword search across visible pages",
     description:
-      "Fast keyword search across page titles, tags, and bodies. Returns ranked matches. Good for exploration. For natural-language questions with synthesis, use `query_wiki` instead.",
+      "Fast keyword search across page titles, tags, and bodies. Returns ranked matches. When sealed tiers are unlocked, merges a local keyword search over the decrypted bundle and labels those hits 'decrypted locally'. Good for exploration. For natural-language questions with synthesis, use `query_wiki` instead.",
     inputSchema: {
       query: z.string().min(1).describe("Keyword(s) to search for."),
       limit: z
@@ -234,27 +205,8 @@ server.registerTool(
   },
   async ({ query, limit }) => {
     try {
-      const r = (await wiki.apiGet(
-        `/wiki/search?q=${encodeURIComponent(query)}`
-      )) as {
-        results: Array<{
-          slug: string;
-          title: string;
-          section: string;
-          tier: string;
-          excerpt: string;
-          score: number;
-        }>;
-      };
-      const top = r.results.slice(0, limit ?? 10);
-      if (top.length === 0) return asText(`No matches for "${query}".`);
-      const out = top
-        .map(
-          (m) =>
-            `[score ${m.score}] ${m.title} (slug: ${m.slug}, ${m.section}/${m.tier})\n  ${m.excerpt}`
-        )
-        .join("\n\n");
-      return asText(out);
+      const r = await wiki.searchWiki(query, limit ?? 10);
+      return asText(formatSearchWikiReport(query, r.results));
     } catch (err) {
       return asError(err);
     }
@@ -266,7 +218,7 @@ server.registerTool(
   {
     title: "Ask a natural-language question, get a sourced answer",
     description:
-      "The primary tool. Does graph-aware retrieval (keyword anchors + 1-hop wikilink expansion, Index/Log catalogs omitted) and returns a synthesized answer grounded in wiki pages, with citations. Prefer this over `search_wiki` + manual stitching.",
+      "The primary tool. Does graph-aware retrieval (keyword anchors + 1-hop wikilink expansion, Index/Log catalogs omitted) and returns a synthesized answer grounded in wiki pages, with citations. Sealed pages are excluded from server retrieval; when unlocked this tool appends a 'Sealed context (decrypted locally)' section with the top local passages. Mentions sealed_excluded when the server reports it. No LLM call inside the MCP. Prefer this over `search_wiki` + manual stitching.",
     inputSchema: {
       question: z
         .string()
@@ -276,27 +228,8 @@ server.registerTool(
   },
   async ({ question }) => {
     try {
-      const r = (await wiki.apiPost("/wiki/query", { question })) as {
-        answer: string;
-        citations: Array<{ slug: string; title: string }>;
-        backend: string;
-        retrieval?: {
-          strategy: string;
-          anchors: Array<{ title: string; score: number }>;
-          expanded: Array<{ title: string }>;
-        };
-      };
-      const cites = r.citations.length
-        ? `\n\n---\nCitations: ${r.citations.map((c) => `[[${c.title}]]`).join(", ")}`
-        : "";
-      const retrieval = r.retrieval
-        ? `\n\n_Retrieval: ${r.retrieval.strategy}. Anchors: ${r.retrieval.anchors
-            .map((a) => a.title)
-            .join(", ")}. Expanded: ${
-            r.retrieval.expanded.map((e) => e.title).join(", ") || "(none)"
-          }._`
-        : "";
-      return asText(r.answer + cites + retrieval);
+      const r = await wiki.queryWiki(question);
+      return asText(formatQueryWikiReport(r));
     } catch (err) {
       return asError(err);
     }
@@ -356,7 +289,7 @@ server.registerTool(
   {
     title: "Ingest a new source into the wiki (owner-only)",
     description:
-      "Owner-only. Probes owner capability BEFORE sending content (stdio has no browser cookies). Saves raw content under raw/<subdir>/YYYY-MM-DD-<slug>.md. Prefer the no-server-LLM flow: file with run_orchestrator=false (default) for provenance, draft pages from writeback_spec, then write_pages and append_to_page on log/index. run_orchestrator=true is the legacy path that runs the operator's server-side LLM and should only be used when the client cannot draft pages itself. Reports raw_file vs orchestrator vs durable_sync separately — never claims graph pages are updated merely because a raw file was saved.",
+      "Owner-only. Probes owner capability BEFORE sending content (stdio has no browser cookies). Saves raw content under raw/<subdir>/YYYY-MM-DD-<slug>.md. Prefer the no-server-LLM flow: file with run_orchestrator=false (default) for provenance, draft pages from writeback_spec, then write_pages and append_to_page on log/index. run_orchestrator=true is the legacy path that runs the operator's server-side LLM and should only be used when the client cannot draft pages itself. On sealed wikis the server-side orchestrator is disabled (409). Reports raw_file vs orchestrator vs durable_sync separately — never claims graph pages are updated merely because a raw file was saved.",
     inputSchema: {
       slug: z
         .string()
@@ -443,7 +376,7 @@ server.registerTool(
   {
     title: "Write structured wiki pages (owner-only)",
     description:
-      "Owner-only. Probes owner capability BEFORE sending content. Commits one or more drafted pages via POST /owner/capture/structured. Forces tier private. Conflicts get a -from-llm-<date> suffix unless force_overwrite. The report lists only pages in `written`, plus conflicts, validation errors, and the durable sync verdict. Never claims a page was written unless it appears in `written`.",
+      "Owner-only. Probes owner capability BEFORE sending content. When sealing is not enabled, commits drafted pages via POST /owner/capture/structured (forces tier private). When private is a sealed tier and this process is unlocked, each page is sealed locally (opaque slug, ciphertext) and written via POST /owner/capture/verbatim — the request never contains plaintext title/body. If sealing is enabled but locked, the tool refuses before sending anything. Conflicts get a -from-llm-<date> suffix unless force_overwrite. The report lists only pages in `written`, plus conflicts, validation errors, and the durable sync verdict. Never claims a page was written unless it appears in `written`.",
     inputSchema: {
       session_label: z
         .string()
@@ -476,7 +409,7 @@ server.registerTool(
   {
     title: "Write one authored markdown page (owner-only)",
     description:
-      "Owner-only. Probes owner capability BEFORE sending content. POST /owner/capture/verbatim. Input is a complete markdown file with YAML frontmatter; tier in frontmatter is respected. Reports the written page, any conflict suffix, and the durable sync verdict.",
+      "Owner-only. Probes owner capability BEFORE sending content. POST /owner/capture/verbatim. Input is a complete markdown file with YAML frontmatter; tier in frontmatter is respected. If the document's tier is sealed and the markdown is plaintext, it is sealed client-side before sending (provided slug, or an opaque slug). If sealing is locked, the write is refused. Reports the written page, any conflict suffix, and the durable sync verdict.",
     inputSchema: {
       content: z
         .string()
@@ -504,7 +437,7 @@ server.registerTool(
   {
     title: "Read a page's raw markdown including frontmatter (owner-only)",
     description:
-      "Owner-only. Probes owner capability first. GET /owner/page/{slug}/raw. Returns the full markdown file including YAML frontmatter.",
+      "Owner-only. Probes owner capability first. GET /owner/page/{slug}/raw. Returns the full markdown file including YAML frontmatter. Sealed pages are decrypted locally when unlocked (decrypted_locally: true) into plaintext frontmatter (title/tags/sources). If locked, returns the sealed file plus the locked reason.",
     inputSchema: {
       slug: z.string().min(1).describe("Page slug."),
     },
@@ -512,6 +445,14 @@ server.registerTool(
   async ({ slug }) => {
     try {
       const page = await wiki.readPageRaw(slug);
+      if (page.decrypted_locally) {
+        return asText(`decrypted_locally: true\n\n${page.markdown}`);
+      }
+      if (page.locked_reason) {
+        return asText(
+          `sealed: locked (${page.locked_reason})\n\n${page.markdown}`
+        );
+      }
       return asText(page.markdown);
     } catch (err) {
       return asError(err);
@@ -524,7 +465,7 @@ server.registerTool(
   {
     title: "Replace a page's full markdown (owner-only)",
     description:
-      "Owner-only. Probes owner capability BEFORE sending content. PUT /owner/page/{slug}. Full-file replace including frontmatter. Works for root pages (slugs index, log, overview). Reports tier, title, size, and the durable sync verdict.",
+      "Owner-only. Probes owner capability BEFORE sending content. PUT /owner/page/{slug}. Full-file replace including frontmatter. Works for root pages (slugs index, log, overview). If the document's tier is sealed and the markdown is plaintext, it is sealed client-side before sending (slug kept). If sealing is locked, the write is refused. Reports tier, title, size, and the durable sync verdict.",
     inputSchema: {
       slug: z.string().min(1).describe("Page slug."),
       markdown: z
@@ -548,7 +489,7 @@ server.registerTool(
   {
     title: "Append text to a page (owner-only)",
     description:
-      "Owner-only. Probes owner capability BEFORE sending content. Reads GET /owner/page/{slug}/raw, then PUT with the appended text. Default separator is a single newline; existing trailing newlines are collapsed so there is exactly one newline between the prior content and the appended text. Primary use: append a dated line to slug `log`, or list new titles on slug `index`. Reports old size -> new size.",
+      "Owner-only. Probes owner capability BEFORE sending content. Reads GET /owner/page/{slug}/raw, then PUT with the appended text. Default separator is a single newline; existing trailing newlines are collapsed so there is exactly one newline between the prior content and the appended text. On sealed pages: decrypt, append to the body with the same one-newline rule, re-seal, PUT. If the page is still plaintext but its tier is sealed (not yet migrated), it is sealed on write. Primary use: append a dated line to slug `log`, or list new titles on slug `index`. Reports old size -> new size.",
     inputSchema: {
       slug: z.string().min(1).describe("Page slug (often `log` or `index`)."),
       text: z.string().min(1).describe("Text to append."),
@@ -573,7 +514,7 @@ server.registerTool(
   {
     title: "Change a page's visibility tier (owner-only)",
     description:
-      "Owner-only. Probes owner capability BEFORE sending content. PATCH /owner/page/{slug}/tier.",
+      "Owner-only. Probes owner capability BEFORE sending content. PATCH /owner/page/{slug}/tier. Cannot cross the seal boundary (sealed page to an unsealed tier, or plaintext to a sealed tier); use seal_page / unseal_page for those moves.",
     inputSchema: {
       slug: z.string().min(1).describe("Page slug."),
       tier: z
@@ -630,11 +571,117 @@ server.registerTool(
 );
 
 server.registerTool(
+  "seal_init",
+  {
+    title: "Enable sealed tiers (owner-only)",
+    description:
+      "Owner-only. Generates a keyring from WIKI_SEAL_PASSPHRASE and PUT /owner/sealing. Default tiers: [private]. public can never be sealed. force=true overwrites an existing keyring. Losing the passphrase means sealed pages cannot be recovered. Server-side orchestrator is disabled once sealing is enabled.",
+    inputSchema: {
+      tiers: z
+        .array(z.enum(["recruiter", "friend", "private"]))
+        .optional()
+        .describe("Tiers to seal (default [private]). public is never allowed."),
+      force: z
+        .boolean()
+        .optional()
+        .describe("If true, replace an existing keyring (409 otherwise)."),
+    },
+  },
+  async (args) => {
+    try {
+      const { report } = await wiki.sealInit(args);
+      return asText(report);
+    } catch (err) {
+      return asError(err);
+    }
+  }
+);
+
+server.registerTool(
+  "seal_disable",
+  {
+    title: "Disable sealed-tier gating (owner-only)",
+    description:
+      "Owner-only. DELETE /owner/sealing. Clears keyring tiers so new writes are no longer forced through sealing. Already-sealed pages stay encrypted and can still be opened with the passphrase.",
+    inputSchema: {},
+  },
+  async () => {
+    try {
+      const { report } = await wiki.sealDisable();
+      return asText(report);
+    } catch (err) {
+      return asError(err);
+    }
+  }
+);
+
+server.registerTool(
+  "seal_status",
+  {
+    title: "Report sealed-tier unlock state",
+    description:
+      "Reports whether sealing is enabled, which tiers are sealed, and whether this process is unlocked. Never returns the passphrase or DEK. Call connection_status for the same sealing block plus auth diagnostics.",
+    inputSchema: {},
+  },
+  async () => {
+    try {
+      const status = await wiki.sealStatus();
+      return asText(status);
+    } catch (err) {
+      return asError(err);
+    }
+  }
+);
+
+server.registerTool(
+  "seal_page",
+  {
+    title: "Encrypt an existing plaintext page in place (owner-only)",
+    description:
+      "Owner-only. Reads a plaintext page, seals it client-side, and PUTs ciphertext at the same slug. The page's current tier must already be a sealed tier.",
+    inputSchema: {
+      slug: z.string().min(1).describe("Page slug to seal in place."),
+    },
+  },
+  async ({ slug }) => {
+    try {
+      const { report } = await wiki.sealPageBySlug(slug);
+      return asText(report);
+    } catch (err) {
+      return asError(err);
+    }
+  }
+);
+
+server.registerTool(
+  "unseal_page",
+  {
+    title: "Decrypt a sealed page to a non-sealed tier (owner-only)",
+    description:
+      "Owner-only. Decrypts a sealed page locally and PUTs plaintext at a non-sealed tier (content and tier change together). Target tier must not be in the sealed set.",
+    inputSchema: {
+      slug: z.string().min(1).describe("Sealed page slug."),
+      tier: z
+        .enum(["public", "recruiter", "friend", "private"])
+        .describe("Destination tier (must not be a sealed tier)."),
+    },
+  },
+  async (args) => {
+    try {
+      const { report } = await wiki.unsealPageBySlug(args.slug, args.tier);
+      return asText(report);
+    } catch (err) {
+      return asError(err);
+    }
+  }
+);
+
+server.registerTool(
   "lint_wiki",
   {
     title: "Run the wiki lint (owner-only)",
     description:
-      "Owner-only. Probes owner capability first, then reports structural issues: orphan pages, stale pages, broken provenance, missing pages mentioned 3+ times, pages absent from index.md.",
+      "Owner-only. Probes owner capability first, then reports structural issues: orphan pages, stale pages, broken provenance, missing pages mentioned 3+ times, pages absent from index.md. The server refuses lint (409) when sealing is enabled.",
     inputSchema: {},
   },
   async () => {

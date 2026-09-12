@@ -8,7 +8,15 @@ const tierStyles: Record<PageSummary["tier"], string> = {
   private: "bg-red-50 text-red-700 border-red-200",
 };
 
-export function PageCard({ page, tenant }: { page: PageSummary; tenant?: string }) {
+export function PageCard({
+  page,
+  tenant,
+  badge,
+}: {
+  page: PageSummary;
+  tenant?: string;
+  badge?: string;
+}) {
   // Hosted mode: link to /<tenant>/page/<slug>. Single-tenant: /page/<slug>.
   const href = tenant
     ? `/${encodeURIComponent(tenant)}/page/${encodeURIComponent(page.slug)}`
@@ -20,6 +28,9 @@ export function PageCard({ page, tenant }: { page: PageSummary; tenant?: string 
     >
       <div className="flex items-baseline gap-3">
         <h3 className="font-semibold text-ink truncate flex-1">{page.title}</h3>
+        {badge && (
+          <span className="text-[10px] text-ink-muted shrink-0">{badge}</span>
+        )}
         <span
           className={`text-[10px] uppercase tracking-wide font-semibold border rounded px-1.5 py-0.5 ${tierStyles[page.tier]}`}
         >

@@ -21,6 +21,7 @@ import frontmatter
 
 from .config import TIER_ORDER, VALID_TIERS, settings
 from .importance import load_access, score_pages
+from .sealing import SealingState, load_state
 
 # How long a freshness verdict is trusted before we re-walk the corpus.
 # Under load, ``reload_if_stale`` would otherwise rglob+stat every markdown
@@ -171,9 +172,11 @@ class Page:
     links_in: list[str] = field(default_factory=list)  # other page titles linking TO this page
     word_count: int = 0
     mtime: float = 0.0
+    sealed: bool = False
+    envelope: str | None = None
 
     def to_summary(self, base_url: str = "") -> dict:
-        return {
+        out = {
             "slug": self.slug,
             "title": self.title,
             "section": self.section,
@@ -187,15 +190,22 @@ class Page:
             "rel_path": self.rel_path,
             "url": f"{base_url}/wiki/page/{self.slug}" if base_url else f"/wiki/page/{self.slug}",
         }
+        if self.sealed:
+            out["sealed"] = True
+        return out
 
     def to_full(self, base_url: str = "") -> dict:
-        return {
+        out = {
             **self.to_summary(base_url=base_url),
             "body": self.body,
             "sources": self.sources,
-            "links_out": self.links_out,
-            "links_in": self.links_in,
+            "links_out": [] if self.sealed else self.links_out,
+            "links_in": [] if self.sealed else self.links_in,
         }
+        if self.sealed:
+            out["sources"] = []
+            out["envelope"] = self.envelope or ""
+        return out
 
 
 def _section_from_relpath(rel: Path) -> str:
@@ -286,6 +296,7 @@ class WikiIndex:
         self._last_scan: float = 0.0
         self._last_wiki_mtime: float = 0.0
         self._last_stale_check: float = 0.0
+        self.sealing: SealingState = SealingState(enabled=False, tiers=(), keyring=None)
 
     # ---------- public API ----------
 
@@ -335,13 +346,14 @@ class WikiIndex:
             for slug, page in pages.items():
                 for target_slug in page.links_out:
                     target = pages.get(target_slug)
-                    if target and slug not in target.links_in:
+                    if target and not target.sealed and slug not in target.links_in:
                         target.links_in.append(slug)
 
             self._pages_by_slug = pages
             self._slug_by_title = titles
             self._last_scan = datetime.now(timezone.utc).timestamp()
             self._last_wiki_mtime = self._latest_mtime(settings.wiki_dir)
+            self.sealing = load_state(settings.wiki_root)
 
     def all_pages(self) -> list[Page]:
         return list(self._pages_by_slug.values())
@@ -349,6 +361,14 @@ class WikiIndex:
     def visible_pages(self, viewer_tier: str) -> list[Page]:
         viewer_rank = TIER_ORDER.get(viewer_tier, 0)
         return [p for p in self._pages_by_slug.values() if TIER_ORDER[p.tier] <= viewer_rank]
+
+    def sealed_pages(self, viewer_tier: str) -> list[Page]:
+        viewer_rank = TIER_ORDER.get(viewer_tier, 0)
+        return [
+            p
+            for p in self._pages_by_slug.values()
+            if p.sealed and TIER_ORDER[p.tier] <= viewer_rank
+        ]
 
     def get(self, slug: str) -> Page | None:
         return self._pages_by_slug.get(slug)
@@ -474,6 +494,8 @@ class WikiIndex:
             return []
         results: list[tuple[Page, float]] = []
         for page in self.visible_pages(viewer_tier):
+            if page.sealed:
+                continue
             score = _phrase_bonus(query_folded, page.title, page.slug)
             title_tokens = set(_tokens(page.title))
             tag_tokens = set(_tokens(" ".join(page.tags)))
@@ -526,6 +548,33 @@ class WikiIndex:
                     body = raw[_end + 4:]
             meta = {}
         section = _section_from_relpath(rel)
+
+        sealed_raw = meta.get("sealed")
+        if sealed_raw is not None and str(sealed_raw).strip().lower() == "v1":
+            page_type = _infer_type(section, str(meta.get("type")) if meta.get("type") else None)
+            tier = _normalize_tier(meta.get("tier")) or settings.default_tier
+            created = str(meta.get("created")) if meta.get("created") else None
+            updated = str(meta.get("updated")) if meta.get("updated") else None
+            return Page(
+                slug=md_path.stem,
+                title="Sealed page",
+                rel_path=str(rel).replace("\\", "/"),
+                section=section,
+                page_type=page_type,
+                tier=tier,
+                created=created,
+                updated=updated,
+                sources=[],
+                tags=[],
+                body="",
+                excerpt="",
+                links_out=[],
+                links_in=[],
+                word_count=0,
+                mtime=md_path.stat().st_mtime,
+                sealed=True,
+                envelope="".join((body or "").split()),
+            )
 
         title = str(meta.get("title") or md_path.stem.replace("-", " ").title()).strip()
         slug = md_path.stem

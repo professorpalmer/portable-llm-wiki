@@ -6,6 +6,7 @@ import { DangerZonePanel } from "@/components/DangerZonePanel";
 import { ForceResetModal } from "@/components/ForceResetModal";
 import { PersistencePanel } from "@/components/PersistencePanel";
 import { PersonalLlmUrlPanel } from "@/components/PersonalLlmUrlPanel";
+import { SealingPanel } from "@/components/SealingPanel";
 import { ShareTokensPanel } from "@/components/ShareTokensPanel";
 import { SwitchRepoModal } from "@/components/SwitchRepoModal";
 import {
@@ -604,6 +605,7 @@ function OwnerPageInner({ tenant }: { tenant?: string }) {
           tenant={tenant}
         />
       )}
+      {authed && <SealingPanel tenant={tenant} />}
 
       {error && (
         <div className="mt-6 p-3 rounded border border-red-200 bg-red-50 text-red-700 text-sm">

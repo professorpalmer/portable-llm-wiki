@@ -13,7 +13,19 @@ import {
   type ChatTurn,
 } from "@/lib/api";
 import { Markdown } from "@/components/Markdown";
+import { useSealing, type SealingStatus } from "@/lib/useSealing";
 import { useTenant } from "@/lib/useTenant";
+
+function sealedAskNotice(status: SealingStatus, n: number): string | null {
+  if (status === "not_enabled" && n <= 0) return null;
+  if (n > 0) {
+    return `${n} sealed pages were not available to the server-side answer. Unlock and use search, or ask through the MCP.`;
+  }
+  if (status !== "not_enabled") {
+    return "Sealed pages were not available to the server-side answer. Unlock and use search, or ask through the MCP.";
+  }
+  return null;
+}
 
 type Turn =
   | {
@@ -52,6 +64,8 @@ export default function AskPage() {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState(false);
+  const [sealedExcluded, setSealedExcluded] = useState<number | null>(null);
+  const sealing = useSealing(tenant);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -110,6 +124,9 @@ export default function AskPage() {
         history,
         (evt) => {
           if (evt.type === "start") {
+            if (typeof evt.sealed_excluded === "number") {
+              setSealedExcluded(evt.sealed_excluded);
+            }
             setTurns((prev) =>
               prev.map((t) =>
                 t.id === assistantId && t.kind === "assistant"
@@ -171,6 +188,14 @@ export default function AskPage() {
     setDraft("");
   };
 
+  const sealedNotice = sealedAskNotice(
+    sealing.status,
+    sealedExcluded ??
+      (sealing.status === "unlocked"
+        ? (sealing.titles?.size ?? sealing.sealedCount)
+        : sealing.sealedCount),
+  );
+
   return (
     <div className="max-w-3xl mx-auto px-5 py-8">
       <div className="flex items-baseline justify-between gap-3 flex-wrap">
@@ -192,6 +217,12 @@ export default function AskPage() {
           </button>
         )}
       </div>
+
+      {sealedNotice && (
+        <div className="mt-4 p-3 rounded border border-paper-soft bg-paper-soft/50 text-sm text-ink">
+          {sealedNotice}
+        </div>
+      )}
 
       {turns.length === 0 && (
         <div className="mt-6 p-5 rounded border border-paper-soft bg-paper-soft/40">

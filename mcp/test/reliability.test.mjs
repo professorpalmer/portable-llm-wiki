@@ -499,6 +499,11 @@ test("MCP handshake + tools/list includes diagnostics (mock HTTP backend)", asyn
       "set_page_tier",
       "delete_page",
       "writeback_spec",
+      "seal_init",
+      "seal_disable",
+      "seal_status",
+      "seal_page",
+      "unseal_page",
     ]) {
       assert.ok(names.includes(required), `missing tool ${required}`);
     }

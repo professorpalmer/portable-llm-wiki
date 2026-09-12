@@ -2,8 +2,17 @@
  * Vitest setup file. Wires `@testing-library/jest-dom` matchers and mocks
  * the bits of Next.js that don't work in a plain jsdom environment.
  */
+import { webcrypto } from "node:crypto";
 import "@testing-library/jest-dom/vitest";
 import { vi, beforeEach } from "vitest";
+import { __resetSealingStore } from "@/lib/useSealing";
+
+if (!globalThis.crypto?.subtle) {
+  Object.defineProperty(globalThis, "crypto", {
+    value: webcrypto,
+    configurable: true,
+  });
+}
 
 // next/link in this codebase only uses `href` + children, so the simplest
 // possible passthrough is enough.
@@ -53,4 +62,6 @@ export function __setPathname(p: string) {
 beforeEach(() => {
   globalThis.__TEST_PATHNAME = "/";
   window.localStorage.clear();
+  window.sessionStorage.clear();
+  __resetSealingStore();
 });

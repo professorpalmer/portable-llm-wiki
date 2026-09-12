@@ -3,7 +3,21 @@
 import { useEffect, useMemo, useState } from "react";
 import { fetchManifest, searchWiki, type Manifest, type PageSummary } from "@/lib/api";
 import { PageCard } from "@/components/PageCard";
+import { displayPageTitle } from "@/lib/sealing";
+import { useSealing } from "@/lib/useSealing";
 import { useTenant } from "@/lib/useTenant";
+
+function parseHitTier(tier: string): PageSummary["tier"] {
+  switch (tier) {
+    case "public":
+    case "recruiter":
+    case "friend":
+    case "private":
+      return tier;
+    default:
+      return "private";
+  }
+}
 
 const SECTION_ORDER = [
   "projects",
@@ -24,6 +38,17 @@ export default function BrowsePage() {
   const [searchResults, setSearchResults] = useState<PageSummary[] | null>(null);
   const [tierFilter, setTierFilter] = useState<string>("");
   const [sectionFilter, setSectionFilter] = useState<string>("");
+  const sealing = useSealing(tenant);
+  const sealingStatus = sealing.status;
+  const searchLocal = sealing.searchLocal;
+  const sealingTitles = sealing.titles;
+
+  function titled(page: PageSummary): PageSummary {
+    return {
+      ...page,
+      title: displayPageTitle(page.slug, page.title, sealingTitles),
+    };
+  }
 
   useEffect(() => {
     fetchManifest(tenant)
@@ -46,6 +71,11 @@ export default function BrowsePage() {
     }, 220);
     return () => clearTimeout(handle);
   }, [q, tenant]);
+
+  const localHits = useMemo(() => {
+    if (!q.trim() || sealingStatus !== "unlocked") return [];
+    return searchLocal(q.trim());
+  }, [q, sealingStatus, searchLocal]);
 
   const grouped = useMemo(() => {
     if (!manifest) return {} as Record<string, PageSummary[]>;
@@ -121,16 +151,48 @@ export default function BrowsePage() {
 
       {searchResults ? (
         <section className="mt-6">
+          {localHits.length > 0 && (
+            <div className="mb-6">
+              <h2 className="text-sm uppercase tracking-wider text-ink-muted mb-3">
+                Decrypted locally · {localHits.length}
+              </h2>
+              <div className="grid md:grid-cols-2 gap-3">
+                {localHits.map((hit) => (
+                  <PageCard
+                    key={`local-${hit.slug}`}
+                    page={{
+                      slug: hit.slug,
+                      title: hit.title,
+                      section: hit.section,
+                      type: "",
+                      tier: parseHitTier(hit.tier),
+                      created: null,
+                      updated: hit.updated || null,
+                      tags: [],
+                      excerpt: hit.excerpt,
+                      word_count: 0,
+                      rel_path: "",
+                      sealed: true,
+                    }}
+                    tenant={tenant}
+                    badge="decrypted locally"
+                  />
+                ))}
+              </div>
+            </div>
+          )}
           <h2 className="text-sm uppercase tracking-wider text-ink-muted mb-3">
             Search · {searchResults.length} match{searchResults.length === 1 ? "" : "es"}
           </h2>
-          {searchResults.length === 0 && (
+          {searchResults.length === 0 && localHits.length === 0 && (
             <div className="text-sm text-ink-muted">No pages match.</div>
           )}
           <div className="grid md:grid-cols-2 gap-3">
-            {searchResults.map((p) => (
-              <PageCard key={p.slug} page={p} tenant={tenant} />
-            ))}
+            {searchResults
+              .filter((p) => !localHits.some((h) => h.slug === p.slug))
+              .map((p) => (
+                <PageCard key={p.slug} page={titled(p)} tenant={tenant} />
+              ))}
           </div>
         </section>
       ) : manifest ? (
@@ -141,7 +203,7 @@ export default function BrowsePage() {
             </h2>
             <div className="grid md:grid-cols-2 gap-3">
               {grouped[section].map((p) => (
-                <PageCard key={p.slug} page={p} tenant={tenant} />
+                <PageCard key={p.slug} page={titled(p)} tenant={tenant} />
               ))}
             </div>
           </section>
