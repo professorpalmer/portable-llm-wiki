@@ -8,6 +8,16 @@ ordered newest-first.
 
 ## Unreleased
 
+- **MCP write tools (server v0.2.0).** A session LLM can now write the wiki
+  graph through MCP without the server-side orchestrator: `write_pages`,
+  `write_page_verbatim`, `read_page_raw`, `replace_page`, `append_to_page`,
+  `set_page_tier`, `delete_page`, and `writeback_spec`. Owner tools fail
+  closed via `requireOwnerCapability()` before sending content. Preferred
+  ingest is draft locally from `writeback_spec`, then `write_pages`, then
+  append to `log` / `index`. `run_orchestrator=true` is the legacy path.
+- **`DELETE /owner/page/{slug}`.** Owner-only page delete with a wiki-dir
+  containment check, index reload, and durable sync verdict.
+
 ## 0.2.3. Named titles survive query retrieval
 
 `query_wiki` could answer a question that named *State, Not Tokens* from

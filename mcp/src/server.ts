@@ -53,7 +53,7 @@ function asError(err: unknown): {
 const server = new McpServer(
   {
     name: "portable-llm-wiki",
-    version: "0.1.4",
+    version: "0.2.0",
   },
   {
     instructions: `You are connected to a Portable LLM Wiki via stdio MCP at ${wiki.baseUrl}.
@@ -70,8 +70,27 @@ Typical flow:
 2. For specific questions, call \`query_wiki\` — graph-aware retrieval with sources.
 3. For exploration, use \`search_wiki\` (keyword) or \`get_neighbors\` (graph walk).
 4. \`read_page\` returns the full body of a single page when you need quotes.
-5. Owner-only: \`ingest_source\` saves a raw file and may start an orchestrator job;
-   it does NOT mean wiki graph pages are updated. Use \`ingest_job_status\` to verify.
+5. Owner-only writes: prefer \`write_pages\` (then \`append_to_page\` on \`log\` and
+   \`index\`) so you draft pages yourself. See the preferred ingest section below.
+6. \`ingest_source\` only files a raw source. It does NOT update wiki graph pages
+   unless you set \`run_orchestrator=true\` (legacy). Use \`ingest_job_status\` to
+   verify that job if you take that path.
+
+Ingest without a server-side LLM (preferred)
+(a) Optionally file the raw with \`ingest_source\` and \`run_orchestrator=false\`
+    (default) for provenance.
+(b) YOU (the session LLM) read the source you already have and draft pages
+    following \`writeback_spec\` (specific, dated, [[Wikilinks]] to existing
+    titles from \`list_pages\`, 150-400 words).
+(c) Call \`write_pages\`.
+(d) \`append_to_page\` slug \`log\` with one dated line summarising what was
+    added, and \`append_to_page\` slug \`index\` listing the new page titles
+    under their section.
+(e) Verify with \`list_pages\` / \`read_page\`.
+
+\`run_orchestrator=true\` is the legacy path that runs the operator's
+server-side LLM over the content and should only be used when the client
+cannot draft pages itself.
 
 Every page has a tier (\`public\`/\`recruiter\`/\`friend\`/\`private\`). Pages above
 your tier are invisible — don't synthesize claims about them.`,
@@ -337,7 +356,7 @@ server.registerTool(
   {
     title: "Ingest a new source into the wiki (owner-only)",
     description:
-      "Owner-only. Probes owner capability BEFORE sending content (stdio has no browser cookies). Saves raw content under raw/<subdir>/YYYY-MM-DD-<slug>.md and optionally starts the ingest orchestrator. Reports raw_file vs orchestrator vs durable_sync separately — never claims graph pages are updated merely because a raw file was saved. Use ingest_job_status with the returned tracking_id to verify orchestrator progress.",
+      "Owner-only. Probes owner capability BEFORE sending content (stdio has no browser cookies). Saves raw content under raw/<subdir>/YYYY-MM-DD-<slug>.md. Prefer the no-server-LLM flow: file with run_orchestrator=false (default) for provenance, draft pages from writeback_spec, then write_pages and append_to_page on log/index. run_orchestrator=true is the legacy path that runs the operator's server-side LLM and should only be used when the client cannot draft pages itself. Reports raw_file vs orchestrator vs durable_sync separately — never claims graph pages are updated merely because a raw file was saved.",
     inputSchema: {
       slug: z
         .string()
@@ -354,7 +373,7 @@ server.registerTool(
         .boolean()
         .optional()
         .describe(
-          "If true, kick off the ingest orchestrator (costs LLM tokens). Default false. Graph updates only happen if/when that job completes."
+          "Legacy. If true, kick off the operator's server-side ingest orchestrator (costs their LLM tokens). Default false. Prefer write_pages after drafting locally. Graph updates from this flag only happen if/when that job completes."
         ),
     },
   },
@@ -403,6 +422,207 @@ server.registerTool(
     try {
       const report = await wiki.ingestJobStatus(args);
       return asText(report);
+    } catch (err) {
+      return asError(err);
+    }
+  }
+);
+
+const writePageSchema = z.object({
+  slug: z.string().min(1).describe("Page slug (filename stem)."),
+  title: z.string().min(1).describe("Page title."),
+  section: z
+    .enum(["entities", "concepts", "decisions", "projects", "queries"])
+    .describe("Wiki section."),
+  tags: z.array(z.string()).optional().describe("Optional tags."),
+  body: z.string().describe("Markdown body (no frontmatter)."),
+});
+
+server.registerTool(
+  "write_pages",
+  {
+    title: "Write structured wiki pages (owner-only)",
+    description:
+      "Owner-only. Probes owner capability BEFORE sending content. Commits one or more drafted pages via POST /owner/capture/structured. Forces tier private. Conflicts get a -from-llm-<date> suffix unless force_overwrite. The report lists only pages in `written`, plus conflicts, validation errors, and the durable sync verdict. Never claims a page was written unless it appears in `written`.",
+    inputSchema: {
+      session_label: z
+        .string()
+        .min(3)
+        .describe(
+          "Provenance label stored in each page's sources (e.g. 'chatgpt-2026-09-12-pricing')."
+        ),
+      pages: z
+        .array(writePageSchema)
+        .min(1)
+        .describe("Drafted pages matching writeback_spec."),
+      force_overwrite: z
+        .boolean()
+        .optional()
+        .describe("If true, overwrite an existing slug instead of suffixing."),
+    },
+  },
+  async (args) => {
+    try {
+      const { report } = await wiki.writePages(args);
+      return asText(report);
+    } catch (err) {
+      return asError(err);
+    }
+  }
+);
+
+server.registerTool(
+  "write_page_verbatim",
+  {
+    title: "Write one authored markdown page (owner-only)",
+    description:
+      "Owner-only. Probes owner capability BEFORE sending content. POST /owner/capture/verbatim. Input is a complete markdown file with YAML frontmatter; tier in frontmatter is respected. Reports the written page, any conflict suffix, and the durable sync verdict.",
+    inputSchema: {
+      content: z
+        .string()
+        .min(1)
+        .describe("Full markdown including YAML frontmatter."),
+      slug: z.string().min(1).optional().describe("Optional slug override."),
+      force_overwrite: z
+        .boolean()
+        .optional()
+        .describe("If true, overwrite an existing file instead of suffixing."),
+    },
+  },
+  async (args) => {
+    try {
+      const { report } = await wiki.writePageVerbatim(args);
+      return asText(report);
+    } catch (err) {
+      return asError(err);
+    }
+  }
+);
+
+server.registerTool(
+  "read_page_raw",
+  {
+    title: "Read a page's raw markdown including frontmatter (owner-only)",
+    description:
+      "Owner-only. Probes owner capability first. GET /owner/page/{slug}/raw. Returns the full markdown file including YAML frontmatter.",
+    inputSchema: {
+      slug: z.string().min(1).describe("Page slug."),
+    },
+  },
+  async ({ slug }) => {
+    try {
+      const page = await wiki.readPageRaw(slug);
+      return asText(page.markdown);
+    } catch (err) {
+      return asError(err);
+    }
+  }
+);
+
+server.registerTool(
+  "replace_page",
+  {
+    title: "Replace a page's full markdown (owner-only)",
+    description:
+      "Owner-only. Probes owner capability BEFORE sending content. PUT /owner/page/{slug}. Full-file replace including frontmatter. Works for root pages (slugs index, log, overview). Reports tier, title, size, and the durable sync verdict.",
+    inputSchema: {
+      slug: z.string().min(1).describe("Page slug."),
+      markdown: z
+        .string()
+        .min(1)
+        .describe("Full replacement markdown including YAML frontmatter."),
+    },
+  },
+  async (args) => {
+    try {
+      const { report } = await wiki.replacePage(args);
+      return asText(report);
+    } catch (err) {
+      return asError(err);
+    }
+  }
+);
+
+server.registerTool(
+  "append_to_page",
+  {
+    title: "Append text to a page (owner-only)",
+    description:
+      "Owner-only. Probes owner capability BEFORE sending content. Reads GET /owner/page/{slug}/raw, then PUT with the appended text. Default separator is a single newline; existing trailing newlines are collapsed so there is exactly one newline between the prior content and the appended text. Primary use: append a dated line to slug `log`, or list new titles on slug `index`. Reports old size -> new size.",
+    inputSchema: {
+      slug: z.string().min(1).describe("Page slug (often `log` or `index`)."),
+      text: z.string().min(1).describe("Text to append."),
+      separator: z
+        .string()
+        .optional()
+        .describe("Join string; default a single newline."),
+    },
+  },
+  async (args) => {
+    try {
+      const { report } = await wiki.appendToPage(args);
+      return asText(report);
+    } catch (err) {
+      return asError(err);
+    }
+  }
+);
+
+server.registerTool(
+  "set_page_tier",
+  {
+    title: "Change a page's visibility tier (owner-only)",
+    description:
+      "Owner-only. Probes owner capability BEFORE sending content. PATCH /owner/page/{slug}/tier.",
+    inputSchema: {
+      slug: z.string().min(1).describe("Page slug."),
+      tier: z
+        .enum(["public", "recruiter", "friend", "private"])
+        .describe("New visibility tier."),
+    },
+  },
+  async (args) => {
+    try {
+      const { report } = await wiki.setPageTier(args);
+      return asText(report);
+    } catch (err) {
+      return asError(err);
+    }
+  }
+);
+
+server.registerTool(
+  "delete_page",
+  {
+    title: "Delete a wiki page (owner-only)",
+    description:
+      "Owner-only. Probes owner capability first. DELETE /owner/page/{slug}. Removes the page file and reloads the index. Reports the deleted slug, rel_path, and durable sync verdict.",
+    inputSchema: {
+      slug: z.string().min(1).describe("Page slug to delete."),
+    },
+  },
+  async ({ slug }) => {
+    try {
+      const { report } = await wiki.deletePage(slug);
+      return asText(report);
+    } catch (err) {
+      return asError(err);
+    }
+  }
+);
+
+server.registerTool(
+  "writeback_spec",
+  {
+    title: "Fetch the structured writeback schema",
+    description:
+      "Public. GET /llm-writeback-spec (no auth). Returns the markdown schema a session LLM should follow when drafting pages for write_pages.",
+    inputSchema: {},
+  },
+  async () => {
+    try {
+      const spec = await wiki.writebackSpec();
+      return asText(spec);
     } catch (err) {
       return asError(err);
     }

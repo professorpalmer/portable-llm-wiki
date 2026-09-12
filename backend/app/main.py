@@ -2469,6 +2469,32 @@ def owner_replace_page(
     })
 
 
+@app.delete("/owner/page/{slug}")
+def owner_delete_page(slug: str, _: Viewer = Depends(require_owner)) -> dict:
+    """Delete an existing wiki page file. Refuses paths that resolve
+    outside the wiki directory."""
+    page = index.get(slug)
+    if not page:
+        raise HTTPException(status_code=404, detail=f"No page with slug {slug!r}")
+    rel_path = page.rel_path
+    target = settings.wiki_root / rel_path
+    try:
+        target.resolve().relative_to(settings.wiki_dir.resolve())
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="resolved path is not inside the wiki directory",
+        ) from None
+    try:
+        target.unlink()
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"delete failed: {exc}") from exc
+    index.reload()
+    from . import persistence as _persistence
+    _persistence.flush_async(f"delete page {rel_path}")
+    return _with_sync({"ok": True, "slug": slug, "rel_path": rel_path})
+
+
 @app.patch("/owner/page/{slug}/tier")
 def owner_patch_tier(slug: str, req: TierPatchRequest, _: Viewer = Depends(require_owner)) -> dict:
     new_tier = _validate_tier(req.tier)

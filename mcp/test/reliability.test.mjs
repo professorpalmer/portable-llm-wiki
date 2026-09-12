@@ -189,6 +189,9 @@ test("connection_status owner-capable", async () => {
   assert.equal(status.auth_mode, "owner");
   assert.equal(status.capabilities.write, true);
   assert.equal(status.capabilities.lint, true);
+  assert.match(status.notes.join(" "), /write_pages/);
+  assert.match(status.notes.join(" "), /replace_page/);
+  assert.match(status.notes.join(" "), /delete_page/);
   assert.equal(JSON.stringify(status).includes("owner-secret"), false);
 });
 
@@ -488,6 +491,14 @@ test("MCP handshake + tools/list includes diagnostics (mock HTTP backend)", asyn
       "ingest_source",
       "list_pages",
       "query_wiki",
+      "write_pages",
+      "write_page_verbatim",
+      "read_page_raw",
+      "replace_page",
+      "append_to_page",
+      "set_page_tier",
+      "delete_page",
+      "writeback_spec",
     ]) {
       assert.ok(names.includes(required), `missing tool ${required}`);
     }
@@ -509,4 +520,369 @@ test("MCP handshake + tools/list includes diagnostics (mock HTTP backend)", asyn
     proc.kill();
     await new Promise((r) => backend.close(r));
   }
+});
+
+const localOnlySync = {
+  will_sync: false,
+  mode: "local_only",
+  remote: null,
+  detail: "No git remote configured.",
+};
+
+function ownerManifestResponse() {
+  return jsonResponse({
+    page_count: 5,
+    sections: {},
+    viewer_tier: "private",
+    viewer_is_owner: true,
+  });
+}
+
+test("owner write methods fail closed when not owner (no content request)", async () => {
+  const sent = [];
+  const fetchImpl = mockFetchRouter({
+    "GET /wiki/manifest.json": () =>
+      jsonResponse({
+        page_count: 4,
+        sections: {},
+        viewer_tier: "recruiter",
+        viewer_is_owner: false,
+      }),
+    "POST /owner/capture/structured": () => {
+      sent.push("structured");
+      return jsonResponse({ ok: true }, 201);
+    },
+    "POST /owner/capture/verbatim": () => {
+      sent.push("verbatim");
+      return jsonResponse({ ok: true }, 201);
+    },
+    "GET /owner/page/x/raw": () => {
+      sent.push("raw");
+      return jsonResponse({ markdown: "SECRET" });
+    },
+    "PUT /owner/page/x": () => {
+      sent.push("put");
+      return jsonResponse({ ok: true });
+    },
+    "PATCH /owner/page/x/tier": () => {
+      sent.push("tier");
+      return jsonResponse({ ok: true });
+    },
+    "DELETE /owner/page/x": () => {
+      sent.push("del");
+      return jsonResponse({ ok: true });
+    },
+  });
+  const client = new WikiClient("http://mock.wiki", "share-token", fetchImpl);
+  const calls = [
+    () =>
+      client.writePages({
+        session_label: "should-not-send",
+        pages: [
+          {
+            slug: "x",
+            title: "X",
+            section: "concepts",
+            body: "SENSITIVE",
+          },
+        ],
+      }),
+    () => client.writePageVerbatim({ content: "SENSITIVE FRONTMATTER" }),
+    () => client.readPageRaw("x"),
+    () => client.replacePage({ slug: "x", markdown: "SENSITIVE REPLACE" }),
+    () => client.appendToPage({ slug: "x", text: "SENSITIVE APPEND" }),
+    () => client.setPageTier({ slug: "x", tier: "private" }),
+    () => client.deletePage("x"),
+  ];
+  for (const call of calls) {
+    await assert.rejects(call, (err) => {
+      assert.match(String(err.message), /share\/read-only|owner-capable|stdio/i);
+      return true;
+    });
+  }
+  assert.deepEqual(sent, [], "must fail closed before any owner content request");
+});
+
+test("writePages happy path request shape and honest written report", async () => {
+  let captured;
+  const fetchImpl = mockFetchRouter({
+    "GET /wiki/manifest.json": ownerManifestResponse,
+    "POST /owner/capture/structured": (_u, init) => {
+      captured = { method: init.method, body: JSON.parse(init.body) };
+      return jsonResponse(
+        {
+          ok: true,
+          written: [
+            {
+              rel_path: "wiki/concepts/real.md",
+              title: "Real",
+              section: "concepts",
+              slug: "real",
+              tier: "private",
+            },
+          ],
+          conflicts: [{ slug: "ghost", wrote_as: "ghost-from-llm-2026-09-12.md" }],
+          errors: ["skipped unknown section"],
+          session_label: "chatgpt-2026-09-12",
+          page_count: 1,
+          sync: localOnlySync,
+        },
+        201
+      );
+    },
+  });
+  const client = new WikiClient("http://mock.wiki", "owner", fetchImpl);
+  const { report, result } = await client.writePages({
+    session_label: "chatgpt-2026-09-12",
+    pages: [
+      {
+        slug: "real",
+        title: "Real",
+        section: "concepts",
+        tags: ["test"],
+        body: "A drafted page.",
+      },
+    ],
+    force_overwrite: true,
+  });
+  assert.equal(captured.method, "POST");
+  assert.equal(captured.body.session_label, "chatgpt-2026-09-12");
+  assert.equal(captured.body.force_overwrite, true);
+  assert.equal(captured.body.pages[0].slug, "real");
+  assert.equal(captured.body.pages[0].section, "concepts");
+  assert.deepEqual(result.written.map((p) => p.rel_path), [
+    "wiki/concepts/real.md",
+  ]);
+  assert.match(report, /written: wiki\/concepts\/real\.md/);
+  assert.match(report, /conflicts: ghost -> ghost-from-llm-2026-09-12\.md/);
+  assert.match(report, /errors: skipped unknown section/);
+  assert.match(report, /durable_sync: local_only/);
+  assert.doesNotMatch(report, /written:.*ghost-from-llm/);
+});
+
+test("writePageVerbatim happy path request shape and report", async () => {
+  let captured;
+  const fetchImpl = mockFetchRouter({
+    "GET /wiki/manifest.json": ownerManifestResponse,
+    "POST /owner/capture/verbatim": (_u, init) => {
+      captured = { method: init.method, body: JSON.parse(init.body) };
+      return jsonResponse(
+        {
+          ok: true,
+          written: {
+            rel_path: "wiki/concepts/verbatim-note.md",
+            title: "Verbatim Note",
+            section: "concepts",
+            slug: "verbatim-note",
+            tier: "friend",
+            page_type: "concept",
+          },
+          conflict: null,
+          sync: localOnlySync,
+        },
+        201
+      );
+    },
+  });
+  const client = new WikiClient("http://mock.wiki", "owner", fetchImpl);
+  const content = "---\ntype: concept\ntitle: Verbatim Note\ntier: friend\n---\n\nBody.\n";
+  const { report } = await client.writePageVerbatim({
+    content,
+    slug: "verbatim-note",
+    force_overwrite: false,
+  });
+  assert.equal(captured.method, "POST");
+  assert.equal(captured.body.content, content);
+  assert.equal(captured.body.slug, "verbatim-note");
+  assert.equal(captured.body.force_overwrite, false);
+  assert.match(report, /wiki\/concepts\/verbatim-note\.md/);
+  assert.match(report, /tier=friend/);
+  assert.match(report, /conflict: \(none\)/);
+  assert.match(report, /durable_sync: local_only/);
+});
+
+test("readPageRaw happy path returns full markdown", async () => {
+  let capturedPath = "";
+  let capturedMethod = "";
+  const markdown = "---\ntitle: Log\n---\n\n# Log\n";
+  const fetchImpl = mockFetchRouter({
+    "GET /wiki/manifest.json": ownerManifestResponse,
+    "GET /owner/page/log/raw": (_u, init) => {
+      capturedPath = _u.pathname;
+      capturedMethod = init.method ?? "GET";
+      return jsonResponse({
+        slug: "log",
+        rel_path: "wiki/log.md",
+        title: "Log",
+        section: "overview",
+        tier: "private",
+        markdown,
+      });
+    },
+  });
+  const client = new WikiClient("http://mock.wiki", "owner", fetchImpl);
+  const page = await client.readPageRaw("log");
+  assert.equal(capturedMethod, "GET");
+  assert.equal(capturedPath, "/owner/page/log/raw");
+  assert.equal(page.markdown, markdown);
+  assert.equal(page.slug, "log");
+});
+
+test("replacePage happy path request shape and report", async () => {
+  let captured;
+  const markdown = "---\ntitle: Log\n---\n\n# Log\n\n- 2026-09-12 note\n";
+  const fetchImpl = mockFetchRouter({
+    "GET /wiki/manifest.json": ownerManifestResponse,
+    "PUT /owner/page/log": (_u, init) => {
+      captured = {
+        method: init.method,
+        path: _u.pathname,
+        body: JSON.parse(init.body),
+      };
+      return jsonResponse({
+        ok: true,
+        slug: "log",
+        rel_path: "wiki/log.md",
+        tier: "private",
+        title: "Log",
+        size: markdown.length,
+        sync: localOnlySync,
+      });
+    },
+  });
+  const client = new WikiClient("http://mock.wiki", "owner", fetchImpl);
+  const { report } = await client.replacePage({ slug: "log", markdown });
+  assert.equal(captured.method, "PUT");
+  assert.equal(captured.path, "/owner/page/log");
+  assert.equal(captured.body.markdown, markdown);
+  assert.match(report, /tier: private/);
+  assert.match(report, /title: Log/);
+  assert.match(report, new RegExp(`size: ${markdown.length}`));
+  assert.match(report, /durable_sync: local_only/);
+});
+
+test("appendToPage composes read+PUT with exactly one newline separator", async () => {
+  const existing = "---\ntitle: Log\n---\n\n# Log\n";
+  const appended = "- 2026-09-12 added [[Real]]";
+  const expected = "---\ntitle: Log\n---\n\n# Log\n- 2026-09-12 added [[Real]]";
+  const calls = [];
+  const fetchImpl = mockFetchRouter({
+    "GET /wiki/manifest.json": ownerManifestResponse,
+    "GET /owner/page/log/raw": (_u, init) => {
+      calls.push({ method: init.method ?? "GET", path: _u.pathname });
+      return jsonResponse({
+        slug: "log",
+        rel_path: "wiki/log.md",
+        title: "Log",
+        section: "overview",
+        tier: "private",
+        markdown: existing,
+      });
+    },
+    "PUT /owner/page/log": (_u, init) => {
+      calls.push({
+        method: init.method,
+        path: _u.pathname,
+        body: JSON.parse(init.body),
+      });
+      return jsonResponse({
+        ok: true,
+        slug: "log",
+        rel_path: "wiki/log.md",
+        tier: "private",
+        title: "Log",
+        size: expected.length,
+        sync: localOnlySync,
+      });
+    },
+  });
+  const client = new WikiClient("http://mock.wiki", "owner", fetchImpl);
+  const { report } = await client.appendToPage({ slug: "log", text: appended });
+  const contentCalls = calls.filter((c) => c.path !== "/wiki/manifest.json");
+  assert.equal(contentCalls.length, 2);
+  assert.equal(contentCalls[0].method, "GET");
+  assert.equal(contentCalls[0].path, "/owner/page/log/raw");
+  assert.equal(contentCalls[1].method, "PUT");
+  assert.equal(contentCalls[1].path, "/owner/page/log");
+  assert.equal(contentCalls[1].body.markdown, expected);
+  assert.equal(contentCalls[1].body.markdown.includes("\n\n- 2026-09-12"), false);
+  assert.match(report, new RegExp(`${existing.length} -> ${expected.length}`));
+});
+
+test("setPageTier happy path request shape and report", async () => {
+  let captured;
+  const fetchImpl = mockFetchRouter({
+    "GET /wiki/manifest.json": ownerManifestResponse,
+    "PATCH /owner/page/public-entity/tier": (_u, init) => {
+      captured = {
+        method: init.method,
+        path: _u.pathname,
+        body: JSON.parse(init.body),
+      };
+      return jsonResponse({
+        ok: true,
+        slug: "public-entity",
+        tier: "friend",
+        sync: localOnlySync,
+      });
+    },
+  });
+  const client = new WikiClient("http://mock.wiki", "owner", fetchImpl);
+  const { report } = await client.setPageTier({
+    slug: "public-entity",
+    tier: "friend",
+  });
+  assert.equal(captured.method, "PATCH");
+  assert.equal(captured.path, "/owner/page/public-entity/tier");
+  assert.deepEqual(captured.body, { tier: "friend" });
+  assert.match(report, /Set tier of public-entity to friend/);
+  assert.match(report, /durable_sync: local_only/);
+});
+
+test("deletePage happy path request shape and report", async () => {
+  let captured;
+  const fetchImpl = mockFetchRouter({
+    "GET /wiki/manifest.json": ownerManifestResponse,
+    "DELETE /owner/page/delete-me": (_u, init) => {
+      captured = {
+        method: init.method,
+        path: _u.pathname,
+        body: init.body,
+      };
+      return jsonResponse({
+        ok: true,
+        slug: "delete-me",
+        rel_path: "wiki/concepts/delete-me.md",
+        sync: localOnlySync,
+      });
+    },
+  });
+  const client = new WikiClient("http://mock.wiki", "owner", fetchImpl);
+  const { report } = await client.deletePage("delete-me");
+  assert.equal(captured.method, "DELETE");
+  assert.equal(captured.path, "/owner/page/delete-me");
+  assert.equal(captured.body, undefined);
+  assert.match(report, /Deleted page delete-me \(wiki\/concepts\/delete-me\.md\)/);
+  assert.match(report, /durable_sync: local_only/);
+});
+
+test("writebackSpec returns text without requiring a token", async () => {
+  const paths = [];
+  const fetchImpl = async (url, init = {}) => {
+    const u = new URL(url);
+    paths.push(u.pathname);
+    const headers = init.headers ?? {};
+    assert.equal(Boolean(headers.Authorization), false);
+    if (u.pathname === "/llm-writeback-spec") {
+      return new Response("# writeback spec\nsession_label\n", {
+        status: 200,
+        headers: { "Content-Type": "text/plain" },
+      });
+    }
+    return jsonResponse({ detail: `no mock for ${u.pathname}` }, 404);
+  };
+  const client = new WikiClient("http://mock.wiki", "", fetchImpl);
+  const text = await client.writebackSpec();
+  assert.equal(text, "# writeback spec\nsession_label\n");
+  assert.deepEqual(paths, ["/llm-writeback-spec"]);
 });

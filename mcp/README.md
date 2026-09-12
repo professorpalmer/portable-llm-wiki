@@ -126,9 +126,42 @@ API (`/wiki/manifest.json` returns 404).
 | `search_wiki` | Fast keyword search across visible pages. | no |
 | `query_wiki` | The primary tool. Natural-language question → graph-aware retrieval → sourced answer with citations. | no |
 | `get_neighbors` | All pages within N hops of a slug along the wikilink graph. | no |
-| `ingest_source` | Save a new raw source + optionally kick off the ingest orchestrator. Fails closed if not owner-capable. | **yes** |
+| `ingest_source` | Save a new raw source. Default does not run the server-side orchestrator. Prefer `write_pages` for graph updates. Fails closed if not owner-capable. | **yes** |
 | `ingest_job_status` | Bounded polling of `GET /owner/jobs/{tracking_id}` (+ optional persistence). Verifies orchestrator outcome honestly. | **yes** |
+| `write_pages` | Structured multi-page writeback. Forces tier private. | **yes** |
+| `write_page_verbatim` | Write one authored markdown page; frontmatter tier is respected. | **yes** |
+| `read_page_raw` | Full markdown including frontmatter. | **yes** |
+| `replace_page` | Full-file replace including frontmatter. | **yes** |
+| `append_to_page` | Read raw + PUT with exactly one newline before the appended text. | **yes** |
+| `set_page_tier` | Change a page's visibility tier. | **yes** |
+| `delete_page` | Delete a page file and reload the index. | **yes** |
+| `writeback_spec` | Public schema text for `write_pages`. | no |
 | `lint_wiki` | Structural lint report (orphans, stale, broken provenance, etc.). | **yes** |
+
+## Write tools
+
+| Tool | Backend route | Notes |
+|---|---|---|
+| `write_pages` | `POST /owner/capture/structured` | Multi-page writeback. Forces tier private. Conflicts get a `-from-llm-<date>` suffix unless `force_overwrite`. Report lists only `written` rel_paths, plus conflicts, validation errors, and the durable sync verdict. |
+| `write_page_verbatim` | `POST /owner/capture/verbatim` | Full markdown with YAML frontmatter. Tier in frontmatter is respected. Decisions need a date-prefixed slug. |
+| `read_page_raw` | `GET /owner/page/{slug}/raw` | Full markdown including frontmatter. Owner-only. |
+| `replace_page` | `PUT /owner/page/{slug}` | Full-file replace including frontmatter. Works for root pages (`index`, `log`, `overview`). |
+| `append_to_page` | `GET /owner/page/{slug}/raw` then `PUT /owner/page/{slug}` | Client-side compose. Default separator is one newline between existing content and appended text. Primary use: dated line on `log`, new titles on `index`. |
+| `set_page_tier` | `PATCH /owner/page/{slug}/tier` | `public` / `recruiter` / `friend` / `private`. |
+| `delete_page` | `DELETE /owner/page/{slug}` | Removes the file, reloads the index, returns the durable sync verdict. |
+| `writeback_spec` | `GET /llm-writeback-spec` | Public. Schema for `write_pages`. No auth required. |
+
+### Ingest without a server-side LLM
+
+Preferred path when the client can draft pages itself:
+
+1. Optionally file the raw with `ingest_source` and `run_orchestrator=false` (the default) for provenance.
+2. Read the source you already have and draft pages following `writeback_spec` — specific, dated, `[[Wikilinks]]` to existing titles from `list_pages`, 150-400 words.
+3. Call `write_pages`.
+4. `append_to_page` slug `log` with one dated line summarising what was added, and `append_to_page` slug `index` listing the new page titles under their section.
+5. Verify with `list_pages` / `read_page`.
+
+`run_orchestrator=true` is the legacy path that runs the operator's server-side LLM over the content. Use it only when the client cannot draft pages itself.
 
 ### `auth_mode` values from `connection_status`
 
@@ -136,7 +169,7 @@ API (`/wiki/manifest.json` returns 404).
 |---|---|
 | `public` | No bearer configured. Public-tier reads. |
 | `share_read_only` | Bearer elevates reads (e.g. recruiter/friend) but is not owner-capable. |
-| `owner` | Backend granted `viewer_is_owner`. Write/lint available. |
+| `owner` | Backend granted `viewer_is_owner`. Write tools (`write_pages`, `replace_page`, `delete_page`, …) and lint available. |
 | `token_not_elevated` | Bearer present but backend left the viewer on public (invalid/revoked/wrong wiki). |
 
 ### Honest ingest / status flow
