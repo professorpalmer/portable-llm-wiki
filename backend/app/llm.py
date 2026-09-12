@@ -290,7 +290,10 @@ def _select_context_pages(
     anchors = reserved[:max_anchors]
     anchor_slugs = [p.slug for p in anchors]
     reserved_slugs = [p.slug for p in reserved]
-    breakdowns = score_pages(index.visible_pages(viewer_tier), load_access())
+    breakdowns = score_pages(
+        (p for p in index.visible_pages(viewer_tier) if not p.sealed),
+        load_access(),
+    )
 
     neighbor_budget = min(TOP_NEIGHBOR_RESERVE, max(0, max_total - len(reserved_slugs)))
     if neighbor_budget and reserved:
@@ -340,6 +343,8 @@ def _select_context_pages(
 
     if len(ordered_slugs) < 3:
         for page in index.visible_pages(viewer_tier):
+            if page.sealed:
+                continue
             if page.slug in ordered_slugs or _is_catalog_slug(page.slug):
                 continue
             tags_lower = [t.lower() for t in page.tags]
@@ -355,7 +360,7 @@ def _select_context_pages(
     chosen: list[Page] = []
     for s in ordered_slugs[:max_total]:
         p = index.get(s)
-        if p is not None:
+        if p is not None and not p.sealed:
             chosen.append(p)
 
     record_access(p.slug for p in chosen)

@@ -27,6 +27,8 @@ import {
   type SyncVerdict,
 } from "@/lib/api";
 import { SyncWarning } from "@/components/SyncWarning";
+import { displayPageTitle } from "@/lib/sealing";
+import { useSealing } from "@/lib/useSealing";
 
 
 // Tailwind classes for tier-coloured pills. Mirrors the per-page detail
@@ -184,13 +186,15 @@ export function PageRow({
   isOwnerView: boolean;
   onTierChanged: () => void;
 }) {
+  const sealing = useSealing(tenantId);
+  const title = displayPageTitle(page.slug, page.title, sealing.titles);
   return (
     <li className="flex items-center gap-2 min-w-0">
       <Link
         href={`/${tenantId}/page/${encodeURIComponent(page.slug)}`}
         className="flex-1 text-sm text-ink hover:text-accent truncate min-w-0"
       >
-        {page.title}
+        {title}
       </Link>
       {isOwnerView ? (
         <TierToggle

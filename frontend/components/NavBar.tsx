@@ -7,6 +7,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { apiBase, authLogout, authMe, isHostedMode, type AuthUser } from "@/lib/api";
 import { loginReturnTo } from "@/lib/safeReturnTo";
 
+import { SealedUnlock } from "./SealedUnlock";
 import { ViewerBadge } from "./ViewerBadge";
 
 // Links anyone can see (viewer pages). In hosted mode they're scoped to
@@ -161,7 +162,8 @@ export function NavBar() {
         )}
 
         <div className="ml-auto flex items-center gap-3">
-          <div className="hidden sm:block">
+          <div className="hidden sm:flex items-center gap-3">
+            <SealedUnlock tenant={effectiveTenant} />
             {hosted ? (
               <HostedIdentityBadge viewer={viewer} loaded={viewerLoaded} />
             ) : (
@@ -194,7 +196,8 @@ export function NavBar() {
             className="max-w-5xl mx-auto px-5 py-4"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="mb-4 sm:hidden">
+            <div className="mb-4 sm:hidden space-y-3">
+              <SealedUnlock tenant={effectiveTenant} />
               {hosted ? (
                 <HostedIdentityBadge viewer={viewer} loaded={viewerLoaded} />
               ) : (

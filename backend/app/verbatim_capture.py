@@ -57,6 +57,7 @@ from typing import Optional
 
 import frontmatter
 
+from .sealing import is_sealed_markdown
 from .tenants import Tenant
 
 logger = logging.getLogger(__name__)
@@ -226,25 +227,50 @@ def parse_and_validate(
         )
     section = TYPE_TO_SECTION[page_type]
 
+    sealed = is_sealed_markdown(content)
+
     # --- title ---
     raw_title = metadata.get("title")
-    if not raw_title or not isinstance(raw_title, str):
-        raise VerbatimValidationError(
-            "frontmatter is missing required field 'title' (or it's empty/"
-            "non-string)"
-        )
-    title = raw_title.strip()
-    if not title:
-        raise VerbatimValidationError("'title' is blank after trimming")
-    if len(title) > MAX_TITLE_LEN:
-        raise VerbatimValidationError(
-            f"'title' is {len(title)} chars; cap is {MAX_TITLE_LEN}. Shorten "
-            "the title; long context belongs in the body."
-        )
+    if sealed:
+        if raw_title is not None and not isinstance(raw_title, str):
+            raise VerbatimValidationError(
+                "'title' must be a string when provided"
+            )
+        title = (raw_title or "").strip()
+        if title and len(title) > MAX_TITLE_LEN:
+            raise VerbatimValidationError(
+                f"'title' is {len(title)} chars; cap is {MAX_TITLE_LEN}. Shorten "
+                "the title; long context belongs in the body."
+            )
+    else:
+        if not raw_title or not isinstance(raw_title, str):
+            raise VerbatimValidationError(
+                "frontmatter is missing required field 'title' (or it's empty/"
+                "non-string)"
+            )
+        title = raw_title.strip()
+        if not title:
+            raise VerbatimValidationError("'title' is blank after trimming")
+        if len(title) > MAX_TITLE_LEN:
+            raise VerbatimValidationError(
+                f"'title' is {len(title)} chars; cap is {MAX_TITLE_LEN}. Shorten "
+                "the title; long context belongs in the body."
+            )
 
-    # --- tier (optional, defaults to private) ---
+    # --- tier ---
     raw_tier = metadata.get("tier")
-    if raw_tier is None:
+    if sealed:
+        if not raw_tier or not isinstance(raw_tier, str):
+            raise VerbatimValidationError(
+                "frontmatter is missing required field 'tier'"
+            )
+        tier = raw_tier.strip().lower()
+        if not tier or tier not in VALID_TIERS:
+            raise VerbatimValidationError(
+                f"invalid tier {raw_tier!r}. Must be one of: "
+                + ", ".join(sorted(VALID_TIERS))
+            )
+    elif raw_tier is None:
         tier = "private"
     elif not isinstance(raw_tier, str):
         raise VerbatimValidationError(
@@ -264,14 +290,22 @@ def parse_and_validate(
     #   1. explicit slug_override (from request payload, e.g. user typed
     #      a slug in the UI form)
     #   2. ``slug`` field in the frontmatter
-    #   3. derived from title
+    #   3. derived from title (unsealed only — sealed docs must supply a slug)
     # Then we normalize: lowercase, ascii, hyphens, leading-trailing
     # hyphens stripped, capped length.
-    slug_source = (
-        slug_override
-        or metadata.get("slug")
-        or title
-    )
+    if sealed:
+        slug_source = slug_override or metadata.get("slug")
+        if not slug_source:
+            raise VerbatimValidationError(
+                "sealed documents require a slug (request 'slug' or "
+                "frontmatter 'slug:')"
+            )
+    else:
+        slug_source = (
+            slug_override
+            or metadata.get("slug")
+            or title
+        )
     if not isinstance(slug_source, str):
         raise VerbatimValidationError(
             "'slug' in frontmatter must be a string when provided"
@@ -291,8 +325,11 @@ def parse_and_validate(
         slug = f"{date.today().isoformat()}-{slug}"
         slug = slug[:MAX_SLUG_LEN]
 
+    if sealed and not title:
+        title = slug
+
     body = (post.content or "").strip()
-    if len(body) < MIN_BODY_CHARS:
+    if not sealed and len(body) < MIN_BODY_CHARS:
         raise VerbatimValidationError(
             "page body is empty (everything after the closing '---' is "
             "blank). Add at least a one-line summary."

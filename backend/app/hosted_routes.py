@@ -51,7 +51,7 @@ from fastapi import APIRouter, Body, Cookie, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
-from . import github_api, onboarding_seed, persistence, tenants, url_scrape
+from . import github_api, onboarding_seed, persistence, sealing, tenants, url_scrape
 from .config import settings
 
 
@@ -993,6 +993,16 @@ def _write_raw_import(tenant: tenants.Tenant, kind: str, label: str, body: str) 
     return str(rel).replace("\\", "/")
 
 
+def _refuse_if_sealed(tenant: tenants.Tenant) -> None:
+    if sealing.load_state(tenant.wiki_root).enabled:
+        raise sealing.sealing_conflict(
+            "sealing_enabled",
+            "Server-side drafting and imports are disabled while sealing is "
+            "enabled for this wiki. Use the MCP write tools from your own "
+            "LLM session.",
+        )
+
+
 async def _draft_from_raw_with_fallback(
     *,
     tenant: tenants.Tenant,
@@ -1013,6 +1023,7 @@ async def _draft_from_raw_with_fallback(
     can stop saying "Orchestrator was unavailable" when in fact we
     drafted N pages.
     """
+    _refuse_if_sealed(tenant)
     out: dict = {"raw_path": raw_rel}
 
     if run_orchestrator:
@@ -2147,6 +2158,7 @@ async def onboarding_import_wiki(
     _require_hosted_mode()
     user = _require_session_user(request)
     tenant = tenants.manager().require(user["tenant_id"])
+    _refuse_if_sealed(tenant)
     mode = (req.mode or "verbatim").strip().lower()
     if mode not in ("verbatim", "standardize"):
         raise HTTPException(

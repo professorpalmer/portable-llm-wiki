@@ -15,6 +15,8 @@ import {
   undoLibraryAutoZoom,
   type CameraPose,
 } from "@/lib/graphCamera";
+import { displayPageTitle } from "@/lib/sealing";
+import { useSealing } from "@/lib/useSealing";
 import { useTenant } from "@/lib/useTenant";
 
 function settleGraphCamera(
@@ -119,6 +121,7 @@ export default function GraphPage() {
   const autoFitDoneRef = useRef(false);
   const fittedPoseRef = useRef<ReturnType<typeof captureCamera>>(null);
   const [size, setSize] = useState({ w: 800, h: 600 });
+  const sealing = useSealing(tenant);
 
   useEffect(() => {
     fetchGraph(tenant)
@@ -145,18 +148,30 @@ export default function GraphPage() {
     return () => ro.disconnect();
   }, []);
 
-  const filtered = useMemo(() => {
+  const labeledGraph = useMemo(() => {
     if (!graph) return null;
-    if (!sectionFilter) return graph;
+    if (!sealing.titles) return graph;
+    return {
+      ...graph,
+      nodes: graph.nodes.map((n) => ({
+        ...n,
+        title: displayPageTitle(n.slug, n.title, sealing.titles),
+      })),
+    };
+  }, [graph, sealing.titles]);
+
+  const filtered = useMemo(() => {
+    if (!labeledGraph) return null;
+    if (!sectionFilter) return labeledGraph;
     const allowed = new Set(
-      graph.nodes.filter((n) => n.section === sectionFilter).map((n) => n.slug)
+      labeledGraph.nodes.filter((n) => n.section === sectionFilter).map((n) => n.slug)
     );
     return {
-      nodes: graph.nodes.filter((n) => allowed.has(n.slug)),
-      edges: graph.edges.filter((e) => allowed.has(e.source) && allowed.has(e.target)),
-      anchors: graph.anchors,
+      nodes: labeledGraph.nodes.filter((n) => allowed.has(n.slug)),
+      edges: labeledGraph.edges.filter((e) => allowed.has(e.source) && allowed.has(e.target)),
+      anchors: labeledGraph.anchors,
     };
-  }, [graph, sectionFilter]);
+  }, [labeledGraph, sectionFilter]);
 
   const data = useMemo(() => {
     if (!filtered) return { nodes: [], links: [] };
@@ -589,9 +604,9 @@ export default function GraphPage() {
         <h2 className="text-sm uppercase tracking-wider text-ink-muted mb-3">
           Hubs (most-connected pages)
         </h2>
-        {graph ? (
+        {labeledGraph ? (
           <ol className="grid sm:grid-cols-2 gap-x-6 gap-y-1 text-sm">
-            {[...graph.nodes]
+            {[...labeledGraph.nodes]
               .sort((a, b) => b.degree - a.degree)
               .slice(0, 10)
               .map((n, i) => (

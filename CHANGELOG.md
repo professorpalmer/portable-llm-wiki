@@ -6,7 +6,59 @@ itself is versioned separately. See [SPEC.md](./SPEC.md).
 Format roughly follows [Keep a Changelog](https://keepachangelog.com),
 ordered newest-first.
 
-## Unreleased
+## 0.3.0. Sealed tiers and session-LLM write tools
+
+Backend **0.3.0**, MCP connector **0.3.0**.
+
+- **Sealed tiers (MCP server v0.3.0).** Opt-in client-side encryption for
+  `private`, `friend`, and/or `recruiter`. The MCP process on the user's
+  machine (or the browser) derives a key from a passphrase (PBKDF2-SHA256,
+  600k iterations), encrypts each page as an AES-256-GCM envelope bound to
+  its slug, and the hosted server stores ciphertext only. Titles, tags,
+  sources, and bodies are encrypted; slugs are opaque (`s-<hmac>`) except
+  `index`, `log`, `overview`. The operator can see tier, section, dates,
+  count, and ciphertext. Lose the passphrase and nobody can recover the
+  pages.
+  - Backend: keyring at `wiki/.sealed/keyring.json`; `GET /wiki/sealing`,
+    `GET /wiki/sealed/bundle`, `PUT`/`DELETE /owner/sealing`; manifest
+    gains `sealing` only when enabled; `/wiki/query` reports
+    `sealed_excluded`. Sealed pages are excluded from search, query
+    context, and link graphs. Plaintext writes into a sealed tier, the
+    orchestrator, import, and lint return `409` with a `code`. `PATCH
+    /owner/page/{slug}/tier` refuses to cross the seal boundary.
+  - MCP: `seal_init`, `seal_disable`, `seal_status`, `seal_page`,
+    `unseal_page`; `write_pages` seals automatically when `private` is
+    sealed, `append_to_page` re-seals, `read_page` / `read_page_raw`
+    decrypt locally, `search_wiki` / `query_wiki` merge locally decrypted
+    hits. `WIKI_SEAL_PASSPHRASE` unlocks the process; missing or wrong
+    means locked, and locked never sends plaintext.
+  - Frontend: unlock control in the nav, decrypted page/browse/graph/search
+    rendering, and an owner Sealing panel (enable, seal existing pages in
+    place, disable).
+  - Hardening from review: a `sealed: v1` marker with a body that is not
+    a well-formed envelope is refused (no plaintext smuggling); sealed
+    verbatim writes return `409 sealed_slug_exists` instead of a
+    renamed file, since the envelope is bound to its slug; after
+    `DELETE /owner/sealing` the keyring stays readable (manifest
+    `sealing.enabled: false`) so leftover sealed pages still unlock and
+    can be unsealed; PATCH of a sealed page across the boundary is
+    refused regardless of enabled state; `/wiki/sealed/bundle` is 403
+    at the public tier; the lint swarm, lint drafts, image/audio
+    orchestrator kicks, reingest, and hosted onboarding imports all
+    return `409 sealing_enabled`. Documented that git history and
+    pre-existing file names are not rewritten.
+  - With no keyring every response is byte-identical to before (verified
+    against the baseline on a 2632-page corpus), so Marionette and other
+    clients see no change until a wiki opts in.
+- **MCP write tools (server v0.2.0).** A session LLM can now write the wiki
+  graph through MCP without the server-side orchestrator: `write_pages`,
+  `write_page_verbatim`, `read_page_raw`, `replace_page`, `append_to_page`,
+  `set_page_tier`, `delete_page`, and `writeback_spec`. Owner tools fail
+  closed via `requireOwnerCapability()` before sending content. Preferred
+  ingest is draft locally from `writeback_spec`, then `write_pages`, then
+  append to `log` / `index`. `run_orchestrator=true` is the legacy path.
+- **`DELETE /owner/page/{slug}`.** Owner-only page delete with a wiki-dir
+  containment check, index reload, and durable sync verdict.
 
 ## 0.2.4. Hosted ingest completes without Puppetmaster
 

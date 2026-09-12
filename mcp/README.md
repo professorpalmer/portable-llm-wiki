@@ -108,6 +108,7 @@ Recommended first call in any agent session: `connection_status`.
 |---|---|---|
 | `WIKI_BASE_URL` | Path prefix before `/wiki` and `/owner` (preferred). Hosted: `https://portablellm.wiki/<tenant>`. Local single-tenant: `http://localhost:8000`. | `http://localhost:8000` |
 | `WIKI_OWNER_TOKEN` | Optional bearer. May be owner-capable, share/read-only, or invalid — always verified via the manifest. Never logged. | (none) |
+| `WIKI_SEAL_PASSPHRASE` | Passphrase that unwraps the sealed-tier keyring in this process. Required to read or write sealed tiers. Never logged, never sent to the server. | (none) |
 | `WIKI_API_BASE` | Legacy alias for `WIKI_BASE_URL`. Still works if `WIKI_BASE_URL` is unset. | — |
 
 When pointing at the hosted Vercel demo, use the tenant-scoped base URL
@@ -126,9 +127,47 @@ API (`/wiki/manifest.json` returns 404).
 | `search_wiki` | Fast keyword search across visible pages. | no |
 | `query_wiki` | The primary tool. Natural-language question → graph-aware retrieval → sourced answer with citations. | no |
 | `get_neighbors` | All pages within N hops of a slug along the wikilink graph. | no |
-| `ingest_source` | Save a new raw source, then optionally start the orchestrator or hosted direct drafter. Fails closed if not owner-capable. | **yes** |
+| `ingest_source` | Save a new raw source. Default does not run the server-side LLM. With `run_orchestrator=true` it starts the orchestrator or the hosted direct drafter (legacy). Prefer `write_pages` for graph updates. Fails closed if not owner-capable. | **yes** |
 | `ingest_job_status` | Bounded polling of `GET /owner/jobs/{tracking_id}` (+ optional persistence). Verifies orchestrator outcome honestly. | **yes** |
-| `lint_wiki` | Structural lint report (orphans, stale, broken provenance, etc.). | **yes** |
+| `write_pages` | Structured multi-page writeback. Forces tier private. | **yes** |
+| `write_page_verbatim` | Write one authored markdown page; frontmatter tier is respected. | **yes** |
+| `read_page_raw` | Full markdown including frontmatter. | **yes** |
+| `replace_page` | Full-file replace including frontmatter. | **yes** |
+| `append_to_page` | Read raw + PUT with exactly one newline before the appended text. | **yes** |
+| `set_page_tier` | Change a page's visibility tier. | **yes** |
+| `delete_page` | Delete a page file and reload the index. | **yes** |
+| `writeback_spec` | Public schema text for `write_pages`. | no |
+| `lint_wiki` | Structural lint report (orphans, stale, broken provenance, etc.). Refused by the server when sealing is enabled. | **yes** |
+| `seal_status` | Whether sealing is enabled, which tiers, and whether this process is unlocked. | no |
+| `seal_init` | Generate a keyring from `WIKI_SEAL_PASSPHRASE` and enable sealed tiers. | **yes** |
+| `seal_disable` | Clear keyring tiers (already-sealed pages stay encrypted). | **yes** |
+| `seal_page` | Encrypt an existing plaintext page in place (same slug). | **yes** |
+| `unseal_page` | Decrypt a sealed page to a non-sealed tier in one PUT. | **yes** |
+
+## Write tools
+
+| Tool | Backend route | Notes |
+|---|---|---|
+| `write_pages` | `POST /owner/capture/structured` | Multi-page writeback. Forces tier private. Conflicts get a `-from-llm-<date>` suffix unless `force_overwrite`. Report lists only `written` rel_paths, plus conflicts, validation errors, and the durable sync verdict. |
+| `write_page_verbatim` | `POST /owner/capture/verbatim` | Full markdown with YAML frontmatter. Tier in frontmatter is respected. Decisions need a date-prefixed slug. |
+| `read_page_raw` | `GET /owner/page/{slug}/raw` | Full markdown including frontmatter. Owner-only. |
+| `replace_page` | `PUT /owner/page/{slug}` | Full-file replace including frontmatter. Works for root pages (`index`, `log`, `overview`). |
+| `append_to_page` | `GET /owner/page/{slug}/raw` then `PUT /owner/page/{slug}` | Client-side compose. Default separator is one newline between existing content and appended text. Primary use: dated line on `log`, new titles on `index`. |
+| `set_page_tier` | `PATCH /owner/page/{slug}/tier` | `public` / `recruiter` / `friend` / `private`. |
+| `delete_page` | `DELETE /owner/page/{slug}` | Removes the file, reloads the index, returns the durable sync verdict. |
+| `writeback_spec` | `GET /llm-writeback-spec` | Public. Schema for `write_pages`. No auth required. |
+
+### Ingest without a server-side LLM
+
+Preferred path when the client can draft pages itself:
+
+1. Optionally file the raw with `ingest_source` and `run_orchestrator=false` (the default) for provenance.
+2. Read the source you already have and draft pages following `writeback_spec` — specific, dated, `[[Wikilinks]]` to existing titles from `list_pages`, 150-400 words.
+3. Call `write_pages`.
+4. `append_to_page` slug `log` with one dated line summarising what was added, and `append_to_page` slug `index` listing the new page titles under their section.
+5. Verify with `list_pages` / `read_page`.
+
+`run_orchestrator=true` is the legacy path that runs the operator's server-side LLM over the content. Use it only when the client cannot draft pages itself.
 
 ### `auth_mode` values from `connection_status`
 
@@ -136,7 +175,7 @@ API (`/wiki/manifest.json` returns 404).
 |---|---|
 | `public` | No bearer configured. Public-tier reads. |
 | `share_read_only` | Bearer elevates reads (e.g. recruiter/friend) but is not owner-capable. |
-| `owner` | Backend granted `viewer_is_owner`. Write/lint available. |
+| `owner` | Backend granted `viewer_is_owner`. Write tools (`write_pages`, `replace_page`, `delete_page`, …) and lint available. |
 | `token_not_elevated` | Bearer present but backend left the viewer on public (invalid/revoked/wrong wiki). |
 
 ### Honest ingest / status flow
@@ -170,6 +209,44 @@ exposing the master `OWNER_TOKEN`, use the **Share Tokens** panel in the
 owner console at `/owner`. The plaintext token is shown once at mint
 time — paste it into the recipient's `WIKI_OWNER_TOKEN` env var. That
 recipient should expect `auth_mode=share_read_only`, not owner writes.
+
+## Sealed tiers
+
+Sealing is opt-in. When the owner runs `seal_init`, chosen tiers
+(typically `private`; optionally `friend` / `recruiter`) are stored on
+the hosted server as ciphertext. Encryption and decryption happen in
+this MCP process on the user's machine — or in the browser. `public`
+can never be sealed.
+
+Set `WIKI_SEAL_PASSPHRASE` in the MCP env (the same `env` block as
+`WIKI_OWNER_TOKEN`). Call `connection_status` or `seal_status` to see
+`sealing: {enabled, tiers, unlocked}`. If the passphrase is missing or
+wrong, the process is locked: reads of sealed pages return a
+placeholder, and writes that would send plaintext to a sealed tier are
+refused before anything is posted.
+
+When `private` is sealed and the process is unlocked, `write_pages`
+seals each page locally (opaque slug, `sealed: v1` frontmatter) and
+writes through `/owner/capture/verbatim` instead of posting plaintext
+to `/owner/capture/structured`. `append_to_page` decrypts, appends,
+and re-seals. `search_wiki` / `query_wiki` merge local hits over the
+decrypted bundle (labelled "decrypted locally"); the MCP does not call
+an LLM. The server-side orchestrator is disabled on sealed wikis.
+
+What the server operator can see: tier, section, dates, page count,
+and ciphertext. Titles, tags, sources, and bodies are encrypted.
+Slugs are opaque (`s-<hmac>`) except root pages `index`, `log`, and
+`overview`.
+
+If you lose the passphrase, nobody can recover the pages — not you,
+not the server operator.
+
+Sealing does not rewrite git history: pages that were plaintext before
+`seal_page` remain plaintext in earlier commits until that history is
+rotated. `seal_page` keeps the existing file name; only pages created
+through `write_pages` after sealing get opaque slugs. `raw/` captures
+are not sealed. After `seal_disable` the keyring stays on the server so
+leftover sealed pages can still be read and `unseal_page`d.
 
 ## Smoke test / unit tests
 

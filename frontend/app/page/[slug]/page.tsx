@@ -10,9 +10,12 @@ import {
   ownerReplacePage,
   type PageFull,
 } from "@/lib/api";
+import { invertTitles, type EnvelopePayload } from "@/lib/sealing";
+import { useSealing } from "@/lib/useSealing";
 import { useTenant } from "@/lib/useTenant";
 import { useIsOwnerOf } from "@/lib/useIsOwner";
 import { Markdown } from "@/components/Markdown";
+import { SealedUnlock } from "@/components/SealedUnlock";
 
 const tierStyles: Record<string, string> = {
   public: "bg-emerald-50 text-emerald-700 border-emerald-200",
@@ -34,9 +37,14 @@ export default function PageView() {
   const [editError, setEditError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [showPreview, setShowPreview] = useState(true);
+  const [plain, setPlain] = useState<EnvelopePayload | null>(null);
+  const [plainError, setPlainError] = useState<string | null>(null);
   const ownerAccess = useIsOwnerOf(tenant);
   const tokenReady = ownerAccess.ready;
   const hasOwnerToken = ownerAccess.ready && ownerAccess.isOwner;
+  const sealing = useSealing(tenant);
+  const decryptPage = sealing.decryptPage;
+  const titleToSlug = invertTitles(sealing.titles);
 
   // App-route prefix for internal Links and router pushes. In hosted mode
   // every wiki page lives under /<tenant>/...; in single-tenant mode this
@@ -51,6 +59,28 @@ export default function PageView() {
       .then(setPage)
       .catch((e) => setError((e as Error).message));
   }, [slug, tenant]);
+
+  useEffect(() => {
+    if (!page?.sealed || !page.envelope || sealing.status !== "unlocked") {
+      setPlain(null);
+      setPlainError(null);
+      return;
+    }
+    let cancelled = false;
+    decryptPage(page.slug, page.envelope)
+      .then((p) => {
+        if (!cancelled) {
+          setPlain(p);
+          setPlainError(null);
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) setPlainError((e as Error).message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [page, sealing.status, sealing.dek, decryptPage]);
 
   async function changeTier(newTier: PageFull["tier"]) {
     if (!page) return;
@@ -118,6 +148,37 @@ export default function PageView() {
     );
   }
 
+  if (page.sealed && sealing.status !== "unlocked") {
+    return (
+      <article className="max-w-3xl mx-auto px-5 py-8">
+        <div className="flex items-center gap-3 text-xs text-ink-muted">
+          <Link href={`${appPrefix}/browse`} className="hover:text-ink">browse</Link>
+          <span>/</span>
+          <span>{page.section}</span>
+        </div>
+        <h1 className="mt-3 text-3xl font-semibold tracking-tight text-ink">
+          Sealed page
+        </h1>
+        <p className="mt-2 text-sm text-ink-muted">
+          Sealed page. Unlock to read.
+        </p>
+        <div className="mt-4">
+          <SealedUnlock tenant={tenant} />
+        </div>
+      </article>
+    );
+  }
+
+  const viewTitle = page.sealed ? (plain?.title ?? page.title) : page.title;
+  const viewTags = page.sealed ? (plain?.tags ?? []) : page.tags;
+  const viewBody = page.sealed
+    ? (plain?.body ?? "")
+    : (page.rendered_body || page.body);
+  const viewSources = page.sealed ? (plain?.sources ?? []) : page.sources;
+  const viewWords = page.sealed
+    ? (plain?.body.trim() ? plain.body.trim().split(/\s+/).length : 0)
+    : page.word_count;
+
   return (
     <article className="max-w-3xl mx-auto px-5 py-8">
       <div className="flex items-center gap-3 text-xs text-ink-muted">
@@ -130,7 +191,7 @@ export default function PageView() {
 
       <header className="mt-3">
         <h1 className="text-3xl font-semibold tracking-tight text-ink">
-          {page.title}
+          {viewTitle}
         </h1>
         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
           <span
@@ -145,7 +206,7 @@ export default function PageView() {
           {page.updated && (
             <span className="text-ink-muted">updated {page.updated}</span>
           )}
-          <span className="text-ink-muted">{page.word_count} words</span>
+          <span className="text-ink-muted">{viewWords} words</span>
           <span className="text-ink-muted font-mono">{page.rel_path}</span>
         </div>
         {tokenReady && hasOwnerToken && (
@@ -178,9 +239,9 @@ export default function PageView() {
             </button>
           </div>
         )}
-        {page.tags.length > 0 && (
+        {viewTags.length > 0 && (
           <div className="mt-3 flex flex-wrap gap-1">
-            {page.tags.map((t) => (
+            {viewTags.map((t) => (
               <span
                 key={t}
                 className="text-[11px] bg-paper-soft text-ink-muted px-1.5 py-0.5 rounded"
@@ -193,6 +254,12 @@ export default function PageView() {
       </header>
 
       <hr className="my-6 border-paper-soft" />
+
+      {plainError && (
+        <div className="mb-4 p-3 rounded border border-red-200 bg-red-50 text-red-700 text-sm">
+          {plainError}
+        </div>
+      )}
 
       {editing ? (
         <section className="bg-white border border-accent/30 rounded-xl p-4">
@@ -256,7 +323,9 @@ export default function PageView() {
           </div>
         </section>
       ) : (
-        <Markdown tenant={tenant}>{page.rendered_body || page.body}</Markdown>
+        <Markdown tenant={tenant} titleToSlug={titleToSlug}>
+          {viewBody}
+        </Markdown>
       )}
 
       {(page.links_out_resolved.length > 0 || page.links_in_resolved.length > 0) && (
@@ -304,13 +373,13 @@ export default function PageView() {
         </section>
       )}
 
-      {page.sources.length > 0 && (
+      {viewSources.length > 0 && (
         <section className="mt-8">
           <h3 className="text-xs uppercase tracking-wider text-ink-muted mb-2">
             Sources (provenance)
           </h3>
           <ul className="text-sm space-y-1 font-mono text-ink-muted">
-            {page.sources.map((s) => (
+            {viewSources.map((s) => (
               <li key={s}>· {s}</li>
             ))}
           </ul>

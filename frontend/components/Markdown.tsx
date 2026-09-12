@@ -26,10 +26,14 @@ function slugify(text: string): string {
  * tenant-aware route when a tenant is in scope). Kept symmetrical
  * with the backend so wikilinks render identically whether the
  * markdown was streamed from the LLM or hand-baked into a component. */
-export function preprocessWikilinks(text: string): string {
+export function preprocessWikilinks(
+  text: string,
+  titleToSlug?: Map<string, string>,
+): string {
   return text.replace(WIKILINK_RE, (_match, target, label) => {
     const display = (label ?? target).trim();
-    const slug = slugify(target);
+    const mapped = titleToSlug?.get(String(target).toLowerCase().trim());
+    const slug = mapped ?? slugify(target);
     if (!slug) return display;
     return `[${display}](/wiki/page/${slug})`;
   });
@@ -38,16 +42,19 @@ export function preprocessWikilinks(text: string): string {
 export function Markdown({
   children,
   tenant,
+  titleToSlug,
 }: {
   children: string;
   /** When set, ``/wiki/page/<slug>`` links resolve to
    * ``/<tenant>/page/<slug>``. Without it, they resolve to
    * ``/page/<slug>`` (single-tenant / OSS / preview). */
   tenant?: string;
+  /** Decrypted sealed-page titles -> opaque slugs. */
+  titleToSlug?: Map<string, string>;
 }) {
   // Inline-rewrite [[wikilinks]] before react-markdown sees the text,
   // since react-markdown doesn't natively understand wiki link syntax.
-  const processed = preprocessWikilinks(children);
+  const processed = preprocessWikilinks(children, titleToSlug);
   return (
     <div className="prose-wiki">
       <ReactMarkdown

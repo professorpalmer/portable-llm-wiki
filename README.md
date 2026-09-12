@@ -343,6 +343,41 @@ when you point the backend at an existing wiki.
 - `Authorization: Bearer <SHARE_TOKEN>` → tier configured in `SHARE_TOKENS`
   env var (format `tokenA:recruiter,tokenB:friend`).
 
+### Sealed tiers (operator cannot read them)
+
+Tier filtering keeps other viewers out. It does not keep the server
+operator out: a hosted backend reads plaintext markdown to build the
+graph. If that is not acceptable for your `private` material, seal it.
+
+Sealing is opt-in per wiki. Run the MCP tool `seal_init` (or use the
+Sealing panel in the owner console) with a passphrase. From then on:
+
+- Pages in sealed tiers are encrypted before they leave your machine
+  (AES-256-GCM per page, key derived from the passphrase with
+  PBKDF2-SHA256). The server stores `sealed: v1` envelopes and sees
+  tier, section, dates, count, and ciphertext. Titles, tags, sources,
+  bodies are encrypted; new slugs are opaque.
+- Your own LLM session writes the graph through the MCP write tools
+  (`write_pages`, `append_to_page`, ...), which seal automatically. The
+  server-side orchestrator, import, and lint are refused for sealed
+  wikis because they would need plaintext.
+- Reading happens where the key is: the MCP process (set
+  `WIKI_SEAL_PASSPHRASE`) or the browser (Unlock in the nav). Server
+  search and `/wiki/query` skip sealed pages; the clients search the
+  decrypted set locally.
+- Lose the passphrase and nobody can recover those pages, including the
+  operator.
+
+What sealing does not do: it does not rewrite git history. Pages that
+existed as plaintext before you sealed them are still plaintext in
+earlier commits of the wiki repository until you rotate that history
+(for example, start a fresh repository). Sealing existing pages keeps
+their file names, so title-derived slugs remain visible; pages created
+after sealing get opaque slugs. Raw captures under `raw/` are not
+sealed.
+
+Public pages and unsealed wikis behave exactly as before.
+
 ## API
 
 The LLM-facing wire protocol. `/.well-known/llm-wiki.json`,

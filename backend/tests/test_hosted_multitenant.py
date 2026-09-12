@@ -3928,3 +3928,32 @@ def test_logout_post_clears_session(multi_tenant_app):
     multi_tenant_app.cookies.delete("plw_session")
     r = multi_tenant_app.get("/auth/me")
     assert r.json().get("authenticated") is False
+
+
+def test_hosted_manifest_omits_sealing_without_keyring(multi_tenant_app):
+    r = multi_tenant_app.get("/t/alice/wiki/manifest.json")
+    assert r.status_code == 200
+    assert "sealing" not in r.json()
+
+
+def test_hosted_sealing_is_tenant_scoped(multi_tenant_app):
+    from tests.test_sealing import valid_keyring
+
+    _set_session_user(multi_tenant_app, "alice", login="alice")
+    r = multi_tenant_app.put(
+        "/t/alice/owner/sealing",
+        json={"keyring": valid_keyring()},
+    )
+    assert r.status_code == 200, r.text
+    alice = multi_tenant_app.get("/t/alice/wiki/manifest.json")
+    assert alice.status_code == 200
+    assert alice.json()["sealing"]["enabled"] is True
+    assert alice.json()["sealing"]["tiers"] == ["private"]
+    bob = multi_tenant_app.get("/t/bob/wiki/manifest.json")
+    assert bob.status_code == 200
+    assert "sealing" not in bob.json()
+    blocked = multi_tenant_app.post(
+        "/t/alice/owner/lint",
+    )
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["code"] == "sealing_enabled"

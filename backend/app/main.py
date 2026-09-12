@@ -77,6 +77,7 @@ from .share_tokens import (
     purge_tokens as purge_share_tokens,
     revoke_token as revoke_share_token,
 )
+from . import sealing
 from .wiki import (
     Page,
     delete_raw_file,
@@ -199,7 +200,7 @@ def _maybe_start_tenant_pull_poller(_persistence):
 
 app = FastAPI(
     title="Portable LLM Wiki",
-    version="0.2.4",
+    version="0.3.0",
     description=(
         "Vendor-neutral HTTP transport for a Karpathy-style personal LLM wiki. "
         "Any LLM client that can fetch URLs can read the wiki via this API."
@@ -516,6 +517,11 @@ class PageReplaceRequest(BaseModel):
     markdown: str = Field(..., min_length=5)
 
 
+class SealingPutRequest(BaseModel):
+    keyring: dict
+    force: bool = False
+
+
 # ---------- public, LLM-facing endpoints ----------
 
 
@@ -602,14 +608,14 @@ def _api_base_url() -> str:
 
 
 @app.get("/wiki/manifest.json", response_model=ManifestResponse)
-def manifest(viewer: Viewer = Depends(current_viewer)) -> ManifestResponse:
+def manifest(viewer: Viewer = Depends(current_viewer)):
     _refresh()
     visible = index.visible_pages(viewer.tier)
     sections: dict[str, int] = {}
     for p in visible:
         sections[p.section] = sections.get(p.section, 0) + 1
     base = _api_base_url()
-    return ManifestResponse(
+    response = ManifestResponse(
         wiki_title=settings.wiki_root.name,
         generated_at=datetime.now(timezone.utc).isoformat(),
         viewer_tier=viewer.tier,
@@ -633,6 +639,16 @@ def manifest(viewer: Viewer = Depends(current_viewer)) -> ManifestResponse:
             "citations, POST {\"question\": \"...\"} to the query endpoint."
         ),
     )
+    if index.sealing.keyring is None:
+        return response
+    payload = response.model_dump(mode="json")
+    payload["sealing"] = {
+        "enabled": index.sealing.enabled,
+        "tiers": list(index.sealing.tiers),
+        "keyring_url": "/wiki/sealing",
+        "bundle_url": "/wiki/sealed/bundle",
+    }
+    return JSONResponse(payload)
 
 
 @app.get("/wiki/page/{slug}")
@@ -703,7 +719,7 @@ def search(
 async def query(req: QueryRequest, viewer: Viewer = Depends(current_viewer)) -> dict:
     _refresh()
     result = await run_query(req.question, viewer_tier=viewer.tier)
-    return {
+    payload = {
         "question": req.question,
         "viewer_tier": viewer.tier,
         "answer": result.answer,
@@ -713,6 +729,47 @@ async def query(req: QueryRequest, viewer: Viewer = Depends(current_viewer)) -> 
         "used_pages": result.used_pages,
         "retrieval": result.retrieval,
     }
+    if index.sealing.enabled:
+        n = len(index.sealed_pages(viewer.tier))
+        if n > 0:
+            payload["sealed_excluded"] = n
+    return payload
+
+
+@app.get("/wiki/sealing")
+def wiki_sealing(viewer: Viewer = Depends(current_viewer)) -> dict:
+    _refresh()
+    state = index.sealing
+    if not state.keyring:
+        raise HTTPException(status_code=404, detail="sealing is not enabled")
+    if not viewer.is_owner and viewer.tier == "public":
+        raise HTTPException(
+            status_code=403,
+            detail="sealing keyring is not visible at the public tier",
+        )
+    return state.keyring
+
+
+@app.get("/wiki/sealed/bundle")
+def wiki_sealed_bundle(viewer: Viewer = Depends(current_viewer)) -> dict:
+    _refresh()
+    if not viewer.is_owner and viewer.tier == "public":
+        raise HTTPException(
+            status_code=403,
+            detail="sealed bundle is not visible at the public tier",
+        )
+    pages = []
+    for page in index.sealed_pages(viewer.tier):
+        pages.append(
+            {
+                "slug": page.slug,
+                "section": page.section,
+                "tier": page.tier,
+                "updated": page.updated,
+                "envelope": page.envelope or "",
+            }
+        )
+    return {"pages": pages, "count": len(pages)}
 
 
 class ChatTurnIn(BaseModel):
@@ -1402,6 +1459,53 @@ def owner_persistence_flush(_: Viewer = Depends(require_owner)) -> dict:
     return _persistence.flush_now("manual sync from owner console")
 
 
+_SEALING_LLM_DISABLED = (
+    "Server-side LLM is disabled while sealing is enabled. Use MCP write "
+    "tools (write_pages / write_page_verbatim) on your machine."
+)
+
+
+@app.put("/owner/sealing")
+def owner_put_sealing(
+    req: SealingPutRequest, _: Viewer = Depends(require_owner)
+) -> dict:
+    try:
+        keyring = sealing.validate_keyring(req.keyring)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    path = settings.wiki_root / sealing.KEYRING_REL
+    if path.is_file() and not req.force:
+        raise sealing.sealing_conflict(
+            "keyring_exists",
+            "A keyring already exists. Pass force=true to replace it.",
+        )
+    sealing.write_keyring(settings.wiki_root, keyring)
+    index.reload()
+    from . import persistence as _persistence
+
+    _persistence.flush_async("enable sealing")
+    return _with_sync(
+        {
+            "ok": True,
+            "enabled": index.sealing.enabled,
+            "tiers": list(index.sealing.tiers),
+        }
+    )
+
+
+@app.delete("/owner/sealing")
+def owner_delete_sealing(_: Viewer = Depends(require_owner)) -> dict:
+    try:
+        sealing.disable(settings.wiki_root)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="sealing is not enabled") from None
+    index.reload()
+    from . import persistence as _persistence
+
+    _persistence.flush_async("disable sealing")
+    return _with_sync({"ok": True, "enabled": False})
+
+
 async def _draft_capture_without_orchestrator(
     *, source_label: str, source_content: str
 ) -> dict:
@@ -1433,6 +1537,8 @@ async def _draft_capture_without_orchestrator(
 
 @app.post("/owner/ingest", status_code=status.HTTP_201_CREATED)
 async def owner_ingest(req: IngestRequest, _: Viewer = Depends(require_owner)) -> dict:
+    if req.run_orchestrator and index.sealing.enabled:
+        raise sealing.sealing_conflict("sealing_enabled", _SEALING_LLM_DISABLED)
     slug = _safe_slug(req.slug)
     today = date.today().isoformat()
     raw_dir = settings.raw_dir / req.subdir
@@ -1571,6 +1677,8 @@ async def owner_import(req: ImportRequest, _: Viewer = Depends(require_owner)) -
        the pages so the frontend can skip straight to the "done"
        state without polling.
     """
+    if index.sealing.enabled:
+        raise sealing.sealing_conflict("sealing_enabled", _SEALING_LLM_DISABLED)
     today = date.today().isoformat()
     pages_before = {p.slug for p in index.all_pages()}
 
@@ -1655,9 +1763,15 @@ class CaptureIngestRequest(BaseModel):
     note: Optional[str] = None
 
 
+def _refuse_if_sealed() -> None:
+    if index.sealing.enabled:
+        raise sealing.sealing_conflict("sealing_enabled", _SEALING_LLM_DISABLED)
+
+
 def _maybe_kick_orchestrator(rel_path: str, note: str | None, *, run: bool) -> dict | None:
     if not run:
         return None
+    _refuse_if_sealed()
     try:
         job = start_ingest_job(rel_path, note or "")
         return {
@@ -1698,6 +1812,8 @@ async def owner_capture_paste(
     if subdir not in ("conversations", "articles", "meetings", "assets"):
         raise HTTPException(status_code=400, detail=f"invalid subdir {subdir!r}")
     run_orch = bool(payload.get("run_orchestrator"))
+    if run_orch and index.sealing.enabled:
+        raise sealing.sealing_conflict("sealing_enabled", _SEALING_LLM_DISABLED)
     result = capture_paste(content=content, label=label, subdir=subdir)
 
     orchestrator_info = _maybe_kick_orchestrator(
@@ -1925,6 +2041,14 @@ def owner_capture_structured(
     from . import persistence as _persistence
     from .tenants import current_tenant
 
+    if "private" in index.sealing.tiers:
+        raise sealing.sealing_conflict(
+            "plaintext_into_sealed_tier",
+            "Cannot write plaintext into a sealed tier. Encrypt client-side "
+            "(MCP write tools or the browser sealer) and include 'sealed: v1' "
+            "frontmatter.",
+        )
+
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="body must be a JSON object")
 
@@ -2150,7 +2274,29 @@ def owner_capture_verbatim(
 
     force_overwrite = bool(payload.get("force_overwrite", False))
 
+    resulting_tier = sealing.frontmatter_tier(content) or "private"
+    violation = sealing.plaintext_write_violation(
+        index.sealing, resulting_tier, content
+    )
+    if violation:
+        raise sealing.sealing_conflict("plaintext_into_sealed_tier", violation)
+
     tenant = current_tenant()
+    if sealing.is_sealed_markdown(content) and not force_overwrite:
+        try:
+            _, _, _, section, _, slug = _verbatim.parse_and_validate(
+                content=content, slug_override=slug_override
+            )
+        except _verbatim.VerbatimValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        existing = tenant.wiki_root / "wiki" / section / f"{slug}.md"
+        if existing.exists():
+            raise sealing.sealing_conflict(
+                "sealed_slug_exists",
+                f"A page already exists at {section}/{slug}. Sealed envelopes "
+                "are bound to their slug, so the file cannot be renamed on "
+                "conflict. Pass force_overwrite=true to replace it.",
+            )
     try:
         result = _verbatim.write_verbatim(
             content=content,
@@ -2400,6 +2546,13 @@ def owner_get_job(tracking_id: str, _: Viewer = Depends(require_owner)) -> dict:
 @app.post("/owner/page", status_code=status.HTTP_201_CREATED)
 def owner_write_page(req: PageWriteRequest, _: Viewer = Depends(require_owner)) -> dict:
     tier = _validate_tier(req.tier)
+    if tier in index.sealing.tiers:
+        raise sealing.sealing_conflict(
+            "plaintext_into_sealed_tier",
+            "Cannot write plaintext into a sealed tier. Encrypt client-side "
+            "(MCP write tools or the browser sealer) and include 'sealed: v1' "
+            "frontmatter.",
+        )
     slug = _safe_slug(_slug_from_title(req.title))
     section_dir = settings.wiki_dir / req.section
     section_dir.mkdir(parents=True, exist_ok=True)
@@ -2483,8 +2636,12 @@ def owner_replace_page(
     page = index.get(slug)
     if not page:
         raise HTTPException(status_code=404, detail=f"No page with slug {slug!r}")
-    target = settings.wiki_root / page.rel_path
     new_text = req.markdown
+    put_tier = sealing.frontmatter_tier(new_text) or settings.default_tier
+    violation = sealing.plaintext_write_violation(index.sealing, put_tier, new_text)
+    if violation:
+        raise sealing.sealing_conflict("plaintext_into_sealed_tier", violation)
+    target = settings.wiki_root / page.rel_path
     if not new_text.endswith("\n"):
         new_text = new_text + "\n"
     try:
@@ -2505,12 +2662,47 @@ def owner_replace_page(
     })
 
 
+@app.delete("/owner/page/{slug}")
+def owner_delete_page(slug: str, _: Viewer = Depends(require_owner)) -> dict:
+    """Delete an existing wiki page file. Refuses paths that resolve
+    outside the wiki directory."""
+    page = index.get(slug)
+    if not page:
+        raise HTTPException(status_code=404, detail=f"No page with slug {slug!r}")
+    rel_path = page.rel_path
+    target = settings.wiki_root / rel_path
+    try:
+        target.resolve().relative_to(settings.wiki_dir.resolve())
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="resolved path is not inside the wiki directory",
+        ) from None
+    try:
+        target.unlink()
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"delete failed: {exc}") from exc
+    index.reload()
+    from . import persistence as _persistence
+    _persistence.flush_async(f"delete page {rel_path}")
+    return _with_sync({"ok": True, "slug": slug, "rel_path": rel_path})
+
+
 @app.patch("/owner/page/{slug}/tier")
 def owner_patch_tier(slug: str, req: TierPatchRequest, _: Viewer = Depends(require_owner)) -> dict:
     new_tier = _validate_tier(req.tier)
     page = index.get(slug)
     if not page:
         raise HTTPException(status_code=404, detail=f"No page with slug {slug!r}")
+    sealed_tiers = set(index.sealing.tiers)
+    if (page.sealed and new_tier not in sealed_tiers) or (
+        not page.sealed and new_tier in sealed_tiers
+    ):
+        raise sealing.sealing_conflict(
+            "seal_boundary_crossing",
+            "Cannot cross the seal boundary with PATCH. Use a single PUT "
+            "that changes tier and content together.",
+        )
     target = settings.wiki_root / page.rel_path
     text = target.read_text(encoding="utf-8")
     new_text = _set_tier_in_frontmatter(text, new_tier)
@@ -2556,6 +2748,8 @@ def _set_tier_in_frontmatter(text: str, new_tier: str) -> str:
 @app.post("/owner/lint")
 def owner_lint(_: Viewer = Depends(require_owner)) -> dict:
     _refresh()
+    if index.sealing.enabled:
+        raise sealing.sealing_conflict("sealing_enabled", _SEALING_LLM_DISABLED)
     return lint_wiki()
 
 
@@ -2578,6 +2772,7 @@ def owner_start_lint_swarm(
     Returns a swarm_id immediately. The frontend polls
     /owner/lint/swarm/{swarm_id} for live worker progress + aggregated findings.
     """
+    _refuse_if_sealed()
     try:
         record = start_lint_swarm(workers=req.workers)
     except ValueError as exc:
@@ -2635,6 +2830,7 @@ async def owner_draft_missing_page(
     ``"direct-llm"`` so the UI knows there's nothing to poll — the
     page is already on disk by the time this returns.
     """
+    _refuse_if_sealed()
     try:
         job = start_draft_missing_page(
             proposed_title=req.proposed_title,
@@ -2696,6 +2892,7 @@ async def owner_draft_contradiction(
     """Draft a reconciliation page for a semantic-lint contradiction
     finding. Falls back to direct-LLM the same way
     ``/owner/lint/draft/missing-page`` does — see its docstring."""
+    _refuse_if_sealed()
     try:
         job = start_draft_contradiction(
             page_a=req.page_a,
@@ -2812,6 +3009,8 @@ def owner_raw_bulk(
     ambiguous state with half the batch processed and no clear retry path.
     Instead, each item gets its own ok/error status.
     """
+    if req.action == "reingest" and index.sealing.enabled:
+        raise sealing.sealing_conflict("sealing_enabled", _SEALING_LLM_DISABLED)
     results: list[dict] = []
     successes_for_persistence: list[str] = []
 
@@ -2906,6 +3105,8 @@ async def owner_reingest_raw(
     Returns a tracking ID when Puppetmaster starts, or a synchronous direct
     drafting result on hosted deployments where the binary is unavailable.
     """
+    if index.sealing.enabled:
+        raise sealing.sealing_conflict("sealing_enabled", _SEALING_LLM_DISABLED)
     full_rel = f"raw/{rel_path}" if not rel_path.startswith("raw/") else rel_path
     source_content = read_raw_file(full_rel)
     if source_content is None:

@@ -58,6 +58,12 @@ describe("preprocessWikilinks", () => {
     expect(out).toContain("/wiki/page/2026-05-20-postpone-series-a");
   });
 
+  it("resolves sealed wikilink targets via the decrypted titles map", () => {
+    const titles = new Map([["hidden notes", "s-deadbeefcafebabe"]]);
+    const out = preprocessWikilinks("See [[Hidden Notes]] please", titles);
+    expect(out).toBe("See [Hidden Notes](/wiki/page/s-deadbeefcafebabe) please");
+  });
+
   it("drops punctuation in titles while preserving readable display text", () => {
     const out = preprocessWikilinks("[[Provenance: Citations]]");
     // Display text keeps the colon, slug drops it.

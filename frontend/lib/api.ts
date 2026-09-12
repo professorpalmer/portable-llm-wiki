@@ -2,6 +2,9 @@
 // (configured in next.config.mjs) so we don't fight CORS during local dev.
 
 import { getShareToken } from "./shareToken";
+import { parseKeyring, type SealingKeyring } from "./sealing";
+
+export type { SealingKeyring };
 
 /**
  * Durability verdict the backend stamps on every content-create response so
@@ -29,6 +32,7 @@ export type PageSummary = {
   excerpt: string;
   word_count: number;
   rel_path: string;
+  sealed?: true;
 };
 
 export type PageFull = PageSummary & {
@@ -39,6 +43,15 @@ export type PageFull = PageSummary & {
   links_in: string[];
   links_out_resolved: { slug: string; title: string; section: string }[];
   links_in_resolved: { slug: string; title: string; section: string }[];
+  sealed?: true;
+  envelope?: string;
+};
+
+export type ManifestSealing = {
+  enabled: boolean;
+  tiers: string[];
+  keyring_url: string;
+  bundle_url: string;
 };
 
 export type Manifest = {
@@ -49,6 +62,7 @@ export type Manifest = {
   page_count: number;
   sections: Record<string, number>;
   pages: PageSummary[];
+  sealing?: ManifestSealing;
 };
 
 export type QueryRetrievalDebug = {
@@ -71,6 +85,7 @@ export type QueryResponse = {
   model: string | null;
   used_pages: string[];
   retrieval?: QueryRetrievalDebug;
+  sealed_excluded?: number;
 };
 
 export type SearchResponse = {
@@ -260,18 +275,98 @@ async function apiFetch(
   return fetch(input, { credentials: "include", ...init });
 }
 
-async function asJson<T>(res: Response): Promise<T> {
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function extractDetail(data: unknown): string | null {
+  if (!isRecord(data) || data.detail === undefined) return null;
+  if (typeof data.detail === "string") return data.detail;
+  if (isRecord(data.detail) && typeof data.detail.message === "string") {
+    return data.detail.message;
+  }
+  return null;
+}
+
+async function readOkJson(res: Response): Promise<unknown> {
   if (!res.ok) {
     let detail = res.statusText;
     try {
-      const data = (await res.json()) as { detail?: string };
-      if (data?.detail) detail = data.detail;
+      const data: unknown = await res.json();
+      detail = extractDetail(data) ?? detail;
     } catch {
       /* ignore */
     }
     throw new Error(`${res.status} ${detail}`);
   }
-  return (await res.json()) as T;
+  return res.json();
+}
+
+async function asJson<T>(res: Response): Promise<T> {
+  return (await readOkJson(res)) as T;
+}
+
+function requireString(v: unknown, field: string): string {
+  if (typeof v !== "string" || !v) {
+    throw new Error(`invalid ${field}`);
+  }
+  return v;
+}
+
+export function parseManifestSealing(raw: unknown): ManifestSealing {
+  if (!isRecord(raw)) throw new Error("invalid sealing");
+  if (typeof raw.enabled !== "boolean") throw new Error("invalid sealing");
+  if (!Array.isArray(raw.tiers) || !raw.tiers.every((t) => typeof t === "string")) {
+    throw new Error("invalid sealing tiers");
+  }
+  return {
+    enabled: raw.enabled && raw.tiers.length > 0,
+    tiers: raw.enabled ? raw.tiers : [],
+    keyring_url: requireString(raw.keyring_url, "keyring_url"),
+    bundle_url: requireString(raw.bundle_url, "bundle_url"),
+  };
+}
+
+function attachManifestSealing(raw: unknown): Manifest {
+  if (!isRecord(raw)) throw new Error("invalid manifest");
+  const base = raw as unknown as Manifest;
+  if (raw.sealing === undefined) {
+    const { sealing: _drop, ...rest } = base;
+    void _drop;
+    return rest;
+  }
+  return { ...base, sealing: parseManifestSealing(raw.sealing) };
+}
+
+export type SealedBundlePage = {
+  slug: string;
+  section: string;
+  tier: string;
+  updated: string;
+  envelope: string;
+};
+
+export type SealedBundle = {
+  pages: SealedBundlePage[];
+  count: number;
+};
+
+export function parseSealedBundle(raw: unknown): SealedBundle {
+  if (!isRecord(raw)) throw new Error("invalid sealed bundle");
+  if (!Array.isArray(raw.pages)) throw new Error("invalid sealed bundle pages");
+  const pages: SealedBundlePage[] = [];
+  for (const item of raw.pages) {
+    if (!isRecord(item)) throw new Error("invalid sealed bundle page");
+    pages.push({
+      slug: requireString(item.slug, "slug"),
+      section: requireString(item.section, "section"),
+      tier: requireString(item.tier, "tier"),
+      updated: typeof item.updated === "string" ? item.updated : "",
+      envelope: requireString(item.envelope, "envelope"),
+    });
+  }
+  const count = typeof raw.count === "number" ? raw.count : pages.length;
+  return { pages, count };
 }
 
 /**
@@ -285,12 +380,59 @@ export async function fetchManifest(
   tenant?: string,
   opts?: { asOwner?: boolean },
 ): Promise<Manifest> {
-  return asJson<Manifest>(
+  const raw = await readOkJson(
     await apiFetch(`${wikiBase(tenant)}/wiki/manifest.json`, {
       headers: opts?.asOwner ? ownerHeaders() : browseHeaders(undefined, tenant),
       cache: "no-store",
-    })
+    }),
   );
+  return attachManifestSealing(raw);
+}
+
+export async function fetchSealingKeyring(tenant?: string): Promise<SealingKeyring> {
+  const raw = await readOkJson(
+    await apiFetch(`${wikiBase(tenant)}/wiki/sealing`, {
+      headers: browseHeaders(undefined, tenant),
+      cache: "no-store",
+    }),
+  );
+  return parseKeyring(raw);
+}
+
+export async function fetchSealedBundle(tenant?: string): Promise<SealedBundle> {
+  const raw = await readOkJson(
+    await apiFetch(`${wikiBase(tenant)}/wiki/sealed/bundle`, {
+      headers: browseHeaders(undefined, tenant),
+      cache: "no-store",
+    }),
+  );
+  return parseSealedBundle(raw);
+}
+
+export async function ownerPutSealing(
+  input: { keyring: SealingKeyring; force: boolean },
+  tenant?: string,
+): Promise<{ ok: boolean }> {
+  const raw = await readOkJson(
+    await apiFetch(`${wikiBase(tenant)}/owner/sealing`, {
+      method: "PUT",
+      headers: ownerHeaders(),
+      body: JSON.stringify({ keyring: input.keyring, force: input.force }),
+    }),
+  );
+  if (!isRecord(raw)) return { ok: true };
+  return { ok: raw.ok !== false };
+}
+
+export async function ownerDeleteSealing(tenant?: string): Promise<{ ok: boolean }> {
+  const raw = await readOkJson(
+    await apiFetch(`${wikiBase(tenant)}/owner/sealing`, {
+      method: "DELETE",
+      headers: ownerHeaders(),
+    }),
+  );
+  if (!isRecord(raw)) return { ok: true };
+  return { ok: raw.ok !== false };
 }
 
 export async function fetchPage(slug: string, tenant?: string): Promise<PageFull> {
@@ -905,6 +1047,7 @@ export type ChatStreamEvent =
       citations: { slug: string; title: string }[];
       used_pages: string[];
       retrieval: ChatResponse["retrieval"];
+      sealed_excluded?: number;
     }
   | { type: "token"; text: string }
   | { type: "error"; message: string }
