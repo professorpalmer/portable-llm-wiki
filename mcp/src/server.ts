@@ -289,7 +289,7 @@ server.registerTool(
   {
     title: "Ingest a new source into the wiki (owner-only)",
     description:
-      "Owner-only. Probes owner capability BEFORE sending content (stdio has no browser cookies). Saves raw content under raw/<subdir>/YYYY-MM-DD-<slug>.md. Prefer the no-server-LLM flow: file with run_orchestrator=false (default) for provenance, draft pages from writeback_spec, then write_pages and append_to_page on log/index. run_orchestrator=true is the legacy path that runs the operator's server-side LLM and should only be used when the client cannot draft pages itself. On sealed wikis the server-side orchestrator is disabled (409). Reports raw_file vs orchestrator vs durable_sync separately — never claims graph pages are updated merely because a raw file was saved.",
+      "Owner-only. Probes owner capability BEFORE sending content (stdio has no browser cookies). Saves raw content under raw/<subdir>/YYYY-MM-DD-<slug>.md. Prefer the no-server-LLM flow: file with run_orchestrator=false (default) for provenance, draft pages from writeback_spec, then write_pages and append_to_page on log/index. run_orchestrator=true is the legacy path that runs the operator's server-side LLM (orchestrator job, or synchronous direct drafting on hosted backends) and should only be used when the client cannot draft pages itself. On sealed wikis the server-side orchestrator is disabled (409). Reports raw_file, graph pages, orchestrator, direct drafter, and durable sync separately; use ingest_job_status when a tracking_id is returned — never claims graph pages are updated merely because a raw file was saved.",
     inputSchema: {
       slug: z
         .string()
@@ -306,7 +306,7 @@ server.registerTool(
         .boolean()
         .optional()
         .describe(
-          "Legacy. If true, kick off the operator's server-side ingest orchestrator (costs their LLM tokens). Default false. Prefer write_pages after drafting locally. Graph updates from this flag only happen if/when that job completes."
+          "Legacy. If true, process the source with the operator's server-side ingest orchestrator or the hosted direct drafter fallback (costs their LLM tokens). Default false. Prefer write_pages after drafting locally. Graph updates from this flag only happen if/when that job completes."
         ),
     },
   },

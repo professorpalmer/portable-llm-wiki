@@ -456,6 +456,36 @@ def test_lint_409(client, owner_headers):
     assert r.json()["detail"]["code"] == "sealing_enabled"
 
 
+def test_reingest_single_and_bulk_409(client, owner_headers):
+    r = client.post(
+        "/owner/ingest",
+        headers=owner_headers,
+        json={"slug": "seal-reingest", "content": "hello", "run_orchestrator": False},
+    )
+    assert r.status_code == 201, r.text
+    rel_path = r.json()["rel_path"]
+    _enable(client, owner_headers)
+
+    r = client.post(f"/owner/raw/{rel_path}/reingest", headers=owner_headers)
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "sealing_enabled"
+
+    r = client.post(
+        "/owner/raw/bulk",
+        headers=owner_headers,
+        json={"rel_paths": [rel_path], "action": "reingest"},
+    )
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "sealing_enabled"
+
+    r = client.post(
+        "/owner/raw/bulk",
+        headers=owner_headers,
+        json={"rel_paths": [rel_path], "action": "delete"},
+    )
+    assert r.status_code == 200, r.text
+
+
 def test_structured_409_when_private_sealed(client, owner_headers):
     _enable(client, owner_headers, tiers=("private",))
     r = client.post(

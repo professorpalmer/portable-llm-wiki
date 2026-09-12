@@ -461,9 +461,9 @@ title matches.
 > on the same on-disk page format, so the user-facing wiki is
 > identical either way.
 
-`/owner/ingest` (and the capture endpoints with
-`run_orchestrator: true`) run the full Karpathy ingest pipeline
-server-side. Under the hood this shells out to:
+`/owner/ingest` and the capture endpoints process sources when
+`run_orchestrator: true`. Self-hosted deployments with Puppetmaster shell out
+to:
 
 ```bash
 puppetmaster cursor "<ingest goal>" --cwd $WIKI_ROOT --timeout-seconds 600
@@ -483,7 +483,8 @@ Endpoints:
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/owner/ingest` with `run_orchestrator: true` | save raw + kick off Puppetmaster Cursor agent |
+| POST | `/owner/ingest` with `run_orchestrator: true` | save raw + start Puppetmaster, or draft directly on hosted deployments |
+| POST | `/owner/raw/{path}/reingest` | reprocess an existing raw source through the same two execution paths |
 | GET | `/owner/jobs` | list all tracked Puppetmaster jobs |
 | GET | `/owner/jobs/{tracking_id}` | live status + log tail + Puppetmaster `status`/`show` output |
 
