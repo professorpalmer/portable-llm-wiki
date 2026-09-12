@@ -607,15 +607,15 @@ def _api_base_url() -> str:
     return f"{base}/api/backend"
 
 
-@app.get("/wiki/manifest.json")
-def manifest(viewer: Viewer = Depends(current_viewer)) -> dict:
+@app.get("/wiki/manifest.json", response_model=ManifestResponse)
+def manifest(viewer: Viewer = Depends(current_viewer)):
     _refresh()
     visible = index.visible_pages(viewer.tier)
     sections: dict[str, int] = {}
     for p in visible:
         sections[p.section] = sections.get(p.section, 0) + 1
     base = _api_base_url()
-    payload = ManifestResponse(
+    response = ManifestResponse(
         wiki_title=settings.wiki_root.name,
         generated_at=datetime.now(timezone.utc).isoformat(),
         viewer_tier=viewer.tier,
@@ -638,15 +638,17 @@ def manifest(viewer: Viewer = Depends(current_viewer)) -> dict:
             "endpoint with ?q=<terms>. To get a synthesized answer with "
             "citations, POST {\"question\": \"...\"} to the query endpoint."
         ),
-    ).model_dump()
-    if index.sealing.keyring is not None:
-        payload["sealing"] = {
-            "enabled": index.sealing.enabled,
-            "tiers": list(index.sealing.tiers),
-            "keyring_url": "/wiki/sealing",
-            "bundle_url": "/wiki/sealed/bundle",
-        }
-    return payload
+    )
+    if index.sealing.keyring is None:
+        return response
+    payload = response.model_dump(mode="json")
+    payload["sealing"] = {
+        "enabled": index.sealing.enabled,
+        "tiers": list(index.sealing.tiers),
+        "keyring_url": "/wiki/sealing",
+        "bundle_url": "/wiki/sealed/bundle",
+    }
+    return JSONResponse(payload)
 
 
 @app.get("/wiki/page/{slug}")
