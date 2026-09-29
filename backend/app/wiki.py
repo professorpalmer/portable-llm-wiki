@@ -12,7 +12,7 @@ import re
 import threading
 import time
 from collections import Counter, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
@@ -316,8 +316,11 @@ class WikiIndex:
         self._pages_by_slug: dict[str, Page] = {}
         self._slug_by_title: dict[str, str] = {}
         self._last_scan: float = 0.0
-        self._last_wiki_mtime: float = 0.0
         self._last_stale_check: float = 0.0
+        # path -> (mtime_ns, size) from the last scan; the stale signature.
+        self._file_sigs: dict[str, tuple[int, int]] = {}
+        # path -> (sig, parsed page before link resolution), reused while unchanged.
+        self._parsed: dict[str, tuple[tuple[int, int], Page]] = {}
         self.sealing: SealingState = SealingState(enabled=False, tiers=(), keyring=None)
 
     # ---------- public API ----------
@@ -327,34 +330,60 @@ class WikiIndex:
         return self._last_scan
 
     def reload_if_stale(self) -> None:
-        # Debounce the full-tree mtime scan: at most one walk per
-        # _STALE_CHECK_INTERVAL_S no matter the request rate. This is the
-        # difference between "feels instant under a traffic spike" and
-        # "stats the whole corpus on every page view".
+        # Debounce the tree scan: at most one walk per _STALE_CHECK_INTERVAL_S
+        # no matter the request rate. The per-file signature map catches
+        # edits, additions and deletions (a max-mtime missed deletions).
         now = time.monotonic()
         if now - self._last_stale_check < _STALE_CHECK_INTERVAL_S:
             return
         self._last_stale_check = now
-        latest = self._latest_mtime(settings.wiki_dir)
-        if latest > self._last_wiki_mtime:
-            self.reload()
+        sigs = self._scan()
+        if sigs != self._file_sigs:
+            self._rebuild(sigs, reuse_unchanged=True)
 
     def reload(self) -> None:
+        """Re-read every page (callers that just wrote files)."""
+        self._rebuild(self._scan(), reuse_unchanged=False)
+
+    def _scan(self) -> dict[str, tuple[int, int]]:
+        sigs: dict[str, tuple[int, int]] = {}
+        if settings.wiki_dir.exists():
+            for md_path in settings.wiki_dir.rglob("*.md"):
+                if md_path.name.startswith("."):
+                    continue
+                try:
+                    st = md_path.stat()
+                except OSError:
+                    continue
+                sigs[str(md_path)] = (st.st_mtime_ns, st.st_size)
+        return sigs
+
+    def _rebuild(self, sigs: dict[str, tuple[int, int]], *, reuse_unchanged: bool) -> None:
         with self._lock:
             pages: dict[str, Page] = {}
             titles: dict[str, str] = {}
+            parsed: dict[str, tuple[tuple[int, int], Page]] = {}
+            previous = {page.rel_path: page for page in self._pages_by_slug.values()}
 
-            if settings.wiki_dir.exists():
-                for md_path in settings.wiki_dir.rglob("*.md"):
-                    if md_path.name.startswith("."):
-                        continue
+            for path, sig in sigs.items():
+                cached = self._parsed.get(path) if reuse_unchanged else None
+                if cached is not None and cached[0] == sig:
+                    raw = cached[1]
+                else:
                     try:
-                        page = self._load_page(md_path)
+                        raw = self._load_page(Path(path))
                     except Exception as exc:  # noqa: BLE001
-                        print(f"[wiki] skipping {md_path}: {exc}")
+                        print(f"[wiki] skipping {path}: {exc}")
                         continue
-                    pages[page.slug] = page
-                    titles[page.title.lower()] = page.slug
+                    cached = None
+                parsed[path] = (sig, raw)
+                # Link resolution mutates links; keep the parsed page pristine.
+                page = replace(raw, links_out=list(raw.links_out), links_in=[])
+                prior = previous.get(raw.rel_path)
+                if cached is not None and prior is not None:
+                    page._search = prior._search
+                pages[page.slug] = page
+                titles[page.title.lower()] = page.slug
 
             resolver = LinkResolver(pages.values())
             for slug, page in pages.items():
@@ -373,8 +402,9 @@ class WikiIndex:
 
             self._pages_by_slug = pages
             self._slug_by_title = titles
+            self._parsed = parsed
+            self._file_sigs = sigs
             self._last_scan = datetime.now(timezone.utc).timestamp()
-            self._last_wiki_mtime = self._latest_mtime(settings.wiki_dir)
             self.sealing = load_state(settings.wiki_root)
 
     def all_pages(self) -> list[Page]:
@@ -624,18 +654,6 @@ class WikiIndex:
             mtime=md_path.stat().st_mtime,
         )
         return page
-
-    @staticmethod
-    def _latest_mtime(root: Path) -> float:
-        if not root.exists():
-            return 0.0
-        latest = 0.0
-        for p in root.rglob("*.md"):
-            try:
-                latest = max(latest, p.stat().st_mtime)
-            except OSError:
-                continue
-        return latest
 
 
 # ---------------------------------------------------------------------------
