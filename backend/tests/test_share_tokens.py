@@ -324,6 +324,8 @@ def test_resolve_writes_sidecar_not_identity_store(client, owner_headers, wiki_r
     assert identity.stat().st_mtime_ns == before_mtime
     assert after_bytes == before_bytes
 
+    # Hit counters are buffered in memory and flushed in batches.
+    share_tokens.flush_pending_hits()
     stats_path = Path(wiki_root) / ".share-token-stats.json"
     assert stats_path.exists()
     stats = json.loads(stats_path.read_text(encoding="utf-8"))
@@ -353,6 +355,7 @@ def test_resolve_increments_sidecar_hits(client, owner_headers, wiki_root):
     assert share_tokens.resolve(plaintext) == "friend"
     assert share_tokens.resolve(plaintext) == "friend"
     assert share_tokens.resolve(plaintext) == "friend"
+    share_tokens.flush_pending_hits()
 
     stats = json.loads(
         (Path(wiki_root) / ".share-token-stats.json").read_text(encoding="utf-8")
@@ -428,3 +431,28 @@ def _mint(client, owner_headers, label: str, tier: str) -> dict:
     )
     assert r.status_code == 201, r.text
     return r.json()
+
+
+def test_resolve_does_not_write_per_request(client, owner_headers, wiki_root, monkeypatch):
+    """Share-token auth runs on every request; its bookkeeping must be batched."""
+    from app import share_tokens
+
+    minted = _mint(client, owner_headers, "batched", "friend")
+    writes = []
+    real = share_tokens._save_stats
+    monkeypatch.setattr(share_tokens, "_save_stats", lambda *a, **k: writes.append(1) or real(*a, **k))
+    for _ in range(100):
+        assert share_tokens.resolve(minted["token"]) == "friend"
+    assert len(writes) <= 1
+    listed = [t for t in share_tokens.list_tokens() if t["id"] == minted["id"]][0]
+    assert listed["hits"] == 100
+
+
+def test_revoked_token_stops_resolving_despite_cache(client, owner_headers):
+    from app import share_tokens
+
+    minted = _mint(client, owner_headers, "revoke me", "friend")
+    assert share_tokens.resolve(minted["token"]) == "friend"
+    r = client.delete(f"/owner/share-tokens/{minted['id']}", headers=owner_headers)
+    assert r.status_code in (200, 204)
+    assert share_tokens.resolve(minted["token"]) is None

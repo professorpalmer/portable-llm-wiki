@@ -106,6 +106,12 @@ async def _lifespan(_app: FastAPI):
     if _observability.init_sentry():
         print("[observability] Sentry error tracking enabled", flush=True)
 
+    try:
+        from .orchestrator import reconcile_orphaned_jobs
+        reconcile_orphaned_jobs()
+    except Exception:  # noqa: BLE001 - bookkeeping must never block boot
+        pass
+
     if settings.single_tenant_mode:
         result = _persistence.bootstrap_on_startup()
         if result.get("enabled"):
@@ -155,6 +161,8 @@ async def _lifespan(_app: FastAPI):
         poll_task = None
     if poll_task is not None:
         poll_task.cancel()
+    from .share_tokens import flush_pending_hits
+    flush_pending_hits()
 
 
 async def _tenant_pull_poll_loop(_persistence) -> None:

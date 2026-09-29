@@ -226,3 +226,28 @@ def test_graph_listing_does_not_record_access(client, wiki_root):
     assert client.get("/wiki/graph").status_code == 200
     assert client.get("/wiki/graph/public-entity").status_code == 200
     assert not (wiki_root / ".page-access.json").exists()
+
+
+def test_unchanged_sidecar_is_parsed_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(importance, "settings", SimpleNamespace(wiki_root=tmp_path))
+    record_access(["alpha"])
+    parses = []
+    real = importance.json.loads
+    monkeypatch.setattr(importance.json, "loads", lambda text: parses.append(1) or real(text))
+    for _ in range(5):
+        assert load_access()["alpha"].hits == 1
+    assert len(parses) <= 1
+    record_access(["alpha"])
+    assert load_access()["alpha"].hits == 2
+
+
+def test_gitignore_is_checked_once_per_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(importance, "settings", SimpleNamespace(wiki_root=tmp_path))
+    record_access(["alpha"])
+    reads = []
+    real = importance.Path.read_text
+    monkeypatch.setattr(importance.Path, "read_text",
+                        lambda self, *a, **k: reads.append(self.name) or real(self, *a, **k))
+    for _ in range(5):
+        record_access(["alpha"])
+    assert ".gitignore" not in reads

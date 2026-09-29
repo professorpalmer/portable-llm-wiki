@@ -207,17 +207,29 @@ def _access_path() -> Path:
     return settings.wiki_root / ".page-access.json"
 
 
+# Wiki roots whose .gitignore already covers the sidecar in this process.
+_IGNORED_ROOTS: set[str] = set()
+# Sidecar path -> (stat signature, parsed map). Search reads the sidecar on
+# every chat turn; re-parse only when the file actually changed.
+_READ_CACHE: dict[str, tuple[tuple, dict[str, dict]]] = {}
+_READ_CACHE_MAX = 64
+
+
 def _ensure_sidecar_ignored() -> None:
     """Append .page-access.json to the wiki-root gitignore if missing.
 
     Hosted bootstrap also writes this via persistence._ensure_tenant_gitignore.
     Query-path writes still have to cover existing clones that never re-bootstrap.
     """
+    root = str(settings.wiki_root)
+    if root in _IGNORED_ROOTS:
+        return
     try:
         gi = settings.wiki_root / ".gitignore"
         existing = gi.read_text(encoding="utf-8") if gi.exists() else ""
         rules = {line.strip() for line in existing.splitlines()}
         if ".page-access.json" in rules:
+            _IGNORED_ROOTS.add(root)
             return
         addendum = (
             ("\n" if existing and not existing.endswith("\n") else "")
@@ -225,14 +237,22 @@ def _ensure_sidecar_ignored() -> None:
             + ".page-access.json\n"
         )
         gi.write_text(existing + addendum, encoding="utf-8")
+        _IGNORED_ROOTS.add(root)
     except OSError:
         return
 
 
 def _read_raw() -> dict[str, dict]:
+    """The sidecar map (a fresh top-level dict; callers replace entries, never mutate them)."""
     path = _access_path()
-    if not path.exists():
+    try:
+        st = path.stat()
+    except OSError:
         return {}
+    sig = (st.st_mtime_ns, st.st_size, st.st_ino)
+    cached = _READ_CACHE.get(str(path))
+    if cached is not None and cached[0] == sig:
+        return dict(cached[1])
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, TypeError):
@@ -243,7 +263,10 @@ def _read_raw() -> dict[str, dict]:
     for key, val in raw.items():
         if isinstance(val, dict):
             out[str(key)] = val
-    return out
+    if len(_READ_CACHE) >= _READ_CACHE_MAX:
+        _READ_CACHE.clear()
+    _READ_CACHE[str(path)] = (sig, out)
+    return dict(out)
 
 
 def _write_raw(data: dict[str, dict]) -> None:
