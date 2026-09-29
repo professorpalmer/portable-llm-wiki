@@ -106,6 +106,12 @@ async def _lifespan(_app: FastAPI):
     if _observability.init_sentry():
         print("[observability] Sentry error tracking enabled", flush=True)
 
+    try:
+        from .orchestrator import reconcile_orphaned_jobs
+        reconcile_orphaned_jobs()
+    except Exception:  # noqa: BLE001 - bookkeeping must never block boot
+        pass
+
     if settings.single_tenant_mode:
         result = _persistence.bootstrap_on_startup()
         if result.get("enabled"):

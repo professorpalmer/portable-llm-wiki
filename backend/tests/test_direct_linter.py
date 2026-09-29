@@ -98,6 +98,9 @@ def fresh_app(tmp_path, monkeypatch):
     importlib.reload(app.orchestrator)
     importlib.reload(app.lint_swarm)
     importlib.reload(app.direct_linter)
+    # Reloading resets these to the backend's real runtime files.
+    monkeypatch.setattr(app.orchestrator, "JOBS_FILE", tmp_path / ".jobs.json")
+    monkeypatch.setattr(app.lint_swarm, "SWARMS_FILE", tmp_path / ".lint-swarms.json")
 
     return {
         "wiki_root": wiki_root,
@@ -289,6 +292,7 @@ def test_lint_swarm_errors_clearly_when_neither_puppetmaster_nor_llm_key(
     importlib.reload(app.config)
     importlib.reload(app.direct_linter)
     importlib.reload(app.lint_swarm)
+    monkeypatch.setattr(app.lint_swarm, "SWARMS_FILE", fresh_app["wiki_root"].parent / ".lint-swarms.json")
 
     with pytest.raises(RuntimeError) as exc_info:
         app.lint_swarm.start_lint_swarm(workers=["contradictions"])

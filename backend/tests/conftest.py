@@ -252,3 +252,19 @@ def _reset_page_access(wiki_root: Path):
     for candidate in (path, tmp):
         if candidate.exists():
             candidate.unlink()
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _isolate_job_registries():
+    """Keep tests off the backend's real runtime job files.
+
+    The app lifespan reconciles .jobs.json at startup, so a TestClient must
+    never see the developer's own job history.
+    """
+    from app import lint_swarm, orchestrator
+
+    saved = (orchestrator.JOBS_FILE, lint_swarm.SWARMS_FILE)
+    orchestrator.JOBS_FILE = SESSION_TMP / ".jobs.json"
+    lint_swarm.SWARMS_FILE = SESSION_TMP / ".lint-swarms.json"
+    yield
+    orchestrator.JOBS_FILE, lint_swarm.SWARMS_FILE = saved

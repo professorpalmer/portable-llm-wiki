@@ -243,21 +243,74 @@ class TrackedJob:
 _lock = threading.RLock()
 
 
+# Settled jobs kept in .jobs.json; running ones are always kept. Every job
+# poll parses the file, so it must not grow with every ingest ever run.
+JOBS_HISTORY_CAP = 200
+# (stat signature, parsed rows): polls re-parse only after a write.
+_jobs_cache: Optional[tuple[tuple, dict]] = None
+
+
 def _load_jobs() -> dict[str, TrackedJob]:
-    if not JOBS_FILE.exists():
-        return {}
+    global _jobs_cache
     try:
-        data = json.loads(JOBS_FILE.read_text(encoding="utf-8"))
-        return {k: TrackedJob(**v) for k, v in data.items()}
+        st = JOBS_FILE.stat()
+    except OSError:
+        return {}
+    sig = (st.st_mtime_ns, st.st_size, st.st_ino)
+    if _jobs_cache is None or _jobs_cache[0] != sig:
+        try:
+            data = json.loads(JOBS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        _jobs_cache = (sig, data)
+    try:
+        return {k: TrackedJob(**v) for k, v in _jobs_cache[1].items()}
     except Exception:
         return {}
 
 
 def _save_jobs(jobs: dict[str, TrackedJob]) -> None:
-    JOBS_FILE.write_text(
-        json.dumps({k: v.to_dict() for k, v in jobs.items()}, indent=2),
-        encoding="utf-8",
-    )
+    settled = sorted((j for j in jobs.values() if j.status != "running"),
+                     key=lambda j: j.started_at or "")
+    dropped = {j.tracking_id for j in settled[:-JOBS_HISTORY_CAP]} if len(settled) > JOBS_HISTORY_CAP else set()
+    body = json.dumps({k: v.to_dict() for k, v in jobs.items() if k not in dropped}, indent=2)
+    tmp = JOBS_FILE.with_suffix(".json.tmp")
+    tmp.write_text(body, encoding="utf-8")
+    os.replace(tmp, JOBS_FILE)
+
+
+def _pid_alive(pid: Optional[int]) -> bool:
+    if not pid or pid <= 0:
+        return False
+    if os.name == "nt":
+        return True  # no safe liveness probe here; leave the record alone
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def reconcile_orphaned_jobs() -> int:
+    """At startup, settle jobs whose worker died with a previous backend.
+
+    Without this a job interrupted by a restart stayed "running" forever.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        jobs = _load_jobs()
+        stale = [j for j in jobs.values() if j.status == "running" and not _pid_alive(j.pid)]
+        for job in stale:
+            job.status = "error"
+            job.ended_at = now
+            job.summary = "Interrupted: the wiki backend stopped before this job finished."
+        if stale:
+            _save_jobs(jobs)
+    return len(stale)
 
 
 def _update(tracking_id: str, **fields) -> None:
