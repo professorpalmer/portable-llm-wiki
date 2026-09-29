@@ -442,6 +442,7 @@ class WikiIndex:
             p = self._pages_by_slug.get(s)
             return p is not None and TIER_ORDER[p.tier] <= viewer_rank
 
+        anchor_set = set(anchors)  # membership per node: a list made full_graph O(N^2)
         included: set[str] = set(a for a in anchors if visible(a))
         frontier: deque[tuple[str, int]] = deque((a, 0) for a in included)
         while frontier:
@@ -468,7 +469,7 @@ class WikiIndex:
                     "title": p.title,
                     "section": p.section,
                     "tier": p.tier,
-                    "is_anchor": s in anchors,
+                    "is_anchor": s in anchor_set,
                     "degree": len(p.links_out) + len(p.links_in),
                 }
             )
@@ -478,7 +479,7 @@ class WikiIndex:
                     if key not in seen_edge:
                         seen_edge.add(key)
                         edges.append({"source": p.slug, "target": tgt})
-        return {"nodes": nodes, "edges": edges, "anchors": list(included & set(anchors))}
+        return {"nodes": nodes, "edges": edges, "anchors": list(included & anchor_set)}
 
     def full_graph(self, viewer_tier: str) -> dict:
         return self.subgraph(
