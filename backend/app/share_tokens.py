@@ -48,6 +48,7 @@ import json
 import os
 import secrets
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -65,6 +66,62 @@ def _store_path() -> Path:
 
 def _stats_path() -> Path:
     return settings.wiki_root / ".share-token-stats.json"
+
+
+# resolve() runs on every request that carries a share token (Marionette sends
+# one on each chat-turn search). Keep it off the disk: the identity store is
+# cached by stat signature, and hit counters accumulate in memory and flush at
+# most every _HIT_FLUSH_S (and before anything that reads or edits tokens).
+_HIT_FLUSH_S = 30.0
+_IDENTITY_CACHE: dict[str, tuple[tuple, list[dict]]] = {}
+_PENDING_HITS: dict[str, dict[str, dict]] = {}
+_LAST_FLUSH: dict[str, float] = {}
+
+
+def _identity_raw(path: Path) -> list[dict]:
+    try:
+        st = path.stat()
+    except OSError:
+        return []
+    sig = (st.st_mtime_ns, st.st_size, st.st_ino)
+    cached = _IDENTITY_CACHE.get(str(path))
+    if cached is not None and cached[0] == sig:
+        return cached[1]
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        tokens = [t for t in raw.get("tokens", []) if isinstance(t, dict)]
+    except (OSError, json.JSONDecodeError, TypeError, AttributeError):
+        return []
+    if len(_IDENTITY_CACHE) >= 64:
+        _IDENTITY_CACHE.clear()
+    _IDENTITY_CACHE[str(path)] = (sig, tokens)
+    return tokens
+
+
+def _flush_hits_locked(stats_path: Optional[Path] = None) -> None:
+    """Write pending hit counters for one stats file (lock held). Never raises."""
+    path = stats_path or _stats_path()
+    pending = _PENDING_HITS.pop(str(path), None)
+    _LAST_FLUSH[str(path)] = time.monotonic()
+    if not pending:
+        return
+    try:
+        stats = _load_stats(path)
+        for tid, delta in pending.items():
+            entry = stats.get(tid, {"hits": 0, "last_used_at": None})
+            entry["hits"] = int(entry.get("hits") or 0) + delta["hits"]
+            entry["last_used_at"] = delta["last_used_at"]
+            stats[tid] = entry
+        _save_stats(stats, path)
+    except OSError:
+        return
+
+
+def flush_pending_hits() -> None:
+    """Persist every buffered hit counter (shutdown hook)."""
+    with _LOCK:
+        for path in list(_PENDING_HITS):
+            _flush_hits_locked(Path(path))
 
 
 def _hash(token: str) -> str:
@@ -115,8 +172,8 @@ class ShareToken:
         }
 
 
-def _load_stats() -> dict[str, dict]:
-    p = _stats_path()
+def _load_stats(path: Optional[Path] = None) -> dict[str, dict]:
+    p = path or _stats_path()
     if not p.exists():
         return {}
     try:
@@ -132,8 +189,8 @@ def _load_stats() -> dict[str, dict]:
         return {}
 
 
-def _save_stats(stats: dict[str, dict]) -> None:
-    p = _stats_path()
+def _save_stats(stats: dict[str, dict], path: Optional[Path] = None) -> None:
+    p = path or _stats_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(stats, indent=2), encoding="utf-8")
@@ -185,6 +242,8 @@ def _migrate_legacy_hits_to_sidecar(
 
 
 def _load() -> list[ShareToken]:
+    # Listings and edits see exact counters (lock is held by every caller).
+    _flush_hits_locked()
     p = _store_path()
     if not p.exists():
         return []
@@ -300,24 +359,25 @@ def resolve(token: str) -> Optional[str]:
     target_hash = _hash(token)
     now = datetime.now(timezone.utc)
     with _LOCK:
-        tokens = _load()
-        for t in tokens:
-            if not hmac.compare_digest(t.token_hash, target_hash):
+        for raw in _identity_raw(_store_path()):
+            if not hmac.compare_digest(str(raw.get("token_hash", "")), target_hash):
                 continue
-            if t.revoked_at is not None:
+            if raw.get("revoked_at") is not None:
                 return None
-            if t.expires_at:
+            expires_at = raw.get("expires_at")
+            if expires_at:
                 try:
-                    exp = datetime.fromisoformat(t.expires_at)
+                    exp = datetime.fromisoformat(expires_at)
                     if exp < now:
                         return None
                 except ValueError:
                     pass
-            stats = _load_stats()
-            entry = stats.get(t.id, {"hits": 0, "last_used_at": None})
-            entry["hits"] = int(entry.get("hits") or 0) + 1
+            stats_key = str(_stats_path())
+            pending = _PENDING_HITS.setdefault(stats_key, {})
+            entry = pending.setdefault(str(raw.get("id", "")), {"hits": 0, "last_used_at": None})
+            entry["hits"] += 1
             entry["last_used_at"] = now.isoformat()
-            stats[t.id] = entry
-            _save_stats(stats)
-            return t.tier
+            if time.monotonic() - _LAST_FLUSH.get(stats_key, 0.0) >= _HIT_FLUSH_S:
+                _flush_hits_locked()
+            return str(raw.get("tier", ""))
     return None

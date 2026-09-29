@@ -155,6 +155,8 @@ async def _lifespan(_app: FastAPI):
         poll_task = None
     if poll_task is not None:
         poll_task.cancel()
+    from .share_tokens import flush_pending_hits
+    flush_pending_hits()
 
 
 async def _tenant_pull_poll_loop(_persistence) -> None:
