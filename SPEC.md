@@ -341,6 +341,7 @@ Query parameters:
 |---|---|---|---|---|
 | `q` | string | yes |. | The query. MUST be non-empty (servers MAY return `422` on empty). |
 | `limit` | integer | no | `25` | *(added in 1.0.1)* Maximum results to return. Servers MUST clamp to a reasonable upper bound (the reference implementation accepts `[1, 100]`; larger values return `422`). |
+| `hydrate` | integer | no | `0` | Include `body` (as `/wiki/page/{slug}` returns it) on the top `hydrate` results, so a client that searches and then reads the best hit needs one round trip. The reference implementation accepts `[0, 3]`. Servers that ignore it return summaries only; clients MUST fall back to `/wiki/page/{slug}`. |
 
 Response:
 
