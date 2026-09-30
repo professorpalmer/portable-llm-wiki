@@ -6,6 +6,13 @@ itself is versioned separately. See [SPEC.md](./SPEC.md).
 Format roughly follows [Keep a Changelog](https://keepachangelog.com),
 ordered newest-first.
 
+## Unreleased
+
+- **`/wiki/search?hydrate=N`** returns the `body` of the top N hits (0-3).
+  Clients that ground a chat turn by searching and then reading the top page
+  (Marionette) save a serial round trip, about 300 ms against the hosted API.
+  Optional and backward compatible.
+
 ## 0.3.0. Sealed tiers and session-LLM write tools
 
 Backend **0.3.0**, MCP connector **0.3.0**.
