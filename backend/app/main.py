@@ -707,19 +707,34 @@ def search(
             "/wiki/manifest.json to enumerate pages."
         ),
     ),
+    hydrate: int = Query(
+        0,
+        ge=0,
+        le=3,
+        description=(
+            "Include the full `body` of the top N results, as /wiki/page/{slug} "
+            "returns it, so a client that searches and then reads the best hit "
+            "needs one round trip instead of two."
+        ),
+    ),
     viewer: Viewer = Depends(current_viewer),
 ) -> dict:
     _refresh()
     matches = index.keyword_search(q, viewer_tier=viewer.tier, limit=limit)
     base = _api_base_url()
+    results = []
+    for rank, (page, score) in enumerate(matches):
+        hit = {**page.to_summary(base_url=base), "score": round(score, 2)}
+        if rank < hydrate:
+            hit["body"] = page.to_full(base_url=base)["body"]
+        results.append(hit)
+    if hydrate and matches:
+        record_access(tuple(page.slug for page, _score in matches[:hydrate]))
     return {
         "query": q,
         "limit": limit,
         "viewer_tier": viewer.tier,
-        "results": [
-            {**page.to_summary(base_url=base), "score": round(score, 2)}
-            for page, score in matches
-        ],
+        "results": results,
     }
 
 

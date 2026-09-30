@@ -190,3 +190,29 @@ def test_reingest_endpoint_reports_direct_fallback_when_orchestrator_missing(
     body = r.json()
     assert "puppetmaster" in body["orchestrator"]["error"].lower()
     assert body["drafted"]["kind"] == "no_llm_configured"
+
+
+# ---------------------------------------------------------------------------
+# /wiki/search ?hydrate=
+# ---------------------------------------------------------------------------
+
+
+def test_search_hydrate_returns_top_bodies_in_one_round_trip(client, owner_headers):
+    """Grounding clients (Marionette) search, then read the top page: two
+    serial round trips before every chat turn. ?hydrate=N returns the body
+    of the top N hits, the same body /wiki/page/{slug} returns."""
+    plain = client.get("/wiki/search?q=secret", headers=owner_headers).json()["results"]
+    assert plain and all("body" not in hit for hit in plain)
+    hits = client.get("/wiki/search?q=secret&hydrate=1", headers=owner_headers).json()["results"]
+    top = client.get(f"/wiki/page/{hits[0]['slug']}", headers=owner_headers).json()
+    assert hits[0]["body"] == top["body"]
+    assert all("body" not in hit for hit in hits[1:])
+
+
+def test_search_hydrate_never_widens_visibility(client):
+    hits = client.get("/wiki/search?q=secret&hydrate=3").json()["results"]
+    assert "private-entity" not in {hit["slug"] for hit in hits}
+
+
+def test_search_hydrate_is_bounded(client):
+    assert client.get("/wiki/search?q=a&hydrate=4").status_code == 422
