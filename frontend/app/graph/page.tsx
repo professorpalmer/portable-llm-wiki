@@ -9,6 +9,7 @@ import {
   type GraphResponse,
   type GraphNode,
 } from "@/lib/api";
+import { createOutlierTetherForce } from "@/lib/graphComponents";
 import {
   captureCamera,
   fitForceGraphCamera,
@@ -245,6 +246,7 @@ export default function GraphPage() {
     if (linkF) linkF.distance(90).strength(0.4);
     const chargeF = fg.d3Force("charge");
     if (chargeF) chargeF.strength(-420).distanceMax(600);
+    fg.d3Force("outlierTether", createOutlierTetherForce());
     // Inject a collision force keyed to node radius so nodes don't overlap.
     import("d3-force").then(({ forceCollide }) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
