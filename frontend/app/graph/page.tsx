@@ -296,7 +296,7 @@ export default function GraphPage() {
         </div>
       )}
 
-      {!isOwner && graph && (
+      {!isOwner && viewerTier === "public" && graph && (
         <div className="mt-4 p-3 rounded border border-paper-soft bg-paper-soft/50 text-ink text-sm flex items-baseline gap-3 flex-wrap">
           <span className="font-semibold">Public view.</span>
           <span className="text-ink-muted leading-relaxed">
